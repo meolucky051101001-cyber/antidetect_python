@@ -2,7 +2,7 @@
 
 Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, can thiệp dấu vân tay qua Chrome DevTools Protocol (CDP), hỗ trợ proxy xác thực và dashboard local.
 
-> **Trạng thái 2026-10-23:** bản hardening sau review độc lập, đã triển khai S1–S9 (host RAM/screen, native WebGL limits, deviceMemory/Client Hints, canvas gate, worker/iframe CDP, bỏ Proxy `toString`). CreepJS stealth `0%`, leak audit no-proxy không lộ private/WebRTC. Đã test proxy HTTP thật: browser IP đi đúng egress proxy và WebRTC không còn lộ IP host sau khi thêm `--webrtc-ip-handling-policy` (Chrome 155); DNS resolver Google vẫn lệch ASN với egress proxy nên full DNS là `FAIL`/cần review thủ công. **Chưa phải sản phẩm production-grade**; xem [FIXES.md](FIXES.md), [docs/VERIFICATION_2026-10-23.md](docs/VERIFICATION_2026-10-23.md) và [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+> **Trạng thái 2026-10-23:** bản hardening sau review độc lập, đã triển khai S1–S9 (host RAM/screen, native WebGL limits, deviceMemory/Client Hints, canvas gate, worker/iframe CDP, bỏ Proxy `toString`). CreepJS stealth `0%`, leak audit no-proxy không lộ private/WebRTC. Đã test proxy HTTP thật: **Proxy 1 full audit `PASS`** (browser IP/WebRTC sạch + DNS `CLEAN`, resolver VNPT khớp egress); Proxy 2 chỉ `PASS` IP/WebRTC, DNS Google vẫn lệch ASN với egress Viettel. **Chưa phải sản phẩm production-grade**; xem [FIXES.md](FIXES.md), [docs/VERIFICATION_2026-10-23.md](docs/VERIFICATION_2026-10-23.md) và [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ---
 
@@ -169,9 +169,8 @@ Kết quả chạy thật ngày **2026-10-23** trên profile tạm `Audit Smoke`
 
 - IP/WebRTC no-proxy (`--no-dns`): `PASS`; browser IP trùng host direct IP, WebRTC không lộ private IP, chỉ có mDNS host candidate.
 - Full leak + DNS no-proxy: `WARN`; bash.ws báo `DNS may be leaking` với ASN `AS45903 CMC Telecom Infrastructure Company` (internet access) và `AS15169 Google LLC` (DNS). Đây là bất nhất DNS của phiên không proxy, không phải bằng chứng rò rỉ proxy.
-- Proxy HTTP `113.160.166.27:46787` (egress `117.0.181.67`, Viettel `AS7552`): trước khi sửa, WebRTC trả srflx `101.99.15.74` là IP thật của host. Sau khi thêm `--webrtc-ip-handling-policy=disable_non_proxied_udp`, `leak_audit.py --no-dns --strict` trả `PASS` — browser IP đi proxy, không còn public/local WebRTC candidate.
-- Proxy HTTP #1 `160.250.166.89:23951` trả `407 Proxy Authentication Required` với đúng credential đã cấp; cần kiểm tra lại mật khẩu hoặc whitelist IP.
-- Full DNS qua proxy vẫn `FAIL`/cần review: bash.ws thấy resolver Google `AS15169` lệch egress Viettel `AS7552`. HTTP proxy resolve hostname phía proxy và Chrome DoH dùng Google, nên đây là lệch ASN resolver, không phải bằng chứng DNS đi thẳng từ ISP nội bộ. Muốn DNS khớp proxy cần SOCKS5 remote DNS hoặc proxy có DNS riêng.
+- Proxy HTTP #1 `160.250.166.89:23951` (egress VNPT `AS45899`, Hà Nội): sau khi sửa đúng case username, `leak_audit.py --dns --strict` trả **PASS** — browser IP đi proxy, WebRTC không còn public/local candidate, bash.ws báo `DNS is not leaking`, resolver VNPT `AS45899` khớp egress. Đây là **full pass** cho Proxy 1.
+- Proxy HTTP #2 `113.160.166.27:46787` (egress `117.0.181.67`, Viettel `AS7552`): trước khi sửa, WebRTC trả srflx `101.99.15.74` là IP thật của host. Sau khi thêm `--webrtc-ip-handling-policy=disable_non_proxied_udp`, `leak_audit.py --no-dns --strict` trả `PASS`; full DNS vẫn `FAIL/review` vì resolver Google `AS15169` lệch egress Viettel. Endpoint mới `27.76.87.148:46787` trong ảnh không kết nối được.
 - Detector smoke `https://example.com`: `PASS`.
 - Detector baseline: `WARN`; CreepJS báo `31% like headless`, `0% headless`, `0% stealth` (clean Chrome cùng máy: `25% like headless`); Pixelscan thay đổi giữa các lần (`consistent`/`inconsistent`, `No masking detected`/`masking detected`) nhưng luôn `No automated behavior detected`; BrowserLeaks Canvas uniqueness `100%`; WebGL unmasked theo profile, limits native của host; Client Hints gửi `Sec-CH-Device-Memory: 16`, khớp `navigator.deviceMemory: 16`.
 - **Sự cố dữ liệu thật trong lúc test:** `conftest.py` cũ để test hardening ghi nhầm vào `data/profiles.json` và `data/secrets.dpapi`. Đã phát hiện, backup toàn bộ trạng thái, khôi phục `profiles.json` (SHA256 `EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B`) và `secrets.dpapi` từ ZIP delivery 2026-10-22; 7 profile và secret Profile 1 đã kiểm tra lại. Đã sửa isolation ở `conftest.py`, `test_audit_tools.py` và `run_all_tests.py`; chạy lại pytest **không làm đổi hash** hai file thật.
@@ -212,7 +211,8 @@ Kết quả đã chạy ngày **2026-10-23**:
 | Chrome E2E thật | `verify_live.py` **34/34 PASS**; `configuration_verified=true`; runtime state + port thật |
 | CreepJS | `0% stealth`, `0% headless`; `31% like headless` (clean Chrome 25%) |
 | Leak no-proxy | `--no-dns --strict`: **PASS**; không private/WebRTC leak. Full DNS: `WARN` do không proxy |
-| Leak proxy HTTP | `--no-dns --strict`: **PASS** — egress `117.0.181.67`, WebRTC sạch sau fix. Full DNS: **FAIL/review** — resolver Google lệch ASN với egress Viettel |
+| Leak proxy HTTP #1 | `--dns --strict`: **PASS** — egress VNPT `113.185.48.131`/`113.185.44.5`, WebRTC sạch, DNS `CLEAN` AS45899 |
+| Leak proxy HTTP #2 | `--no-dns --strict`: **PASS** — egress `117.0.181.67`, WebRTC sạch. Full DNS: **FAIL/review** — resolver Google lệch ASN egress Viettel |
 | Cross-process stop | `cli.py stop-all` dừng Chrome, runtime file về `{}`, PID không còn trong tasklist |
 | Server stop | `python -m antidetect.server_control stop` trả exit 0 qua API |
 | UI local | `/static/vendor/tailwind.js` và lucide trả 200; CSP không còn host CDN; Tailwind/Lucide hoạt động |
@@ -271,7 +271,7 @@ antidetect_python/
 - Audit/probe mới (`tools/verify_live.py`, `tools/leak_audit.py`, `tools/detector_audit.py`) dùng `BrowserLauncher` + CDP thật; `audit_fingerprint.py` cũ vẫn dùng Playwright `add_init_script`. Không có harness nào thay thế kiểm thử trên nhiều GPU/proxy/phiên bản Chrome.
 - Baseline detector mới chạy **một profile tạm, một GPU, không proxy**; Pixelscan thay đổi giữa các lần, kết quả `WARN` không phải chứng nhận vượt detector.
 - WebGPU mới che adapter info; features/limits/device vẫn do GPU host quyết định.
-- Đã test E2E IP/WebRTC qua **một** proxy HTTP thật; kết quả `PASS` sau khi thêm `--webrtc-ip-handling-policy`. DNS qua proxy vẫn `FAIL/review` vì resolver Google lệch ASN với egress Viettel; chưa test SOCKS5. DNS bash.ws là best-effort.
+- Đã test E2E IP/WebRTC + full DNS qua **Proxy 1** HTTP thật: **PASS**, resolver VNPT khớp egress; WebRTC sạch sau khi thêm `--webrtc-ip-handling-policy`. Proxy 2 (Viettel) chỉ PASS IP/WebRTC, DNS vẫn `FAIL/review` do resolver Google lệch ASN; endpoint mới `27.76.87.148:46787` không kết nối được. Chưa test SOCKS5; DNS bash.ws là best-effort.
 - **Không phân phối ZIP `ANTIDETECT_COMPLETE_DELIVERY_2026-10-22.zip`** (186 MB) vì ZIP đó chứa `data/profiles/` và dữ liệu người dùng. Bản code sạch để giao là `exports/ANTIDETECT_CODE_2026-10-23.zip`, chỉ gồm source/docs/tests.
 - Chưa hỗ trợ Firefox; giả lập macOS/Linux trên host Windows vẫn là thực nghiệm; TLS/JA3/JA4 không thay đổi được bằng CDP.
 

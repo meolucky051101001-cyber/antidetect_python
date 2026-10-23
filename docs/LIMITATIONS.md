@@ -51,25 +51,29 @@ cam kết vượt mọi detector.
   - browser public IP trùng host direct IP;
   - WebRTC không trả private/local address, host candidate ở dạng mDNS;
   - WebRTC public candidate trùng IP public của browser.
-- Audit ngày 2026-10-23 trên profile tạm **có proxy HTTP thật**
-  (`113.160.166.27:46787`, egress `117.0.181.67`, Viettel `AS7552`):
-  - trước khi thêm `--webrtc-ip-handling-policy`, Chrome 155 vẫn phát sinh ICE
-    srflx trỏ thẳng IP public của host (`101.99.15.74`) dù đã có
-    `--force-webrtc-ip-handling-policy`;
-  - sau khi thêm cờ thứ hai, `tools/leak_audit.py --no-dns --strict` trả
-    `PASS`: browser public IP là IP proxy, WebRTC không còn public/local
-    candidate;
+- Audit ngày 2026-10-23 trên profile tạm **có Proxy 1 HTTP**
+  (`160.250.166.89:23951`, egress/resolver VNPT `AS45899`):
+  - trước đó proxy trả 407 do username sai case; sau khi sửa đúng case, kết nối
+    HTTP 200;
+  - `tools/leak_audit.py --dns --strict` trả **PASS**: browser public IP là IP
+    proxy (`113.185.48.131`/`113.185.44.5`), WebRTC không còn public/local
+    candidate, DNS `CLEAN`, resolver VNPT `AS45899` khớp egress;
   - trade-off: WebRTC không còn ICE candidate (SDP chỉ còn `c=IN IP4 0.0.0.0`),
     trang có thể nhận ra WebRTC bị chặn; không thể dùng WebRTC thật qua HTTP
     proxy nếu vẫn muốn chặn UDP đi thẳng.
-  - DNS bash.ws vẫn báo `LEAK` vì resolver là Google (`AS15169`) trong khi
-    egress là Viettel (`AS7552`). HTTP proxy thường resolve hostname ở phía
-    proxy và Chrome DoH dùng Google, nên đây là **lệch ASN resolver**, chưa đủ
-    bằng chứng DNS truy vấn đi thẳng từ ISP nội bộ. Muốn DNS ASN khớp proxy
-    cần SOCKS5 remote DNS hoặc proxy có DNS riêng.
-- Proxy HTTP `160.250.166.89:23951` trong ảnh người dùng trả
-  `407 Proxy Authentication Required` với đúng username/password đã cung cấp
-  (có thể sai mật khẩu, whitelist IP hoặc proxy chưa mở), nên chưa thể audit.
+- Audit trên **Proxy 2** (`113.160.166.27:46787`, egress `117.0.181.67`, Viettel
+  `AS7552`):
+  - trước khi thêm `--webrtc-ip-handling-policy`, Chrome 155 vẫn phát sinh ICE
+    srflx trỏ thẳng IP public của host (`101.99.15.74`) dù đã có
+    `--force-webrtc-ip-handling-policy`;
+  - sau khi thêm cờ thứ hai, `--no-dns --strict` **PASS**; browser public IP là
+    IP proxy, WebRTC sạch;
+  - DNS bash.ws vẫn báo `LEAK` vì resolver Google (`AS15169`) trong khi egress là
+    Viettel (`AS7552`). Đây là **lệch ASN resolver** phụ thuộc nhà cung cấp
+    proxy, không phải bằng chứng DNS đi thẳng từ ISP nội bộ; muốn khớp ASN cần
+    SOCKS5 remote DNS hoặc proxy có DNS riêng.
+- Endpoint mới `27.76.87.148:46787` trong ảnh không kết nối được (timeout), nên
+  chưa audit.
 - `leak_audit.py` phân loại `0.0.0.0`/`::` là `unspecified`, không còn fail nhầm
   thành local leak khi policy WebRTC chặn hết candidate.
 - `leak_audit.py` so sánh cả danh sách IPv4/IPv6 nếu endpoint trả về, nhưng

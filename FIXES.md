@@ -16,10 +16,10 @@ hoặc vượt qua mọi hệ thống chống bot.
 |---|---|
 | `python -m pytest -q` | **47 passed** - 9 core + 8 API + 11 hardening + 10 audit tool + 9 stealth consistency |
 | `python run_all_tests.py` | **9/9 unit**, **8/8 API** |
-| Audit Playwright, 1 profile tạm | **40/40 check**, 0 failure, 0 warning; canvas/WebGL hash ổn định |
-| Chrome E2E thật | `verify_live.py` **34/34 PASS**, `configuration_verified=true`, actual CDP port, runtime state được ghi |
+| Audit Playwright, profile tạm | **40/40 check** trên profile no-proxy và **40/40** trên profile Proxy 1; canvas/WebGL hash ổn định |
+| Chrome E2E thật | `verify_live.py` **34/34 PASS** trên profile no-proxy và profile Proxy 1; `configuration_verified=true`, actual CDP port, runtime state được ghi |
 | Leak audit trên profile tạm, không proxy | `--no-dns --strict`: **PASS**; browser IP trùng host, không lộ private IP/WebRTC. Full DNS: `WARN` (Google DNS vs CMC internet) |
-| Leak audit proxy HTTP thật | Proxy #1 `160.250.166.89:23951`: **BLOCKED** - HTTP 407 với credential đã cấp. Proxy #2 `113.160.166.27:46787` (egress `117.0.181.67`): sau khi thêm `--webrtc-ip-handling-policy`, `--no-dns --strict` **PASS**; full DNS **FAIL/review** do resolver Google lệch ASN egress Viettel |
+| Leak audit proxy HTTP thật | Proxy #1 `160.250.166.89:23951` (egress/resolver VNPT `AS45899`): sau khi sửa đúng case username, **full audit `--dns --strict` PASS** - WebRTC sạch, DNS `CLEAN`. Proxy #2 `113.160.166.27:46787` (egress `117.0.181.67`, Viettel): IP/WebRTC **PASS** sau fix; full DNS **FAIL/review** do resolver Google lệch ASN. Endpoint mới `27.76.87.148:46787`: timeout |
 | Detector baseline trên profile tạm | CreepJS `31% like headless`, `0% headless`, `0% stealth` (clean Chrome 25%); Pixelscan thay đổi giữa các lần; không CAPTCHA |
 | Cross-process stop | `cli.py stop-all` dừng Chrome; runtime file về `{}`; PID không còn trong tasklist |
 | Server identity + stop | `server_control status` đúng PID/port/health; `stop` qua API, exit 0 |
@@ -265,9 +265,11 @@ vào fixture session. ZIP delivery cũ chứa data thật, không được phân
   - phân loại DNS `CLEAN`/`LEAK`/`REVIEW`/`MANUAL`.
 - Kết quả profile tạm không proxy: IP/WebRTC `PASS`; DNS lần cuối `LEAK`
   (Google DNS vs CMC internet), do đó toàn bộ audit là `WARN`, không phải fail.
-- Kết quả proxy HTTP thật: IP/WebRTC `PASS` sau vá; DNS vẫn `FAIL/review` do
-  resolver Google lệch ASN với egress Viettel (chi tiết mục 8.6 của
-  `docs/VERIFICATION_2026-10-23.md`).
+- Kết quả Proxy 1: IP/WebRTC + DNS **PASS**; egress và resolver cùng VNPT
+  `AS45899`.
+- Kết quả Proxy 2: IP/WebRTC `PASS` sau vá; DNS vẫn `FAIL/review` do resolver
+  Google lệch ASN với egress Viettel. Endpoint mới `27.76.87.148:46787` timeout
+  (chi tiết mục 8.6 của `docs/VERIFICATION_2026-10-23.md`).
 
 ### P1-10. Detector baseline có evidence
 
@@ -340,10 +342,12 @@ vào fixture session. ZIP delivery cũ chứa data thật, không được phân
 4. **Hai audit harness mới dùng BrowserLauncher + CDP thật**, nhưng
    `audit_fingerprint.py` cũ vẫn dùng Playwright `add_init_script`; chưa có
    kiểm thử E2E cho mọi tổ hợp Chrome/Edge + proxy + WebRTC.
-5. **Đã test một proxy HTTP thật**: browser IP + WebRTC `PASS` sau khi thêm
-   `--webrtc-ip-handling-policy` (Chrome 155), nhưng DNS vẫn `FAIL/review` vì
-   resolver Google lệch ASN với egress Viettel; chưa test proxy SOCKS5. DNS
-   bash.ws là best-effort; kết quả lần cuối `LEAK` dù profile không proxy.
+5. **Đã test hai proxy HTTP thật**: Proxy 1 full audit `PASS` (browser
+   IP/WebRTC + DNS VNPT khớp egress); Proxy 2 IP/WebRTC `PASS` sau khi thêm
+   `--webrtc-ip-handling-policy` (Chrome 155) nhưng DNS vẫn `FAIL/review` vì
+   resolver Google lệch ASN với egress Viettel. Endpoint mới
+   `27.76.87.148:46787` timeout; chưa test SOCKS5. DNS bash.ws là best-effort;
+   kết quả lần cuối `LEAK` dù profile không proxy.
 6. **WebGPU** chỉ che adapter info; features/limits/device là host thật.
 7. **Cross-OS spoofing** (macOS/Linux trên Windows) vẫn thực nghiệm; TLS/JA3/JA4
    không thay đổi bằng CDP.

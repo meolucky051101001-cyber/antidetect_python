@@ -28,7 +28,7 @@ python -m pytest -q
 Kết quả:
 
 ```text
-47 passed, 2 warnings in 3.66s
+47 passed, 2 warnings in 3.60s
 ```
 
 Phân bổ: 9 core test (`test_antidetect.py`), 8 API test (`test_api.py`),
@@ -360,13 +360,15 @@ Hai proxy HTTP từ ảnh người dùng được test trong thư mục dữ li�
 
 | Proxy | Kết nối trực tiếp | Kết quả |
 |---|---|---|
-| `160.250.166.89:23951` (tài khoản proxy #1) | `CONNECT tunnel failed, response 407` | Không dùng được với credential đã cung cấp |
-| `113.160.166.27:46787` (tài khoản proxy #2, egress `117.0.181.67`) | HTTP 200, IP Việt Nam, Viettel `AS7552`, Hanoi | Dùng để audit |
+| `160.250.166.89:23951` (tài khoản proxy #1) | HTTP 200 sau khi sửa đúng case username; egress VNPT `AS45899`, Hà Nội | **Full audit PASS** (IP/WebRTC + DNS) |
+| `113.160.166.27:46787` (tài khoản proxy #2, egress `117.0.181.67`, Viettel `AS7552`) | HTTP 200 | IP/WebRTC `PASS`; DNS `FAIL/review` |
+| `27.76.87.148:46787` (endpoint mới trong ảnh) | Connect timeout | Không dùng được |
 
-Profile tạm `31e137dc-5658-4a6e-8102-d1b5466221a8` (`Proxy Test Viettel`),
-fingerprint Windows/timezone `Asia/Ho_Chi_Minh`, `webrtc_mode=disable_non_proxied`.
+Profile tạm `31e137dc-5658-4a6e-8102-d1b5466221a8` được đổi tên thành
+`Proxy Test VNPT`, fingerprint Windows/timezone `Asia/Ho_Chi_Minh`,
+`webrtc_mode=disable_non_proxied`.
 
-**Trước khi sửa — FAIL:**
+**Proxy 2 — trước khi sửa — FAIL:**
 
 ```text
 Browser public IP: 117.0.181.67        # đúng egress proxy
@@ -377,7 +379,7 @@ DNS: LEAK — AS7552 Viettel vs AS15169 Google LLC
 RESULT: FAIL
 ```
 
-**Sau khi thêm `--webrtc-ip-handling-policy=disable_non_proxied_udp` — PASS (không DNS):**
+**Proxy 2 — sau khi thêm `--webrtc-ip-handling-policy=disable_non_proxied_udp` — PASS (không DNS):**
 
 ```powershell
 $env:ANTIDETECT_DATA_DIR = "$env:TEMP\antidetect-proxy-test"
@@ -394,7 +396,31 @@ WebRTC mDNS: không có
 RESULT: PASS
 ```
 
-**Full audit kèm DNS — FAIL có chủ đích:**
+**Proxy 1 — full audit PASS (IP/WebRTC + DNS):**
+
+```powershell
+$env:ANTIDETECT_DATA_DIR = "$env:TEMP\antidetect-proxy-test"
+python tools\leak_audit.py --profile 31e137dc-5658-4a6e-8102-d1b5466221a8 `
+  --dns --strict --json "$env:TEMP\antidetect-proxy-test\leak_proxy_vnpt_dns.json"
+```
+
+```text
+Host direct IP: 171.255.56.173, 2401:d800:25a:6c03:1514:44fa:b4d:3150
+Browser public IP: 113.185.48.131, 113.185.44.5
+WebRTC local: không có
+WebRTC public: không có
+WebRTC mDNS: không có
+DNS: CLEAN — AS45899 VNPT Corp
+DNS servers: 113.185.56.138, 113.185.56.229 (AS45899 VNPT Corp)
+RESULT: PASS
+```
+
+Bash.ws ghi `[OK] DNS is not leaking`; internet access và resolver cùng
+`AS45899 VNPT Corp`. Đây là **full pass** cho Proxy 1, không cần SOCKS5 cho
+proxy này. `verify_live.py` trên cùng profile trả **34/34 PASS**;
+`audit_fingerprint.py --strict` trả **40/40 PASS**.
+
+**Proxy 2 — full audit kèm DNS — FAIL/review:**
 
 ```text
 Browser public IP: 117.0.181.67
@@ -405,24 +431,23 @@ RESULT: FAIL
 
 Bash.ws xác nhận internet access là IP proxy (`117.0.181.67`, Viettel), nhưng
 resolver hiển thị Google. Đây là lệch ASN resolver, không phải bằng chứng DNS
-truy vấn đi thẳng từ ISP nội bộ: HTTP proxy resolve hostname ở phía proxy và
-Chrome DoH dùng Google. Muốn DNS ASN khớp egress proxy cần SOCKS5 remote DNS
-hoặc proxy có DNS riêng; không sửa được chỉ bằng flag Chrome. Vì vậy mục
-`--no-dns --strict` được dùng làm acceptance cho IP/WebRTC proxy, còn full DNS
-vẫn giữ `FAIL` để buộc review thủ công.
+truy vấn đi thẳng từ ISP nội bộ. Proxy 1 cho thấy DNS phụ thuộc resolver của
+nhà cung cấp proxy: Proxy 1 dùng VNPT nên full pass, Proxy 2 dùng Google nên
+lệch ASN. Với proxy dùng resolver khác ASN, cần SOCKS5 remote DNS hoặc proxy
+có DNS riêng; không sửa được chỉ bằng flag Chrome. Endpoint mới
+`27.76.87.148:46787` timeout nên không audit được.
 
 ---
 
 ## 9. Việc chưa kiểm chứng / giới hạn
 
-- Baseline detector mới chạy **một profile tạm, một GPU**; đã audit thêm **một
+- Baseline detector mới chạy **một profile tạm, một GPU**; đã audit thêm **hai
   proxy HTTP thật** (xem 8.6) nhưng chưa có nhiều profile/GPU/Chrome/Edge và
   chưa có proxy SOCKS5.
-- Audit proxy HTTP ngày 2026-10-23: browser IP và WebRTC đã `PASS`, nhưng DNS
-  vẫn `FAIL` do resolver Google lệch ASN với egress Viettel; cần review thủ
-  công hoặc SOCKS5 remote DNS nếu muốn DNS khớp proxy.
-- Proxy `160.250.166.89:23951` trả HTTP 407 với credential đã cung cấp; cần
-  kiểm tra lại mật khẩu/whitelist IP trước khi coi là proxy hỏng.
+- Audit proxy HTTP ngày 2026-10-23: Proxy 1 full `PASS` cả browser IP/WebRTC và
+  DNS (resolver VNPT khớp egress); Proxy 2 `PASS` IP/WebRTC nhưng DNS vẫn
+  `FAIL/review` do resolver Google lệch ASN với egress Viettel. Endpoint mới
+  `27.76.87.148:46787` timeout.
 - DNS bash.ws là best-effort; kết quả có thể đổi theo mạng/Chrome DoH. Lần cuối
   trả `LEAK` dù profile không proxy.
 - Pixelscan/CreepJS có thể đổi giao diện, rate-limit hoặc challenge; challenge là
@@ -470,7 +495,7 @@ Các giới hạn chi tiết nằm trong [LIMITATIONS.md](LIMITATIONS.md).
 ### 11.2. Unit, API và cú pháp
 
 ```text
-python -m pytest -q                         -> 47 passed, 2 warnings in 3.66s
+python -m pytest -q                         -> 47 passed, 2 warnings in 3.60s
 node --check (inline script trong UI)        -> OK
 python -m py_compile (launcher/stealth/...) -> OK
 ```
@@ -547,10 +572,10 @@ DNS: LEAK — AS45903 CMC Telecom vs AS15169 Google
 - Không proxy nên browser public IP trùng host là đúng; không có private/local
   WebRTC candidate, host candidate dùng mDNS.
 - DNS `LEAK` là bất nhất resolver Google so với ISP CMC, đã ghi `WARN` có chủ đích.
-- Đã kiểm chứng thêm proxy HTTP thật ở mục 8.6: proxy thứ nhất trả 407, proxy
-  thứ hai `PASS` về browser IP + WebRTC sau khi thêm
-  `--webrtc-ip-handling-policy`; DNS vẫn `FAIL`/cần review vì resolver Google
-  lệch ASN với Viettel.
+- Đã kiểm chứng thêm proxy HTTP thật ở mục 8.6: Proxy 1 full `PASS` cả browser
+  IP/WebRTC và DNS (resolver VNPT khớp egress); Proxy 2 `PASS` browser IP +
+  WebRTC sau khi thêm `--webrtc-ip-handling-policy`, nhưng DNS vẫn `FAIL`/cần
+  review vì resolver Google lệch ASN với Viettel.
 
 ### 11.7. Đối chiếu acceptance
 
@@ -563,9 +588,10 @@ DNS: LEAK — AS45903 CMC Telecom vs AS15169 Google
 | WebGL limits == clean Chrome | **PASS** — 16384 / [32767,32767] / 16384 |
 | Leak audit no-proxy | **PASS về private/WebRTC**; DNS `WARN` do môi trường không proxy |
 | Toàn bộ pytest + test mới | **PASS** - 47 passed |
-| Proxy HTTP #1 `160.250.166.89:23951` | **BLOCKED** — HTTP 407 với credential đã cấp |
+| Proxy HTTP #1 `160.250.166.89:23951` | **PASS** — egress/resolver VNPT `AS45899`; DNS `CLEAN`; `verify_live` 34/34, fingerprint 40/40 |
 | Proxy HTTP #2 `113.160.166.27:46787` — IP/WebRTC | **PASS** — egress `117.0.181.67`, không public/local WebRTC candidate |
 | Proxy HTTP #2 — DNS | **FAIL/review** — resolver Google `AS15169` lệch egress Viettel `AS7552` |
+| Proxy HTTP mới `27.76.87.148:46787` | **BLOCKED** — connect timeout |
 
 ### 11.8. Tồn tại có chủ ý
 
