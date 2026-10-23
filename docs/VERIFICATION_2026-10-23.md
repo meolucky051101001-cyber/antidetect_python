@@ -398,7 +398,7 @@ Các giới hạn chi tiết nằm trong [LIMITATIONS.md](LIMITATIONS.md).
 
 ```text
 python -m pytest -q                         -> 45 passed, 2 warnings in 3.35s
-node --check (2 inline script trong UI)      -> OK
+node --check (inline script trong UI)        -> OK
 python -m py_compile (launcher/stealth/...) -> OK
 ```
 
