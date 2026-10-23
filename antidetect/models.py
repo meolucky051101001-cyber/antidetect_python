@@ -146,8 +146,11 @@ class FingerprintConfig(BaseModel):
     @field_validator("device_memory")
     @classmethod
     def validate_ram(cls, v: int) -> int:
-        # Giới hạn chuẩn W3C Device Memory (tối đa 8 GiB)
-        return max(1, min(8, v or 8))
+        # Chrome 155 reports 16 on a 16 GB machine, so the old W3C-era cap of
+        # 8 is stale. Keep the value on a real Chrome bucket instead.
+        allowed = (2, 4, 8, 16, 32)
+        value = max(2, min(32, int(v or 8)))
+        return max(bucket for bucket in allowed if bucket <= value)
 
     @field_validator("screen_width", "screen_height")
     @classmethod

@@ -1,5 +1,90 @@
 import json
+import os
+import sys
 from .models import FingerprintConfig
+
+STEALTH_GROUPS = (
+    "navigator",
+    "chrome",
+    "media",
+    "webgpu",
+    "speech",
+    "canvas",
+    "fonts",
+    "webgl",
+    "audio",
+    "worker",
+    "webrtc",
+    "iframe",
+)
+
+
+def _disabled_stealth_groups() -> set:
+    """Groups disabled via ANTIDETECT_STEALTH_DISABLE (comma-separated).
+
+    This exists so detector bisection can turn one hook family off at a time
+    without editing the source. ``all`` disables every optional hook.
+    """
+    raw = os.environ.get("ANTIDETECT_STEALTH_DISABLE", "")
+    items = {item.strip().lower() for item in raw.replace(";", ",").split(",") if item.strip()}
+    if "all" in items:
+        return set(STEALTH_GROUPS)
+    # Group names are canonical strings; the env value is normalized to
+    # lower-case, so map back to the canonical name before intersecting.
+    canonical = {group.lower(): group for group in STEALTH_GROUPS}
+    return {canonical[item] for item in items if item in canonical}
+
+
+def _host_os() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return "unknown"
+
+
+def _webgl_limits(fp: FingerprintConfig):
+    """Return REALISTIC WebGL limits for cross-OS emulation, or None.
+
+    When the emulated OS matches the host, the native WebGL backend already
+    returns the exact limits a real Chrome would report. Overriding them was
+    the source of S1: the old table returned 32768 even on ANGLE D3D11, whose
+    real MAX_TEXTURE_SIZE is 16384 and MAX_VIEWPORT_DIMS is [32767, 32767].
+    Only cross-OS profiles need a table, because their native backend differs.
+    """
+    if fp.os == _host_os():
+        return None
+
+    renderer = (fp.webgl_renderer or "").lower()
+    if fp.os == "macos":
+        # Apple Metal on current Apple Silicon.
+        return {
+            "maxTextureSize": 16384,
+            "maxViewportDims": [16384, 16384],
+            "maxRenderbufferSize": 16384,
+            "maxCubeMapTextureSize": 16384,
+        }
+    if fp.os == "linux":
+        # NVIDIA's OpenGL driver exposes 32768; Mesa/Intel exposes 16384.
+        if any(token in renderer for token in ("nvidia", "geforce", "rtx", "gtx", "quadro")):
+            size = 32768
+        else:
+            size = 16384
+        return {
+            "maxTextureSize": size,
+            "maxViewportDims": [size, size],
+            "maxRenderbufferSize": size,
+            "maxCubeMapTextureSize": size,
+        }
+    # Windows ANGLE D3D11 (NVIDIA/AMD/Intel all use the D3D11 limits).
+    return {
+        "maxTextureSize": 16384,
+        "maxViewportDims": [32767, 32767],
+        "maxRenderbufferSize": 16384,
+        "maxCubeMapTextureSize": 16384,
+    }
 
 
 def _stealth_config(fp: FingerprintConfig) -> dict:
@@ -45,7 +130,8 @@ def _stealth_config(fp: FingerprintConfig) -> dict:
         "webglVendor": fp.webgl_vendor,
         "webglRenderer": fp.webgl_renderer,
         "hardwareConcurrency": fp.hardware_concurrency,
-        "deviceMemory": min(8, fp.device_memory) if fp.device_memory else 8,
+        "deviceMemory": fp.device_memory or 8,
+        "webglLimits": _webgl_limits(fp),
         "languages": fp.languages,
         "locale": fp.locale,
         "screenWidth": fp.screen_width,
@@ -64,8 +150,8 @@ def get_worker_stealth_script(fp: FingerprintConfig) -> str:
     """Stealth payload for dedicated/shared/module workers and service workers.
 
     Workers have no window/document, so the page payload cannot be reused. This
-    script only touches WorkerNavigator, Function.prototype.toString,
-    OffscreenCanvas, WebGL and importScripts.
+    script only touches WorkerNavigator, OffscreenCanvas, WebGL and
+    importScripts.
     """
     cfg = _stealth_config(fp)
     platform = "MacIntel" if fp.os == "macos" else ("Linux x86_64" if fp.os == "linux" else "Win32")
@@ -79,36 +165,24 @@ def get_worker_stealth_script(fp: FingerprintConfig) -> str:
     if (g.__adWorkerStealth) return;
     try { Object.defineProperty(g, '__adWorkerStealth', { value: true, configurable: true }); } catch(e) {}
     const CFG = __CFG__;
+    const DISABLED = new Set(__DISABLED__);
     const platformStr = __PLATFORM__;
     const chPlatform = __CH_PLATFORM__;
     const chPlatformVer = __CH_PLATFORM_VER__;
     const chArch = __CH_ARCH__;
     const NavCtor = g.WorkerNavigator || g.Navigator;
 
-    const nativeToString = Function.prototype.toString;
-    const hookedFunctions = new WeakSet();
     function markNative(fn, name, length, isConstructor) {
         let target = fn;
         if (!isConstructor) {
             target = { [name](...args) { return fn.apply(this, args); } }[name];
         }
-        hookedFunctions.add(target);
         try { Object.defineProperty(target, 'name', { value: name, configurable: true }); } catch(e) {}
         if (typeof length === 'number') {
             try { Object.defineProperty(target, 'length', { value: length, configurable: true }); } catch(e) {}
         }
         return target;
     }
-    const proxyToString = new Proxy(nativeToString, {
-        apply(target, thisArg, argArray) {
-            if (hookedFunctions.has(thisArg)) {
-                return `function ${thisArg.name || ''}() { [native code] }`;
-            }
-            return Reflect.apply(target, thisArg, argArray);
-        }
-    });
-    Function.prototype.toString = proxyToString;
-    hookedFunctions.add(proxyToString);
 
     function defineOn(target, prop, getter, name) {
         if (!target) return false;
@@ -138,7 +212,7 @@ def get_worker_stealth_script(fp: FingerprintConfig) -> str:
 
     defineNav('webdriver', false, 'get webdriver');
     defineNav('hardwareConcurrency', CFG.hardwareConcurrency, 'get hardwareConcurrency');
-    defineNav('deviceMemory', Math.min(8, CFG.deviceMemory || 8), 'get deviceMemory');
+    defineNav('deviceMemory', CFG.deviceMemory || 8, 'get deviceMemory');
     defineNav('languages', Object.freeze([...CFG.languages]), 'get languages');
     defineNav('language', CFG.locale, 'get language');
     defineNav('platform', platformStr, 'get platform');
@@ -180,7 +254,27 @@ def get_worker_stealth_script(fp: FingerprintConfig) -> str:
         }
     }
 
+    function canvasIsComplex(data) {
+        // S5: CreepJS flags noise on trivial solid/simple probes. Only vary
+        // canvases that already contain real visual complexity (text, images,
+        // gradients). The same test runs for getImageData/toDataURL/toBlob, so
+        // all three paths stay consistent.
+        const pixels = data.length >> 2;
+        if (pixels < 256) return false;
+        const seen = new Set();
+        const stride = Math.max(1, Math.floor(pixels / 4096));
+        for (let p = 0; p < pixels; p += stride) {
+            const i = p * 4;
+            if (data[i + 3] !== 255) continue;
+            const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+            seen.add(key);
+            if (seen.size >= 64) return true;
+        }
+        return false;
+    }
+
     function canvasNoise(data, seed, startX, startY, width) {
+        if (!canvasIsComplex(data)) return;
         for (let i = 0; i < data.length; i += 4) {
             const pixelIndex = i / 4;
             const absX = startX + (pixelIndex % width);
@@ -196,7 +290,7 @@ def get_worker_stealth_script(fp: FingerprintConfig) -> str:
         }
     }
 
-    if (typeof OffscreenCanvas !== 'undefined') {
+    if (!DISABLED.has('canvas') && typeof OffscreenCanvas !== 'undefined') {
         let origOffGID = null;
         if (typeof OffscreenCanvasRenderingContext2D !== 'undefined') {
             const p = OffscreenCanvasRenderingContext2D.prototype;
@@ -230,17 +324,27 @@ def get_worker_stealth_script(fp: FingerprintConfig) -> str:
     function hookWebGL(glProto) {
         if (!glProto) return;
         const orig = glProto.getParameter;
+        const limits = CFG.webglLimits;
         glProto.getParameter = markNative(function(param) {
             if (param === 0x9245) return CFG.webglVendor;
             if (param === 0x9246) return CFG.webglRenderer;
-            if (param === 0x0D3A) return new Int32Array([32768, 32768]);
+            if (limits) {
+                // Cross-OS only. Same-OS profiles use the native backend,
+                // whose limits already match a real Chrome on this machine.
+                if (param === 0x0D3A) return new Int32Array(limits.maxViewportDims);
+                if (param === 0x0D33) return limits.maxTextureSize;
+                if (param === 0x84E8) return limits.maxRenderbufferSize;
+                if (param === 0x851C) return limits.maxCubeMapTextureSize;
+            }
             return orig.apply(this, arguments);
         }, 'getParameter', 1);
     }
-    try {
-        if (g.WebGLRenderingContext) hookWebGL(g.WebGLRenderingContext.prototype);
-        if (g.WebGL2RenderingContext) hookWebGL(g.WebGL2RenderingContext.prototype);
-    } catch(e) {}
+    if (!DISABLED.has('webgl')) {
+        try {
+            if (g.WebGLRenderingContext) hookWebGL(g.WebGLRenderingContext.prototype);
+            if (g.WebGL2RenderingContext) hookWebGL(g.WebGL2RenderingContext.prototype);
+        } catch(e) {}
+    }
 
     // The classic Worker wrapper loads the original script from a blob URL.
     // Resolve relative importScripts() against the original script URL.
@@ -257,6 +361,7 @@ def get_worker_stealth_script(fp: FingerprintConfig) -> str:
 """
     replacements = {
         "__CFG__": json.dumps(cfg),
+        "__DISABLED__": json.dumps(sorted(_disabled_stealth_groups())),
         "__PLATFORM__": json.dumps(platform),
         "__CH_PLATFORM__": json.dumps(ch_platform),
         "__CH_PLATFORM_VER__": json.dumps(ch_platform_ver),
@@ -280,6 +385,7 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
     if (globalThis.__adStealth) return;
     try {{ Object.defineProperty(globalThis, '__adStealth', {{ value: true, configurable: true }}); }} catch(e) {{}}
     const CFG = {fp_json};
+    const DISABLED = new Set({json.dumps(sorted(_disabled_stealth_groups()))});
     const platformStr = (CFG.os === 'macos') ? 'MacIntel' : ((CFG.os === 'linux') ? 'Linux x86_64' : 'Win32');
     const chPlatform = (CFG.os === 'macos') ? 'macOS' : ((CFG.os === 'linux') ? 'Linux' : 'Windows');
     const chPlatformVer = (CFG.os === 'macos') ? '14.5.0' : ((CFG.os === 'linux') ? '6.5.0' : '15.0.0');
@@ -290,11 +396,11 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
     const _nowSec = _startE / 1000;
 
     // ==========================================
-    // Helper: Giả lập hàm native để che giấu hook (S1)
+    // Helper: maintain native-looking name/length on wrapped getters.
+    // NOTE: Function.prototype.toString must stay native. A Proxy-based
+    // toString hook was detectable (CreepJS hasToStringProxy = true) and was
+    // the source of the remaining 20% stealth score.
     // ==========================================
-    const nativeToString = Function.prototype.toString;
-    const hookedFunctions = new WeakSet();
-
     function markNative(fn, name, length, isConstructor) {{
         let target = fn;
         // Concise method syntax tạo hàm không có .prototype (chuẩn native method / getter)
@@ -306,7 +412,6 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
                 }}
             }}[name];
         }}
-        hookedFunctions.add(target);
         Object.defineProperty(target, 'name', {{ value: name, configurable: true }});
         if (typeof length === 'number') {{
             Object.defineProperty(target, 'length', {{ value: length, configurable: true }});
@@ -314,25 +419,31 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
         return target;
     }}
 
-    // Proxy-based Function.prototype.toString
-    const proxyToString = new Proxy(nativeToString, {{
-        apply(target, thisArg, argArray) {{
-            if (hookedFunctions.has(thisArg)) {{
-                return `function ${{thisArg.name || ''}}() {{ [native code] }}`;
-            }}
-            return Reflect.apply(target, thisArg, argArray);
-        }}
-    }});
-    Function.prototype.toString = proxyToString;
-    hookedFunctions.add(proxyToString);
-
     // ==========================================
     // Canvas Noise Generator (2D)
     // Only touch fully opaque pixels: adding +/-1 to a partially transparent
     // pixel changes its premultiplied round-trip and makes toDataURL() differ
     // from getImageData() after PNG decode. Opaque text/shape pixels still vary.
     // ==========================================
+    function canvasIsComplex(data) {{
+        // S5: skip trivial solid/simple canvases. CreepJS's rgba-noise probe
+        // uses a simple image; real text/images/gradients still get noise.
+        const pixels = data.length >> 2;
+        if (pixels < 256) return false;
+        const seen = new Set();
+        const stride = Math.max(1, Math.floor(pixels / 4096));
+        for (let p = 0; p < pixels; p += stride) {{
+            const i = p * 4;
+            if (data[i + 3] !== 255) continue;
+            const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+            seen.add(key);
+            if (seen.size >= 64) return true;
+        }}
+        return false;
+    }}
+
     function canvasNoise(data, seed, startX, startY, width) {{
+        if (!canvasIsComplex(data)) return;
         for (let i = 0; i < data.length; i += 4) {{
             const pixelIndex = i / 4;
             const absX = startX + (pixelIndex % width);
@@ -364,24 +475,8 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
             }} catch(e) {{}}
         }}
 
-        // 0. Patch Function.prototype.toString nếu là window realm con (iframe)
-        if (w !== window && w.Function && w.Function.prototype) {{
-            try {{
-                const iNativeToStr = w.Function.prototype.toString;
-                w.Function.prototype.toString = new w.Proxy(iNativeToStr, {{
-                    apply(target, thisArg, argArray) {{
-                        if (hookedFunctions.has(thisArg)) {{
-                            return `function ${{thisArg.name || ''}}() {{ [native code] }}`;
-                        }}
-                        return Reflect.apply(target, thisArg, argArray);
-                    }}
-                }});
-                hookedFunctions.add(w.Function.prototype.toString);
-            }} catch(e) {{}}
-        }}
-
         // 1. Chuẩn hóa navigator.webdriver === false theo chuẩn W3C
-        try {{
+        if (!DISABLED.has('navigator')) try {{
             if (w.Navigator && w.Navigator.prototype) {{
                 const proto = w.Navigator.prototype;
                 if (!('webdriver' in proto) || w.navigator.webdriver !== false) {{
@@ -407,7 +502,7 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
                 Object.defineProperty(proto, 'deviceMemory', {{
                     get: markNative(function() {{
                         if (!(this instanceof w.Navigator)) throw new TypeError('Illegal invocation');
-                        return Math.min(8, CFG.deviceMemory || 8);
+                        return CFG.deviceMemory || 8;
                     }}, 'get deviceMemory', 0),
                     enumerable: true, configurable: true
                 }});
@@ -440,7 +535,7 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
         }} catch(e) {{}}
 
         // 3. Hook NavigatorUAData Client Hints trong JS (S9)
-        try {{
+        if (!DISABLED.has('navigator')) try {{
             if (w.NavigatorUAData && w.NavigatorUAData.prototype) {{
                 const uap = w.NavigatorUAData.prototype;
                 Object.defineProperty(uap, 'brands', {{
@@ -484,7 +579,7 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
         }} catch(e) {{}}
 
         // 4. Mock window.chrome runtime & BotGuard (S10: frozen timestamps)
-        try {{
+        if (!DISABLED.has('chrome')) try {{
             if (!w.chrome) w.chrome = {{}};
             if (!w.chrome.app) {{
                 w.chrome.app = {{
@@ -527,102 +622,13 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
             }}
         }} catch(e) {{}}
 
-        // 5. Screen & Window Dimensions
-        try {{
-            const taskbarH = (CFG.os === 'macos') ? 25 : ((CFG.os === 'linux') ? 32 : 40);
-            const screenTargets = [];
-            if (w.Screen && w.Screen.prototype) screenTargets.push(w.Screen.prototype);
-            for (const target of screenTargets) {{
-                const def = (prop, value, name) => {{
-                    try {{
-                        Object.defineProperty(target, prop, {{
-                            get: markNative(function() {{
-                                if (w.Screen && !(this instanceof w.Screen)) throw new TypeError('Illegal invocation');
-                                return value;
-                            }}, name, 0),
-                            enumerable: true, configurable: true
-                        }});
-                    }} catch(e) {{}}
-                }};
-                def('width', CFG.screenWidth, 'get width');
-                def('height', CFG.screenHeight, 'get height');
-                def('availWidth', CFG.screenWidth, 'get availWidth');
-                def('availHeight', CFG.screenHeight - taskbarH, 'get availHeight');
-                def('availLeft', 0, 'get availLeft');
-                def('availTop', 0, 'get availTop');
-                def('colorDepth', CFG.screenColorDepth || 24, 'get colorDepth');
-                def('pixelDepth', CFG.screenColorDepth || 24, 'get pixelDepth');
-            }}
-
-            // Chrome 155 defines devicePixelRatio as an own accessor on window;
-            // defining only Window.prototype is silently shadowed.
-            const dprGetter = function() {{ return CFG.devicePixelRatio; }};
-            if (w.Window && w.Window.prototype) {{
-                try {{
-                    Object.defineProperty(w.Window.prototype, 'devicePixelRatio', {{
-                        get: markNative(dprGetter, 'get devicePixelRatio', 0),
-                        enumerable: true, configurable: true
-                    }});
-                }} catch(e) {{}}
-            }}
-            try {{
-                Object.defineProperty(w, 'devicePixelRatio', {{
-                    get: markNative(dprGetter, 'get devicePixelRatio', 0),
-                    enumerable: true, configurable: true
-                }});
-            }} catch(e) {{}}
-
-            // matchMedia does not read the JS devicePixelRatio value; rewrite
-            // resolution queries so CSS and JS agree on the same DPR.
-            if (w.matchMedia) {{
-                const origMatchMedia = w.matchMedia;
-                w.matchMedia = markNative(function(query) {{
-                    const original = String(query);
-                    const dpr = Number(CFG.devicePixelRatio) || 1;
-                    let rewritten = original;
-                    try {{
-                        rewritten = rewritten.replace(
-                            /\(\s*resolution\s*:\s*([0-9.]+)dppx\s*\)/gi,
-                            `(resolution: ${{dpr}}dppx)`
-                        );
-                        rewritten = rewritten.replace(
-                            /\(\s*-webkit-device-pixel-ratio\s*:\s*([0-9.]+)\s*\)/gi,
-                            `(-webkit-device-pixel-ratio: ${{dpr}})`
-                        );
-                        rewritten = rewritten.replace(
-                            /\(\s*min-resolution\s*:\s*([0-9.]+)dppx\s*\)/gi,
-                            (m, x) => `(min-resolution: ${{dpr >= Number(x) ? 0 : 999}}dppx)`
-                        );
-                        rewritten = rewritten.replace(
-                            /\(\s*max-resolution\s*:\s*([0-9.]+)dppx\s*\)/gi,
-                            (m, x) => `(max-resolution: ${{dpr <= Number(x) ? 999 : 0}}dppx)`
-                        );
-                    }} catch(e) {{}}
-                    const mql = origMatchMedia.call(this, rewritten);
-                    try {{
-                        Object.defineProperty(mql, 'media', {{ get: () => original, configurable: true }});
-                    }} catch(e) {{}}
-                    // The native CSS engine can still report its real DPR (for
-                    // example when Playwright launches without --force-device-
-                    // scale-factor). Override the simple exact-resolution result
-                    // from CFG as well; min/max are rewritten above.
-                    try {{
-                        const exact = /^\(\s*(?:resolution\s*:\s*([0-9.]+)dppx|-webkit-device-pixel-ratio\s*:\s*([0-9.]+))\s*\)$/i.exec(original);
-                        if (exact) {{
-                            const want = Number(exact[1] || exact[2]);
-                            Object.defineProperty(mql, 'matches', {{
-                                get: () => dpr === want,
-                                configurable: true
-                            }});
-                        }}
-                    }} catch(e) {{}}
-                    return mql;
-                }}, 'matchMedia', 1);
-            }}
-        }} catch(e) {{}}
+        // 5. Screen, DPR and CSS media queries are handled natively by
+        // Emulation.setDeviceMetricsOverride in the launcher. Hooking the
+        // Screen prototype or the media-query API was detectable and made JS
+        // disagree with CSS. Keep this section empty on purpose.
 
         // 6. MediaDevices enumerateDevices
-        try {{
+        if (!DISABLED.has('media')) try {{
             if (w.navigator && w.navigator.mediaDevices && w.navigator.mediaDevices.enumerateDevices) {{
                 const origEnumerate = w.navigator.mediaDevices.enumerateDevices;
                 w.navigator.mediaDevices.enumerateDevices = markNative(function() {{
@@ -648,7 +654,7 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
         }} catch(e) {{}}
 
         // 7. WebGPU Masking (S5)
-        try {{
+        if (!DISABLED.has('webgpu')) try {{
             if (w.navigator && w.navigator.gpu && w.navigator.gpu.requestAdapter) {{
                 const origReqAdapter = w.navigator.gpu.requestAdapter;
                 const renderer = CFG.webglRenderer || '';
@@ -711,7 +717,7 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
         }} catch(e) {{}}
 
         // 8. SpeechSynthesis Voices (S7: OS matching)
-        try {{
+        if (!DISABLED.has('speech')) try {{
             if (w.speechSynthesis && w.speechSynthesis.getVoices) {{
                 const origGetVoices = w.speechSynthesis.getVoices;
                 w.speechSynthesis.getVoices = markNative(function() {{
@@ -728,59 +734,63 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
         }} catch(e) {{}}
 
         // 9. Canvas 2D Spoofing & Font Probing Mask (S11)
-        try {{
+        if (!DISABLED.has('canvas') || !DISABLED.has('fonts')) try {{
             let origCanvasGID = null;
             if (w.CanvasRenderingContext2D && w.CanvasRenderingContext2D.prototype) {{
                 const ctxProto = w.CanvasRenderingContext2D.prototype;
-                origCanvasGID = ctxProto.getImageData;
-                ctxProto.getImageData = markNative(function(sx, sy, sw, sh) {{
-                    const imgData = origCanvasGID.apply(this, arguments);
-                    canvasNoise(imgData.data, CFG.canvasSeed || 12345, sx || 0, sy || 0, sw || 1);
-                    return imgData;
-                }}, 'getImageData', 4);
+                if (!DISABLED.has('canvas')) {{
+                    origCanvasGID = ctxProto.getImageData;
+                    ctxProto.getImageData = markNative(function(sx, sy, sw, sh) {{
+                        const imgData = origCanvasGID.apply(this, arguments);
+                        canvasNoise(imgData.data, CFG.canvasSeed || 12345, sx || 0, sy || 0, sw || 1);
+                        return imgData;
+                    }}, 'getImageData', 4);
+                }}
 
                 // Bảo vệ Font Probing qua measureText (S11)
-                const origMeasureText = ctxProto.measureText;
-                ctxProto.measureText = markNative(function(text) {{
-                    const font = (this.font || '').toLowerCase();
-                    const res = origMeasureText.apply(this, arguments);
-                    if (CFG.os === 'macos') {{
-                        for (const wf of winFonts) {{
-                            if (font.includes(wf)) {{
-                                const prevFont = this.font;
-                                this.font = font.replace(new RegExp(wf, 'g'), 'non_existent_fallback_font');
-                                const fallbackRes = origMeasureText.apply(this, arguments);
-                                this.font = prevFont;
-                                return fallbackRes;
+                if (!DISABLED.has('fonts')) {{
+                    const origMeasureText = ctxProto.measureText;
+                    ctxProto.measureText = markNative(function(text) {{
+                        const font = (this.font || '').toLowerCase();
+                        const res = origMeasureText.apply(this, arguments);
+                        if (CFG.os === 'macos') {{
+                            for (const wf of winFonts) {{
+                                if (font.includes(wf)) {{
+                                    const prevFont = this.font;
+                                    this.font = font.replace(new RegExp(wf, 'g'), 'non_existent_fallback_font');
+                                    const fallbackRes = origMeasureText.apply(this, arguments);
+                                    this.font = prevFont;
+                                    return fallbackRes;
+                                }}
+                            }}
+                            for (const mf of macFonts) {{
+                                if (font.includes(mf)) {{
+                                    const width = res.width + 6.5;
+                                    return new Proxy(res, {{
+                                        get(t, prop) {{
+                                            if (prop === 'width') return width;
+                                            return Reflect.get(t, prop);
+                                        }}
+                                    }});
+                                }}
+                            }}
+                        }} else if (CFG.os === 'windows') {{
+                            for (const mf of macFonts) {{
+                                if (font.includes(mf)) {{
+                                    const prevFont = this.font;
+                                    this.font = font.replace(new RegExp(mf, 'g'), 'non_existent_fallback_font');
+                                    const fallbackRes = origMeasureText.apply(this, arguments);
+                                    this.font = prevFont;
+                                    return fallbackRes;
+                                }}
                             }}
                         }}
-                        for (const mf of macFonts) {{
-                            if (font.includes(mf)) {{
-                                const width = res.width + 6.5;
-                                return new Proxy(res, {{
-                                    get(t, prop) {{
-                                        if (prop === 'width') return width;
-                                        return Reflect.get(t, prop);
-                                    }}
-                                }});
-                            }}
-                        }}
-                    }} else if (CFG.os === 'windows') {{
-                        for (const mf of macFonts) {{
-                            if (font.includes(mf)) {{
-                                const prevFont = this.font;
-                                this.font = font.replace(new RegExp(mf, 'g'), 'non_existent_fallback_font');
-                                const fallbackRes = origMeasureText.apply(this, arguments);
-                                this.font = prevFont;
-                                return fallbackRes;
-                            }}
-                        }}
-                    }}
-                    return res;
-                }}, 'measureText', 1);
+                        return res;
+                    }}, 'measureText', 1);
+                }}
             }}
 
-            if (w.HTMLCanvasElement && w.HTMLCanvasElement.prototype) {{
+            if (!DISABLED.has('canvas') && w.HTMLCanvasElement && w.HTMLCanvasElement.prototype) {{
                 const canvasProto = w.HTMLCanvasElement.prototype;
                 const origToDataURL = canvasProto.toDataURL;
                 canvasProto.toDataURL = markNative(function() {{
@@ -883,7 +893,7 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
             }}
 
             // OffscreenCanvas hooks
-            if (typeof w.OffscreenCanvas !== 'undefined') {{
+            if (!DISABLED.has('canvas') && typeof w.OffscreenCanvas !== 'undefined') {{
                 let origOffGID = null;
                 if (typeof w.OffscreenCanvasRenderingContext2D !== 'undefined') {{
                     const offCtxProto = w.OffscreenCanvasRenderingContext2D.prototype;
@@ -937,7 +947,7 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
             }}
 
             // document.fonts.check Font Masking (S11)
-            if (w.document && w.document.fonts && w.document.fonts.check) {{
+            if (!DISABLED.has('fonts') && w.document && w.document.fonts && w.document.fonts.check) {{
                 const origFontsCheck = w.document.fonts.check;
                 w.document.fonts.check = markNative(function(font, text) {{
                     const f = (font || '').toLowerCase();
@@ -954,6 +964,9 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
         }} catch(e) {{}}
 
         // 10. WebGL Vendor & Renderer & Extensions & readPixels (S12) & ShaderPrecision (S6)
+        // S1: only UNMASKED_VENDOR/RENDERER are spoofed for same-OS profiles.
+        // Native limits are already correct for the host backend. Cross-OS
+        // profiles use CFG.webglLimits, measured from real GPUs.
         function hookWebGL(glProto) {{
             if (!glProto) return;
             const UNMASKED_VENDOR_WEBGL = 0x9245;
@@ -962,39 +975,18 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
             const MAX_TEXTURE_SIZE = 0x0D33;
             const MAX_RENDERBUFFER_SIZE = 0x84E8;
             const MAX_CUBE_MAP_TEXTURE_SIZE = 0x851C;
-            const MAX_VERTEX_ATTRIBS = 0x8869;
-            const MAX_TEXTURE_IMAGE_UNITS = 0x8872;
-            const MAX_VERTEX_TEXTURE_IMAGE_UNITS = 0x8B4C;
-            const MAX_COMBINED_TEXTURE_IMAGE_UNITS = 0x8B4D;
-            const MAX_VARYING_VECTORS = 0x8DFC;
-            const MAX_FRAGMENT_UNIFORM_VECTORS = 0x8DFD;
-            const MAX_VERTEX_UNIFORM_VECTORS = 0x8DFB;
-            const ALIASED_LINE_WIDTH_RANGE = 0x846E;
-            const ALIASED_POINT_SIZE_RANGE = 0x846D;
-
-            const rendererLower = (CFG.webglRenderer || '').toLowerCase();
-            const isApple = rendererLower.includes('apple') || rendererLower.includes('metal');
-            const isIntel = rendererLower.includes('intel');
-            const maxTexture = isApple ? 16384 : (isIntel ? 16384 : 32768);
-            const maxViewport = isApple ? 16384 : (isIntel ? 16384 : 32768);
+            const limits = CFG.webglLimits;
 
             const origGetParameter = glProto.getParameter;
             glProto.getParameter = markNative(function(param) {{
                 if (param === UNMASKED_VENDOR_WEBGL) return CFG.webglVendor;
                 if (param === UNMASKED_RENDERER_WEBGL) return CFG.webglRenderer;
-                if (param === MAX_VIEWPORT_DIMS) return new Int32Array([maxViewport, maxViewport]);
-                if (param === MAX_TEXTURE_SIZE) return maxTexture;
-                if (param === MAX_RENDERBUFFER_SIZE) return maxTexture;
-                if (param === MAX_CUBE_MAP_TEXTURE_SIZE) return maxTexture;
-                if (param === MAX_VERTEX_ATTRIBS) return 16;
-                if (param === MAX_TEXTURE_IMAGE_UNITS) return 16;
-                if (param === MAX_VERTEX_TEXTURE_IMAGE_UNITS) return 16;
-                if (param === MAX_COMBINED_TEXTURE_IMAGE_UNITS) return 32;
-                if (param === MAX_VARYING_VECTORS) return 30;
-                if (param === MAX_FRAGMENT_UNIFORM_VECTORS) return 1024;
-                if (param === MAX_VERTEX_UNIFORM_VECTORS) return 4096;
-                if (param === ALIASED_LINE_WIDTH_RANGE) return new Float32Array([1, 1]);
-                if (param === ALIASED_POINT_SIZE_RANGE) return new Float32Array([1, 1024]);
+                if (limits) {{
+                    if (param === MAX_VIEWPORT_DIMS) return new Int32Array(limits.maxViewportDims);
+                    if (param === MAX_TEXTURE_SIZE) return limits.maxTextureSize;
+                    if (param === MAX_RENDERBUFFER_SIZE) return limits.maxRenderbufferSize;
+                    if (param === MAX_CUBE_MAP_TEXTURE_SIZE) return limits.maxCubeMapTextureSize;
+                }}
                 return origGetParameter.apply(this, arguments);
             }}, 'getParameter', 1);
 
@@ -1056,13 +1048,13 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
             }}
         }}
 
-        try {{
+        if (!DISABLED.has('webgl')) try {{
             if (w.WebGLRenderingContext) hookWebGL(w.WebGLRenderingContext.prototype);
             if (w.WebGL2RenderingContext) hookWebGL(w.WebGL2RenderingContext.prototype);
         }} catch(e) {{}}
 
         // 11. AudioContext Spoofing
-        try {{
+        if (!DISABLED.has('audio')) try {{
             const processedBuffers = new WeakMap();
             if (w.AudioBuffer) {{
                 const origGetChannelData = w.AudioBuffer.prototype.getChannelData;
@@ -1115,7 +1107,7 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
         }} catch(e) {{}}
 
         // 12. Web Worker Hook (S3 & S14)
-        try {{
+        if (!DISABLED.has('worker')) try {{
             if (w.Worker) {{
                 const origWorker = w.Worker;
                 const workerHookCode = {json.dumps(worker_js)};
@@ -1150,38 +1142,11 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
             }}
         }} catch(e) {{}}
 
-        // 13. WebRTC Leak Protection (P2-03)
-        try {{
-            if (w.RTCPeerConnection) {{
-                const origRTC = w.RTCPeerConnection;
-                const mode = CFG.webrtcMode || 'disable_non_proxied';
-
-                if (mode === 'block') {{
-                    w.RTCPeerConnection = markNative(function() {{
-                        throw new DOMException("Failed to construct 'RTCPeerConnection': WebRTC is disabled by policy.", "NotSupportedError");
-                    }}, 'RTCPeerConnection', 0, true);
-                    w.RTCPeerConnection.prototype = origRTC.prototype;
-                    try {{
-                        Object.defineProperty(origRTC.prototype, 'constructor', {{
-                            value: w.RTCPeerConnection, writable: true, configurable: true
-                        }});
-                    }} catch(e) {{}}
-                }} else if (mode === 'disable_non_proxied') {{
-                    const origCreateOffer = origRTC.prototype.createOffer;
-                    if (origCreateOffer) {{
-                        origRTC.prototype.createOffer = markNative(function() {{
-                            return origCreateOffer.apply(this, arguments).then(offer => {{
-                                if (offer && offer.sdp) {{
-                                    const cleanSdp = offer.sdp.replace(/(?:c=IN\\s+IP4\\s+)(?:10\\.\\d+\\.\\d+\\.\\d+|192\\.168\\.\\d+\\.\\d+|172\\.(?:1[6-9]|2\\d|3[0-1])\\.\\d+\\.\\d+)/g, 'c=IN IP4 0.0.0.0');
-                                    return new RTCSessionDescription({{ type: offer.type, sdp: cleanSdp }});
-                                }}
-                                return offer;
-                            }});
-                        }}, 'createOffer', 0);
-                    }}
-                }}
-            }}
-        }} catch(e) {{}}
+        // 13. WebRTC: no JS hook.
+        // S8: SDP from Chrome already uses mDNS and does not contain LAN IPs.
+        // A createOffer hook only adds a detectable wrapper, and throwing from
+        // the constructor differs from a real browser. The launcher uses the
+        // policy flag plus Chrome's native mDNS instead.
     }}
 
     // Áp dụng stealth cho realm chính (window)
@@ -1194,7 +1159,7 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
     const _patchedWindows = new WeakSet();
     _patchedWindows.add(window);
 
-    try {{
+    if (!DISABLED.has('iframe')) try {{
         const iframeProto = HTMLIFrameElement.prototype;
         const origContentWindowDesc = Object.getOwnPropertyDescriptor(iframeProto, 'contentWindow');
         const origContentDocDesc = Object.getOwnPropertyDescriptor(iframeProto, 'contentDocument');
@@ -1237,3 +1202,4 @@ def get_stealth_script(fp: FingerprintConfig) -> str:
 
 # Alias cho tương thích ngược và theo đặc tả kế hoạch P0-05
 generate_stealth_js = get_stealth_script
+get_webgl_limits = _webgl_limits

@@ -60,7 +60,7 @@ PROBE_EVALUATE_JS = r"""async () => {
     try {
         record('navigator', 'webdriver_false', navigator.webdriver === false, navigator.webdriver, false);
         record('navigator', 'hardwareConcurrency_positive', navigator.hardwareConcurrency > 0, navigator.hardwareConcurrency, '>0');
-        record('navigator', 'deviceMemory_valid', [2, 4, 8].includes(navigator.deviceMemory), navigator.deviceMemory, '2, 4, or 8');
+        record('navigator', 'deviceMemory_valid', [2, 4, 8, 16, 32].includes(navigator.deviceMemory), navigator.deviceMemory, '2, 4, 8, 16, or 32');
 
         if (navigator.userAgentData) {
             const hi = await navigator.userAgentData.getHighEntropyValues([

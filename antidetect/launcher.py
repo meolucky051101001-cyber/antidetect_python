@@ -14,10 +14,15 @@ from typing import Optional, Dict, Any, List
 from .models import Profile
 from .storage import ProfileManager, DATA_DIR, PROFILES_DATA_DIR
 from .browser_runtime import BrowserRuntimeStore
-from .stealth import get_stealth_script, get_worker_stealth_script
+from .stealth import get_stealth_script, get_worker_stealth_script, get_webgl_limits
 from .proxy import create_proxy_auth_extension
 from .process_identity import read_browser_identity
-from .fingerprint import normalize_fingerprint_for_launch, get_version_from_browser_path
+from .fingerprint import (
+    normalize_fingerprint_for_launch,
+    get_version_from_browser_path,
+    get_host_screen_info,
+    host_os,
+)
 
 
 def find_browser_executable() -> str:
@@ -336,7 +341,10 @@ class BrowserLauncher:
         langs: (navigator.languages || []).join(','),
         wd: navigator.webdriver,
         platform: navigator.platform,
-        tz: Intl.DateTimeFormat().resolvedOptions().timeZone
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        cssDeviceW: matchMedia('(device-width: ' + screen.width + 'px)').matches,
+        cssDeviceH: matchMedia('(device-height: ' + screen.height + 'px)').matches,
+        cssDpr: matchMedia('(resolution: ' + devicePixelRatio + 'dppx)').matches
     };
     try {
         const c = document.createElement('canvas');
@@ -344,6 +352,8 @@ class BrowserLauncher:
         const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
         out.glVendor = ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : null;
         out.glRenderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null;
+        out.glMaxTexture = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : null;
+        out.glMaxViewport = gl ? Array.from(gl.getParameter(gl.MAX_VIEWPORT_DIMS)) : null;
     } catch (e) { out.glError = String(e); }
     try {
         if (navigator.userAgentData) {
@@ -367,6 +377,18 @@ class BrowserLauncher:
             else ("Chromium" if getattr(fp, "browser_brand", "chrome") == "chromium"
                   else "Google Chrome")
         )
+        expected_texture = None
+        expected_viewport = None
+        limits = get_webgl_limits(fp)
+        if limits:
+            expected_texture = int(limits["maxTextureSize"])
+            expected_viewport = list(limits["maxViewportDims"])
+        elif fp.os == "windows":
+            expected_texture = 16384
+            expected_viewport = [32767, 32767]
+        elif fp.os == "macos":
+            expected_texture = 16384
+            expected_viewport = [16384, 16384]
         while time.monotonic() < deadline:
             try:
                 def pages():
@@ -431,7 +453,7 @@ class BrowserLauncher:
                             )
                             checks["device_memory"] = (
                                 int(value.get("dm", 0))
-                                == int(min(8, fp.device_memory or 8))
+                                == int(fp.device_memory or 8)
                             )
                             checks["language"] = value.get("lang") == fp.locale
                             checks["languages"] = (
@@ -445,6 +467,18 @@ class BrowserLauncher:
                             )
                             checks["webgl_vendor"] = value.get("glVendor") == fp.webgl_vendor
                             checks["webgl_renderer"] = value.get("glRenderer") == fp.webgl_renderer
+                            checks["css_device_width"] = value.get("cssDeviceW") is True
+                            checks["css_device_height"] = value.get("cssDeviceH") is True
+                            checks["css_device_pixel_ratio"] = value.get("cssDpr") is True
+                            if expected_texture is not None:
+                                checks["webgl_max_texture"] = (
+                                    int(value.get("glMaxTexture") or 0) == expected_texture
+                                )
+                            if expected_viewport is not None:
+                                checks["webgl_max_viewport"] = (
+                                    list(value.get("glMaxViewport") or [])
+                                    == expected_viewport
+                                )
                             # navigator.userAgentData is undefined on some
                             # non-secure contexts (notably about:blank). Do not
                             # fail verification for an API the page cannot see;
@@ -475,11 +509,15 @@ class BrowserLauncher:
         target_url: Optional[str] = None,
         user_data_dir: Optional[str] = None,
         proxy_auth: Optional[tuple] = None,
+        fp_override: Optional[Any] = None,
     ):
         """Inject stealth into every page/worker/OOPIF target via CDP."""
         import websockets
 
-        fp = profile.fingerprint
+        # Use the launch-time normalized copy, not the stored profile. The
+        # stored model may still contain legacy RAM/screen values; the injected
+        # JS and the verification probe must see the same values.
+        fp = fp_override or profile.fingerprint
         stealth_js = get_stealth_script(fp)
         worker_js = get_worker_stealth_script(fp)
 
@@ -641,9 +679,37 @@ class BrowserLauncher:
 
                 is_first_tab = True
 
+                async def apply_screen_emulation(session_id):
+                    """S3: let Chrome's native layer set screen.* and CSS media.
+
+                    width/height=0 leaves the real viewport alone while
+                    screenWidth/screenHeight/deviceScaleFactor drive both JS and
+                    @media (device-width/height/resolution). This removes the
+                    need for Screen.prototype and matchMedia hooks.
+                    """
+                    try:
+                        await send(
+                            "Emulation.setDeviceMetricsOverride",
+                            {
+                                "width": 0,
+                                "height": 0,
+                                "deviceScaleFactor": float(fp.device_pixel_ratio or 1.0),
+                                "mobile": False,
+                                "screenWidth": int(fp.screen_width),
+                                "screenHeight": int(fp.screen_height),
+                            },
+                            session_id=session_id,
+                        )
+                    except Exception as exc:
+                        print(
+                            "[Launcher] Không đặt được screen emulation: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
                 async def configure_page(session_id, target_info):
                     nonlocal is_first_tab
                     await send("Page.enable", session_id=session_id)
+                    await apply_screen_emulation(session_id)
                     # Browser-level auto-attach discovers pages, but workers and
                     # OOPIFs are subtargets of a page. Enable auto-attach on the
                     # page session as well; otherwise module workers and
@@ -711,6 +777,8 @@ class BrowserLauncher:
                     # OOPIF: Page.addScriptToEvaluateOnNewDocument handles the
                     # current document when it is paused before scripts run.
                     await send("Page.enable", session_id=session_id)
+                    # Emulation.setDeviceMetricsOverride is top-level-only.
+                    # OOPIFs inherit the top-level display metrics.
                     await send(
                         "Target.setAutoAttach",
                         {
@@ -767,6 +835,29 @@ class BrowserLauncher:
                         )
                         return
                     await send("Runtime.enable", session_id=session_id)
+                    # S6: workers are separate targets. Apply the same
+                    # timezone/locale/UA at the CDP layer where supported, then
+                    # fall back to the worker payload for navigator/Intl values.
+                    for method, params in (
+                        ("Network.enable", {}),
+                        ("Emulation.setTimezoneOverride", {"timezoneId": fp.timezone}),
+                        ("Emulation.setLocaleOverride", {"locale": fp.locale}),
+                        (
+                            "Network.setUserAgentOverride",
+                            {
+                                "userAgent": fp.user_agent,
+                                "acceptLanguage": accept_lang_str,
+                                "platform": platform_str,
+                                "userAgentMetadata": ua_metadata,
+                            },
+                        ),
+                    ):
+                        try:
+                            await send(method, params, session_id=session_id)
+                        except Exception:
+                            # Worker targets reject some page-only domains; the
+                            # worker JS still covers navigator values.
+                            pass
                     # Workers do not support Page.addScriptToEvaluateOnNewDocument.
                     # At waitForDebuggerOnStart they have a context but have not
                     # executed user code yet, so Runtime.evaluate is safe.
@@ -914,11 +1005,12 @@ class BrowserLauncher:
         target_url: Optional[str] = None,
         user_data_dir: Optional[str] = None,
         proxy_auth: Optional[tuple] = None,
+        fp_override: Optional[Any] = None,
     ):
         def run_loop():
             asyncio.run(
                 self._setup_cdp_stealth(
-                    port, profile, target_url, user_data_dir, proxy_auth
+                    port, profile, target_url, user_data_dir, proxy_auth, fp_override
                 )
             )
 
@@ -976,7 +1068,37 @@ class BrowserLauncher:
             # legacy (macOS DPR=1, screen 1366x768, language tags có q-value).
             # P0-01: Chỉ chuẩn hóa fp tạm thời trong bộ nhớ RAM cho phiên chạy Chrome này.
             # TUYỆT ĐỐI KHÔNG tự ý gọi update_profile(profile) đè vào profiles.json.
+            original_fp = profile.fingerprint
             fp = normalize_fingerprint_for_launch(profile.fingerprint, self.browser_path)
+            launch_warnings: List[str] = []
+            if int(original_fp.device_memory or 0) != int(fp.device_memory or 0):
+                launch_warnings.append(
+                    "deviceMemory normalized to the host value "
+                    f"({fp.device_memory} GB) so JS matches Sec-CH-Device-Memory."
+                )
+            if (original_fp.screen_width, original_fp.screen_height) != (
+                fp.screen_width, fp.screen_height
+            ):
+                launch_warnings.append(
+                    "Screen preset clamped to fit the real display: "
+                    f"{original_fp.screen_width}x{original_fp.screen_height} -> "
+                    f"{fp.screen_width}x{fp.screen_height}."
+                )
+
+            # S7/C2: never spawn a window larger than the physical display.
+            # Same-OS presets were already clamped above; cross-OS presets keep
+            # their declared screen but use a safe window size.
+            window_width, window_height = fp.screen_width, fp.screen_height
+            if fp.os != host_os():
+                host_width, host_height, _ = get_host_screen_info()
+                if window_width > host_width or window_height > host_height:
+                    window_width = min(window_width, host_width)
+                    window_height = min(window_height, host_height)
+                    launch_warnings.append(
+                        "Cross-OS profile: window clamped to the physical display "
+                        f"({window_width}x{window_height}); fingerprint consistency "
+                        "across OS is not guaranteed."
+                    )
 
             # Cấu hình danh sách flags dòng lệnh
             args = [
@@ -984,7 +1106,7 @@ class BrowserLauncher:
                 f"--user-data-dir={user_data_dir}",
                 "--remote-debugging-address=127.0.0.1",
                 f"--remote-debugging-port={port}",
-                f"--window-size={fp.screen_width},{fp.screen_height}",
+                f"--window-size={window_width},{window_height}",
                 f"--lang={fp.locale}",
                 f"--accept-lang={','.join(fp.languages or [fp.locale])}",
                 # H3: Đồng bộ DPR giữa JS và CSS media queries
@@ -1100,7 +1222,7 @@ class BrowserLauncher:
 
                 # Khởi chạy luồng gắn kết CDP để tiêm script và điều hướng
                 self._start_cdp_thread(
-                    port, profile, target_url, user_data_dir, proxy_auth
+                    port, profile, target_url, user_data_dir, proxy_auth, fp
                 )
 
                 # Chờ CDP tiêm stealth thành công vào trang (tối đa 6.0 giây)
@@ -1132,6 +1254,12 @@ class BrowserLauncher:
                     }
 
                 cdp_ready_final = stealth_ok and configuration_verified
+                warning_parts = list(launch_warnings)
+                if not cdp_ready_final:
+                    warning_parts.insert(
+                        0,
+                        "Chrome is running but stealth injection or emulation verification was not confirmed.",
+                    )
                 return {
                     "success": True,
                     "profile_id": profile_id,
@@ -1144,11 +1272,8 @@ class BrowserLauncher:
                     "emulation_verified": configuration_verified,
                     "configuration_verified": configuration_verified,
                     "verification": verification,
-                    "warning": (
-                        None
-                        if cdp_ready_final
-                        else "Chrome is running but stealth injection or emulation verification was not confirmed."
-                    ),
+                    "warnings": launch_warnings,
+                    "warning": "; ".join(warning_parts) if warning_parts else None,
                 }
             except Exception as e:
                 # H15: Nếu Popen thành công nhưng các bước sau lỗi, kill proc

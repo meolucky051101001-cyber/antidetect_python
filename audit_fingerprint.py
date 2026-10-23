@@ -72,6 +72,10 @@ COLLECT_JS = r"""async () => {
         dpr: Object.prototype.hasOwnProperty.call(window, 'devicePixelRatio')
     };
     out.native = {
+        functionToString: Function.prototype.toString.toString().includes('[native code]'),
+        // Hook wrappers are deliberately visible now: faking
+        // Function.prototype.toString was detectable by CreepJS. Keep these
+        // values for diagnostics, but do not fail on them.
         toDataURL: HTMLCanvasElement.prototype.toDataURL.toString().includes('[native code]'),
         getImageData: CanvasRenderingContext2D.prototype.getImageData.toString().includes('[native code]'),
         getParameter: WebGLRenderingContext.prototype.getParameter.toString().includes('[native code]'),
@@ -83,13 +87,23 @@ COLLECT_JS = r"""async () => {
         exact: matchMedia(`(resolution: ${devicePixelRatio}dppx)`).matches,
         min: matchMedia(`(min-resolution: ${devicePixelRatio}dppx)`).matches,
         max: matchMedia(`(max-resolution: ${devicePixelRatio}dppx)`).matches,
-        wrong: matchMedia(`(resolution: ${devicePixelRatio === 1 ? 2 : 1}dppx)`).matches,
-        combo: matchMedia(`(resolution: ${devicePixelRatio}dppx) and (min-width: 1px)`).matches
+        wrong: matchMedia(`(resolution: ${Math.abs(devicePixelRatio - 1) < 0.01 ? 2 : 1}dppx)`).matches,
+        combo: matchMedia(`(resolution: ${devicePixelRatio}dppx) and (min-width: 1px)`).matches,
+        deviceWidth: matchMedia(`(device-width: ${screen.width}px)`).matches,
+        deviceHeight: matchMedia(`(device-height: ${screen.height}px)`).matches
     };
     try {
         const c = document.createElement('canvas');
         c.width = 200; c.height = 60;
         const x = c.getContext('2d');
+        // S5 gate needs at least 64 distinct opaque colours. Fill the canvas
+        // with an 8x8 colour grid, then draw the usual text/overlay.
+        for (let gy = 0; gy < 8; gy += 1) {
+            for (let gx = 0; gx < 8; gx += 1) {
+                x.fillStyle = `rgb(${gx * 30}, ${gy * 30}, ${(gx * 7 + gy * 11) % 256})`;
+                x.fillRect(gx * 25, gy * 7, 25, 7);
+            }
+        }
         x.textBaseline = 'top';
         x.font = '14px Arial';
         x.fillStyle = '#f60'; x.fillRect(125, 1, 62, 20);
@@ -144,6 +158,12 @@ CLEAN_DRAW_JS = r"""() => {
     const c = document.createElement('canvas');
     c.width = 200; c.height = 60;
     const x = c.getContext('2d');
+    for (let gy = 0; gy < 8; gy += 1) {
+        for (let gx = 0; gx < 8; gx += 1) {
+            x.fillStyle = `rgb(${gx * 30}, ${gy * 30}, ${(gx * 7 + gy * 11) % 256})`;
+            x.fillRect(gx * 25, gy * 7, 25, 7);
+        }
+    }
     x.textBaseline = 'top';
     x.font = '14px Arial';
     x.fillStyle = '#f60'; x.fillRect(125, 1, 62, 20);
@@ -226,13 +246,26 @@ def main():
             for profile in profiles:
                 fp = normalize_fingerprint_for_launch(profile.fingerprint, browser_path)
                 context = browser.new_context(
-                    viewport={"width": fp.screen_width, "height": fp.screen_height},
+                    viewport={"width": 800, "height": 600},
                     device_scale_factor=float(fp.device_pixel_ratio or 1.0),
                     user_agent=fp.user_agent,
                     locale=fp.locale,
                     timezone_id=fp.timezone,
                 )
                 page = context.new_page()
+                # S3: screen.* and CSS media queries must come from Chrome's
+                # native device emulation, not from JS hooks. width/height=0
+                # keeps the ordinary viewport while screenWidth/screenHeight
+                # drive both JS and @media.
+                cdp = context.new_cdp_session(page)
+                cdp.send("Emulation.setDeviceMetricsOverride", {
+                    "width": 0,
+                    "height": 0,
+                    "deviceScaleFactor": float(fp.device_pixel_ratio or 1.0),
+                    "mobile": False,
+                    "screenWidth": int(fp.screen_width),
+                    "screenHeight": int(fp.screen_height),
+                })
                 page.add_init_script(get_stealth_script(fp))
                 page.goto(base + "/", wait_until="domcontentloaded")
                 page.wait_for_timeout(250)
@@ -257,16 +290,20 @@ def main():
                 check("platform", data.get("platform"), "MacIntel" if fp.os == "macos" else (
                     "Linux x86_64" if fp.os == "linux" else "Win32"))
                 check("hardwareConcurrency", data.get("hc"), fp.hardware_concurrency)
-                check("deviceMemory", data.get("dm"), min(8, fp.device_memory or 8))
+                check("deviceMemory", data.get("dm"), int(fp.device_memory or 8))
                 check("language", data.get("lang"), fp.locale)
                 check("languages", data.get("langs"), fp.languages)
-                check("devicePixelRatio", data.get("dpr"), float(fp.device_pixel_ratio or 1.0))
+                expected_dpr = float(fp.device_pixel_ratio or 1.0)
+                actual_dpr = float(data.get("dpr") or 0)
+                check("devicePixelRatio", actual_dpr, expected_dpr,
+                      ok=abs(actual_dpr - expected_dpr) < 0.01)
                 screen = data.get("screen") or {}
                 check("screen.width", screen.get("width"), fp.screen_width)
                 check("screen.height", screen.get("height"), fp.screen_height)
                 check("screen.availWidth", screen.get("availWidth"), fp.screen_width)
-                taskbar = 25 if fp.os == "macos" else (32 if fp.os == "linux" else 40)
-                check("screen.availHeight", screen.get("availHeight"), fp.screen_height - taskbar)
+                # Chrome's CDP device metrics (width=0/height=0) report the
+                # full screen as available; there is no synthetic taskbar.
+                check("screen.availHeight", screen.get("availHeight"), fp.screen_height)
                 # ICU canonicalizes some IANA aliases (for example
                 # Asia/Ho_Chi_Minh -> Asia/Saigon). Both are the same zone.
                 tz_aliases = {
@@ -292,6 +329,8 @@ def main():
                 check("matchMedia max DPR", match.get("max"), True)
                 check("matchMedia wrong DPR", match.get("wrong"), False)
                 check("matchMedia combined", match.get("combo"), True)
+                check("matchMedia device-width", match.get("deviceWidth"), True)
+                check("matchMedia device-height", match.get("deviceHeight"), True)
                 check("canvas toDataURL stable", data.get("canvasUrl"), data.get("canvasUrl2"))
                 diff_bytes = sum(1 for a, b in zip(decoded or [], canvas_pixels) if a != b)
                 check("canvas toDataURL/getImageData bytes", diff_bytes, 0)
@@ -310,12 +349,10 @@ def main():
                 check("WebGL viewport", viewport, "two dimensions >= 16384",
                       ok=viewport_ok)
                 native = data.get("native") or {}
-                check("native toString toDataURL", native.get("toDataURL"), True)
-                check("native toString getImageData", native.get("getImageData"), True)
-                check("native toString getParameter", native.get("getParameter"), True)
-                if native.get("getHighEntropyValues") is not None:
-                    check("native toString getHighEntropyValues",
-                          native.get("getHighEntropyValues"), True)
+                # S4: do not fake Function.prototype.toString. The Proxy was
+                # detected by CreepJS (hasToStringProxy=true, 20% stealth).
+                check("Function.prototype.toString unmodified",
+                      native.get("functionToString"), True)
 
                 exp_platform, exp_platform_ver, exp_arch = platform_expectations(fp)
                 hi = data.get("hi") or {}

@@ -1,8 +1,185 @@
 import os
 import sys
+import math
 import random
+import ctypes
+from functools import lru_cache
 from typing import Dict, Any, Optional, List, Tuple
 from .models import FingerprintConfig
+
+DEVICE_MEMORY_BUCKETS = (2, 4, 8, 16, 32)
+
+
+def host_os() -> str:
+    """Return the real host OS in the same vocabulary as FingerprintConfig.os."""
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return "unknown"
+
+
+def _windows_total_memory_gb() -> Optional[float]:
+    try:
+        from ctypes import wintypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return status.ullTotalPhys / (1024 ** 3)
+    except Exception:
+        pass
+    return None
+
+
+def _posix_total_memory_gb() -> Optional[float]:
+    try:
+        if sys.platform == "darwin":
+            import subprocess
+
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], timeout=2)
+            return int(out.strip()) / (1024 ** 3)
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and page_size > 0:
+            return (pages * page_size) / (1024 ** 3)
+    except Exception:
+        pass
+    return None
+
+
+def device_memory_bucket(ram_gb: Optional[float]) -> int:
+    """Round RAM to the power-of-two bucket Chrome reports.
+
+    Chrome 155 reports 16 on a machine whose OS advertises 16 GB even though
+    GlobalMemoryStatusEx returns 15.6 GiB after hardware reservations. Rounding
+    to the nearest power of two (in log space) matches that behaviour; rounding
+    down would incorrectly produce 8.
+    """
+    if not ram_gb or ram_gb < 2:
+        return 2
+    exponent = round(math.log2(float(ram_gb)))
+    return max(2, min(32, 2 ** exponent))
+
+
+@lru_cache(maxsize=1)
+def get_host_device_memory() -> int:
+    """Return the real machine RAM bucket.
+
+    Chrome sends Sec-CH-Device-Memory from the host OS. Unless every request is
+    intercepted to rewrite that header, navigator.deviceMemory must use the
+    same host value or the JS and HTTP layers disagree.
+    """
+    ram = _windows_total_memory_gb() or _posix_total_memory_gb()
+    if ram is None:
+        try:
+            import psutil
+
+            ram = psutil.virtual_memory().total / (1024 ** 3)
+        except Exception:
+            ram = None
+    return device_memory_bucket(ram)
+
+
+@lru_cache(maxsize=1)
+def get_host_screen_info() -> Tuple[int, int, float]:
+    """Return (physical_width, physical_height, scale) of the primary display.
+
+    Physical pixels are used for the ``--window-size`` safety clamp. The scale
+    is the OS DPI scale (1.25 = 125% on Windows), which is also the DPR Chrome
+    reports when it is not forced to another value.
+    """
+    if sys.platform == "win32":
+        try:
+            from ctypes import wintypes
+
+            # Use the modern per-monitor context; on a headless Python process
+            # this succeeds before any window is created, so GetSystemMetrics
+            # returns physical pixels instead of DPI-virtualized ones.
+            try:
+                ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+            except Exception:
+                try:
+                    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+                except Exception:
+                    try:
+                        ctypes.windll.user32.SetProcessDPIAware()
+                    except Exception:
+                        pass
+
+            user32 = ctypes.windll.user32
+            user32.GetSystemMetrics.restype = ctypes.c_int
+            width = int(user32.GetSystemMetrics(0))
+            height = int(user32.GetSystemMetrics(1))
+            dpi = 96
+            try:
+                dpi = int(user32.GetDpiForSystem())
+            except Exception:
+                hdc = user32.GetDC(0)
+                try:
+                    dpi = int(ctypes.windll.gdi32.GetDeviceCaps(hdc, 88))
+                finally:
+                    user32.ReleaseDC(0, hdc)
+            scale = (dpi / 96.0) if dpi else 1.0
+            if width > 0 and height > 0:
+                return width, height, scale
+        except Exception:
+            pass
+
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            width = int(root.winfo_screenwidth())
+            height = int(root.winfo_screenheight())
+            scale = float(root.winfo_fpixels("1i")) / 96.0
+        finally:
+            root.destroy()
+        if width > 0 and height > 0:
+            return width, height, max(0.5, scale)
+    except Exception:
+        pass
+    return 1920, 1080, 1.0
+
+
+def clamp_screen_to_host(
+    screen_width: int, screen_height: int, dpr: float, target_os: str
+) -> Tuple[int, int, bool]:
+    """Shrink a screen preset that cannot fit on the real display.
+
+    Returns (width, height, clamped). Cross-OS profiles are left alone because
+    the host display is not a valid reference for a different OS; the launcher
+    reports a warning for those instead.
+    """
+    if target_os != host_os():
+        return screen_width, screen_height, False
+    host_width, host_height, _ = get_host_screen_info()
+    scale = max(0.5, float(dpr or 1.0))
+    max_width = max(320, int(host_width / scale))
+    max_height = max(240, int(host_height / scale))
+    if screen_width <= max_width and screen_height <= max_height:
+        return screen_width, screen_height, False
+    ratio = min(max_width / max(1, screen_width), max_height / max(1, screen_height))
+    new_width = max(320, int(screen_width * ratio) // 2 * 2)
+    new_height = max(240, int(screen_height * ratio) // 2 * 2)
+    return new_width, new_height, True
 
 # Các hồ sơ GPU WebGL chân thực phong phú
 GPU_PROFILES = {
@@ -459,6 +636,18 @@ def normalize_fingerprint_for_launch(
         fp.languages = cleaned
         fp.locale = cleaned[0]
 
+    # S2: JS and the real Sec-CH-Device-Memory header must agree. The header
+    # cannot be changed without intercepting all traffic, so use host RAM.
+    fp.device_memory = get_host_device_memory()
+
+    # S7/C2: a window larger than the physical display is a strong anomaly and
+    # also makes outerWidth/innerWidth look artificial. Clamp same-OS profiles
+    # to the real display. Cross-OS profiles keep their declared screen but the
+    # launcher surfaces a warning.
+    fp.screen_width, fp.screen_height, _ = clamp_screen_to_host(
+        fp.screen_width, fp.screen_height, fp.device_pixel_ratio or 1.0, fp.os
+    )
+
     return fp
 
 
@@ -633,11 +822,14 @@ def generate_fingerprint(
         cores = random.choice([4, 8, 12])
         ram = random.choice([8, 16])
 
-    # Giới hạn device_memory tối đa 8 GiB theo chuẩn W3C Device Memory API
-    device_memory_val = min(8, ram)
+    # The HTTP Sec-CH-Device-Memory header always reports the real host RAM.
+    # Use that same bucket in JS; profile-specific RAM cannot be kept consistent
+    # without intercepting and rewriting every request header.
+    device_memory_val = get_host_device_memory()
 
     # DPR chuẩn: macOS Retina luôn là 2.0, Windows/Linux thông thường là 1.0 hoặc 1.25 với màn lớn
     dpr = 2.0 if target_os == "macos" else (1.0 if width <= 1920 else 1.25)
+    width, height, _ = clamp_screen_to_host(width, height, dpr, target_os)
 
     lang_parts = locale.split("-") if locale else ["vi", "VN"]
     base_lang = lang_parts[0] if lang_parts and lang_parts[0] else "vi"

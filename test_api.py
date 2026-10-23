@@ -358,12 +358,14 @@ def test_p2_features():
         # 50 reads from RAM cache should finish in well under 50ms (< 1ms per call)
         assert elapsed < 0.5, f"Cache too slow: 50 calls took {elapsed:.4f}s"
 
-        # 3. Test WebRTC mode stealth configuration (P2-03)
+        # 3. WebRTC leak protection is enforced by Chrome policy flags and
+        # mDNS, not by JS hooks. Hooking RTCPeerConnection is itself a CreepJS
+        # lie and made the constructor non-native.
         from antidetect.stealth import get_stealth_script
         fp = p.fingerprint
         fp.webrtc_mode = "disable_non_proxied"
         script = get_stealth_script(fp)
-        assert "RTCPeerConnection" in script
+        assert "RTCPeerConnection" not in script
         assert "webrtcMode" in script
     finally:
         app_module.profile_manager.delete_profile(p.id)

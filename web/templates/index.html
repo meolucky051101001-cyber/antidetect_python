@@ -386,8 +386,11 @@
                                 <select id="create-adv-ram" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs">
                                     <option value="2">2 GB</option>
                                     <option value="4">4 GB</option>
-                                    <option value="8" selected>8 GB (Chuẩn W3C tối đa)</option>
+                                    <option value="8">8 GB</option>
+                                    <option value="16" selected>16 GB (RAM thật của máy)</option>
+                                    <option value="32">32 GB</option>
                                 </select>
+                                <p class="text-[10px] text-slate-500 mt-1">Khi chạy, RAM luôn được đồng bộ với Sec-CH-Device-Memory của máy thật.</p>
                             </div>
                         </div>
 
@@ -640,8 +643,11 @@
                                 <select id="edit-fp-ram" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 font-mono">
                                     <option value="2">2 GB</option>
                                     <option value="4">4 GB</option>
-                                    <option value="8">8 GB (Chuẩn W3C tối đa)</option>
+                                    <option value="8">8 GB</option>
+                                    <option value="16">16 GB (RAM thật của máy)</option>
+                                    <option value="32">32 GB</option>
                                 </select>
+                                <p class="text-[10px] text-slate-500 mt-1">Khi chạy, RAM luôn được đồng bộ với Sec-CH-Device-Memory của máy thật.</p>
                             </div>
                         </div>
 
@@ -968,6 +974,12 @@
         function populatePresetDropdowns() {
             if (!systemOptions) return;
 
+            const hostRam = hostDeviceMemory();
+            const createRam = document.getElementById('create-adv-ram');
+            const editRam = document.getElementById('edit-fp-ram');
+            if (createRam) createRam.value = String(hostRam);
+            if (editRam) editRam.value = String(hostRam);
+
             // 1. Populate Hardware Presets
             const presets = systemOptions.hardware_presets || [];
             const createPreset = document.getElementById('create-preset-select');
@@ -1002,25 +1014,70 @@
             select.innerHTML = html;
         }
 
+        function hostDeviceMemory() {
+            const host = (systemOptions && systemOptions.host) || {};
+            return parseInt(host.device_memory, 10) || 16;
+        }
+
+        function presetDpr(preset) {
+            return preset.os === 'macos'
+                ? 2.0
+                : (preset.width <= 1920 ? 1.0 : 1.25);
+        }
+
+        function effectivePresetScreen(preset) {
+            const host = (systemOptions && systemOptions.host) || {};
+            const dpr = presetDpr(preset);
+            if (!host.screen_width || !host.screen_height || preset.os !== host.os) {
+                return { width: preset.width, height: preset.height, dpr, clamped: false };
+            }
+            // Same clamp math as antidetect.fingerprint.clamp_screen_to_host.
+            const maxWidth = Math.max(320, Math.floor(host.screen_width / dpr));
+            const maxHeight = Math.max(240, Math.floor(host.screen_height / dpr));
+            if (preset.width <= maxWidth && preset.height <= maxHeight) {
+                return { width: preset.width, height: preset.height, dpr, clamped: false };
+            }
+            const ratio = Math.min(maxWidth / preset.width, maxHeight / preset.height);
+            return {
+                width: Math.max(320, Math.floor(preset.width * ratio / 2) * 2),
+                height: Math.max(240, Math.floor(preset.height * ratio / 2) * 2),
+                dpr,
+                clamped: true,
+                maxWidth,
+                maxHeight
+            };
+        }
+
+        function hostScreenWarning(preset) {
+            const host = (systemOptions && systemOptions.host) || {};
+            const eff = effectivePresetScreen(preset);
+            if (!eff.clamped) return '';
+            return `Màn hình ${preset.width}x${preset.height} lớn hơn màn thật ${host.screen_width}x${host.screen_height}@${eff.dpr}x; khi chạy sẽ tự thu về ${eff.width}x${eff.height}.`;
+        }
+
         function applyPresetToCreate(presetId) {
             if (!presetId || !systemOptions) return;
             const p = systemOptions.hardware_presets.find(item => item.id === presetId);
             if (!p) return;
 
+            const ram = hostDeviceMemory();
+            const eff = effectivePresetScreen(p);
+            const screenWarning = hostScreenWarning(p);
+
             document.getElementById('p-os').value = p.os;
-            document.getElementById('create-adv-res').value = `${p.width},${p.height}`;
+            document.getElementById('create-adv-res').value = `${eff.width},${eff.height}`;
             document.getElementById('create-adv-cores').value = p.cores;
-            document.getElementById('create-adv-ram').value = Math.min(8, p.ram);
+            document.getElementById('create-adv-ram').value = ram;
 
             populateGpuSelect('create-adv-gpu-select', p.os);
             document.getElementById('create-adv-gpu-select').value = p.renderer;
 
             if (currentFpPreview) {
                 currentFpPreview.os = p.os;
-                currentFpPreview.screen_width = p.width;
-                currentFpPreview.screen_height = p.height;
+                currentFpPreview.screen_width = eff.width;
+                currentFpPreview.screen_height = eff.height;
                 currentFpPreview.hardware_concurrency = p.cores;
-                currentFpPreview.device_memory = Math.min(8, p.ram);
+                currentFpPreview.device_memory = ram;
                 currentFpPreview.webgl_vendor = p.vendor;
                 currentFpPreview.webgl_renderer = p.renderer;
 
@@ -1034,11 +1091,12 @@
                     currentFpPreview.user_agent = `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${fullVer} Safari/537.36`;
                 }
 
-                document.getElementById('fp-screen').innerText = `${p.width}x${p.height}`;
+                document.getElementById('fp-screen').innerText = `${eff.width}x${eff.height}`;
                 document.getElementById('fp-gpu').innerText = p.gpu_name || p.renderer.split(',')[0];
-                document.getElementById('fp-cores-ram').innerText = `${p.cores} Cores / ${Math.min(8, p.ram)} GB`;
+                document.getElementById('fp-cores-ram').innerText = `${p.cores} Cores / ${ram} GB`;
             }
-            showToast(`Đã áp dụng mẫu: ${p.name}`, 'info');
+            const note = screenWarning ? ` ${screenWarning}` : '';
+            showToast(`Đã áp dụng mẫu: ${p.name}.${note}`, screenWarning ? 'warning' : 'info');
         }
 
         function applyPresetToEdit(presetId) {
@@ -1046,18 +1104,22 @@
             const p = systemOptions.hardware_presets.find(item => item.id === presetId);
             if (!p) return;
 
+            const ram = hostDeviceMemory();
+            const eff = effectivePresetScreen(p);
+            const screenWarning = hostScreenWarning(p);
+
             document.getElementById('edit-fp-os').value = p.os;
             populateGpuSelect('edit-fp-gpu-select', p.os);
             document.getElementById('edit-fp-gpu-select').value = p.renderer;
             document.getElementById('edit-fp-gpu-custom').classList.add('hidden');
 
-            document.getElementById('edit-fp-res-select').value = `${p.width},${p.height}`;
-            document.getElementById('edit-fp-w').value = p.width;
-            document.getElementById('edit-fp-h').value = p.height;
+            document.getElementById('edit-fp-res-select').value = `${eff.width},${eff.height}`;
+            document.getElementById('edit-fp-w').value = eff.width;
+            document.getElementById('edit-fp-h').value = eff.height;
             document.getElementById('edit-fp-custom-res').classList.add('hidden');
 
             document.getElementById('edit-fp-cores').value = p.cores;
-            document.getElementById('edit-fp-ram').value = Math.min(8, p.ram);
+            document.getElementById('edit-fp-ram').value = ram;
 
             // Generate realistic UA for this OS
             let fullVer = (systemOptions && systemOptions.browser_version) ? systemOptions.browser_version : "155.0.8059.85";
@@ -1069,7 +1131,8 @@
                 document.getElementById('edit-fp-ua').value = `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${fullVer} Safari/537.36`;
             }
 
-            showToast(`Đã áp dụng mẫu: ${p.name}`, 'success');
+            const note = screenWarning ? ` ${screenWarning}` : '';
+            showToast(`Đã áp dụng mẫu: ${p.name}.${note}`, screenWarning ? 'warning' : 'success');
         }
 
         function onEditOsChange(newOs) {
@@ -1925,7 +1988,7 @@
                 const customCanvas = parseInt(document.getElementById('create-adv-canvas').value);
                 if (customCanvas) currentFpPreview.canvas_noise_seed = customCanvas;
                 currentFpPreview.hardware_concurrency = parseInt(document.getElementById('create-adv-cores').value) || 8;
-                currentFpPreview.device_memory = parseInt(document.getElementById('create-adv-ram').value) || 16;
+                currentFpPreview.device_memory = hostDeviceMemory();
                 currentFpPreview.timezone = document.getElementById('create-adv-tz-select').value || currentFpPreview.timezone;
                 currentFpPreview.locale = document.getElementById('create-adv-locale-select').value || 'vi-VN';
                 const customLat = parseFloat(document.getElementById('create-adv-lat').value);
@@ -2020,7 +2083,7 @@
 
             document.getElementById('edit-fp-canvas').value = fp.canvas_noise_seed || 12345;
             document.getElementById('edit-fp-cores').value = fp.hardware_concurrency || 8;
-            document.getElementById('edit-fp-ram').value = fp.device_memory || 16;
+            document.getElementById('edit-fp-ram').value = hostDeviceMemory();
 
             // Timezone select
             const tzSelect = document.getElementById('edit-fp-tz-select');
@@ -2089,7 +2152,7 @@
 
                 document.getElementById('edit-fp-canvas').value = fp.canvas_noise_seed;
                 document.getElementById('edit-fp-cores').value = fp.hardware_concurrency;
-                document.getElementById('edit-fp-ram').value = fp.device_memory;
+                document.getElementById('edit-fp-ram').value = hostDeviceMemory();
                 document.getElementById('edit-fp-ua').value = fp.user_agent;
 
                 showToast('Đã sinh ngẫu nhiên bộ thông số mới! Nhấn "Lưu Cấu Hình" để áp dụng.', 'info');
@@ -2148,7 +2211,7 @@
                 webgl_vendor: gpuVal.includes('Apple') ? 'Google Inc. (Apple)' : (gpuVal.includes('Intel') ? 'Google Inc. (Intel)' : (gpuVal.includes('AMD') ? 'Google Inc. (AMD)' : 'Google Inc. (NVIDIA)')),
                 webgl_renderer: gpuVal,
                 hardware_concurrency: parseInt(document.getElementById('edit-fp-cores').value) || origFp.hardware_concurrency || 8,
-                device_memory: parseInt(document.getElementById('edit-fp-ram').value) || origFp.device_memory || 8,
+                device_memory: hostDeviceMemory(),
                 timezone: tzVal,
                 locale: localeVal,
                 languages: languages,

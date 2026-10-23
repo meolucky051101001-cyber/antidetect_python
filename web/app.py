@@ -530,10 +530,14 @@ async def get_fingerprint_options():
         SCREEN_RESOLUTIONS,
         HARDWARE_PRESETS,
         POPULAR_LOCATIONS,
+        get_host_device_memory,
+        get_host_screen_info,
         get_installed_chrome_version,
+        host_os,
     )
     ver_info = get_installed_chrome_version()
     browser_ver = ver_info[1] if ver_info else "155.0.8059.85"
+    host_width, host_height, host_scale = get_host_screen_info()
     common_timezones = [
         "Asia/Ho_Chi_Minh",
         "America/New_York",
@@ -555,6 +559,13 @@ async def get_fingerprint_options():
         "timezones": common_timezones,
         "locations": POPULAR_LOCATIONS,
         "browser_version": browser_ver,
+        "host": {
+            "os": host_os(),
+            "screen_width": host_width,
+            "screen_height": host_height,
+            "device_pixel_ratio": round(max(0.5, host_scale), 2),
+            "device_memory": get_host_device_memory(),
+        },
     }
 
 

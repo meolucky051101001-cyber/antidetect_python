@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -117,6 +118,41 @@ _CHALLENGE_PATTERNS = (
     "cf-chl",
 )
 
+# CreepJS renders its result cards inside open shadow roots. Playwright's
+# body.inner_text() only sees the light DOM, which made the old audit report
+# an empty page even when the detector had finished.
+SHADOW_TEXT_JS = r"""
+() => {
+  const chunks = [];
+  const seen = new Set();
+  const skipTags = new Set(['STYLE', 'SCRIPT', 'NOSCRIPT', 'TEXTAREA', 'CANVAS', 'SVG']);
+  const addText = (root) => {
+    if (!root || seen.has(root)) return;
+    seen.add(root);
+    try {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const value = (node.nodeValue || '').trim();
+        if (!value || value.length > 400) continue;
+        const parent = node.parentElement;
+        if (parent && skipTags.has(parent.tagName)) continue;
+        chunks.push(value);
+      }
+    } catch (error) {}
+    let elements = [];
+    try {
+      elements = root.querySelectorAll ? root.querySelectorAll('*') : [];
+    } catch (error) {}
+    for (const element of elements) {
+      if (element.shadowRoot) addText(element.shadowRoot);
+    }
+  };
+  addText(document.body);
+  return chunks.join('\n');
+}
+"""
+
 
 def parse_target(value: str) -> Tuple[str, str]:
     """Parse ``name=url`` or a bare URL into (name, url)."""
@@ -157,19 +193,25 @@ def extract_detector_signals(text: str, url: str = "") -> Dict[str, Any]:
             signals[key] = match.group(1)
     lower = (text or "").lower()
     if "pixelscan.net" in url.lower():
-        if "fingerprint is inconsistent" in lower:
+        if "your browser fingerprint is inconsistent" in lower:
             signals["pixelscan_fingerprint"] = "inconsistent"
-        elif "fingerprint is consistent" in lower:
+        elif "your browser fingerprint is consistent" in lower:
             signals["pixelscan_fingerprint"] = "consistent"
-        if "masking detected" in lower:
+        # "No masking detected" contains the substring "masking detected";
+        # check the negative card first so FAQ/help text cannot flip the result.
+        if "no masking detected" in lower:
+            signals["pixelscan_masking"] = "not detected"
+        elif "masking detected" in lower:
             signals["pixelscan_masking"] = "detected"
         if "no automated behavior detected" in lower:
             signals["pixelscan_bot_check"] = "no automated behavior detected"
     if "creepjs" in url.lower():
         for key, pattern in (
-            ("creepjs_like_headless", r"(\d+%)\s*like headless"),
-            ("creepjs_headless_detected", r"(\d+%)\s*headless"),
-            ("creepjs_stealth", r"(\d+%)\s*stealth"),
+            ("creepjs_like_headless", r"(\d+(?:\.\d+)?%)\s*like headless"),
+            ("creepjs_headless", r"(\d+(?:\.\d+)?%)\s*headless"),
+            ("creepjs_stealth", r"(\d+(?:\.\d+)?%)\s*stealth"),
+            ("creepjs_resistance", r"(\d+(?:\.\d+)?%)\s*resistance"),
+            ("creepjs_lies_count", r"\blies?\b\D{0,8}(\d+)\b"),
         ):
             match = re.search(pattern, text or "", re.IGNORECASE)
             if match:
@@ -210,18 +252,17 @@ def wait_for_detector_result(page: Any, url: str) -> None:
     """Wait for known async detector UIs without hard-coding their scores."""
     lower_url = url.lower()
     if "creepjs" in lower_url:
-        try:
-            page.wait_for_function(
-                """() => {
-                    const text = document.body ? document.body.innerText : '';
-                    return text.includes('FP ID:')
-                        && text.includes('Headless')
-                        && !text.includes('Computing...');
-                }""",
-                timeout=30_000,
-            )
-        except Exception:
-            pass
+        # CreepJS renders inside shadow roots, so poll our shadow-aware text
+        # extractor instead of document.body.innerText.
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            try:
+                text = page.evaluate(SHADOW_TEXT_JS)
+            except Exception:
+                text = ""
+            if "FP ID:" in (text or "") and "Computing..." not in (text or ""):
+                break
+            page.wait_for_timeout(500)
         page.wait_for_timeout(2_000)
     elif "pixelscan.net" in lower_url:
         try:
@@ -269,12 +310,15 @@ def audit_target(
         record["title"] = page.title()
         record["final_url"] = page.url
         try:
-            body = page.locator("body").inner_text(timeout=10_000)
+            body = page.evaluate(SHADOW_TEXT_JS) or ""
+            if not body.strip():
+                body = page.locator("body").inner_text(timeout=10_000)
         except Exception as exc:  # noqa: BLE001 - page can be a download/blank
             body = ""
             record["error"] = f"Không đọc được body: {type(exc).__name__}: {exc}"
-        record["text"] = body[:20_000]
+        record["text"] = body[:60_000]
         record["text_truncated"] = len(body) > len(record["text"])
+        record["text_source"] = "shadow-dom-textnodes"
         record["challenge"] = detect_challenge(body, record["title"] or "")
         record["signals"] = extract_detector_signals(body, url)
         record["fingerprint"] = page.evaluate(SNAPSHOT_JS)
@@ -313,6 +357,9 @@ def audit_profile(
     result: Dict[str, Any] = {
         "profile": common.profile_summary(profile),
         "started_at": common.utc_now(),
+        "stealth_disable": os.environ.get(
+            "ANTIDETECT_STEALTH_DISABLE", ""
+        ) or None,
         "launch": None,
         "targets": [],
         "warnings": [],
@@ -367,9 +414,17 @@ def audit_profile(
                 result["warnings"].append(f"{name}: Pixelscan báo fingerprint inconsistent")
             if signals.get("pixelscan_masking") == "detected":
                 result["warnings"].append(f"{name}: Pixelscan báo masking detected")
-            if signals.get("creepjs_like_headless") not in (None, "0%"):
+            if signals.get("creepjs_like_headless") not in (None, "0%", "0.0%"):
                 result["warnings"].append(
                     f"{name}: CreepJS báo {signals['creepjs_like_headless']} like headless"
+                )
+            if signals.get("creepjs_stealth") not in (None, "0%", "0.0%"):
+                result["warnings"].append(
+                    f"{name}: CreepJS báo {signals['creepjs_stealth']} stealth"
+                )
+            if signals.get("creepjs_lies_count") not in (None, "0"):
+                result["warnings"].append(
+                    f"{name}: CreepJS báo {signals['creepjs_lies_count']} lies"
                 )
 
         if result["failures"]:
@@ -441,6 +496,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Trả exit code 1 nếu có WARN hoặc FAIL, không chỉ FAIL.",
     )
+    parser.add_argument(
+        "--stealth-disable",
+        metavar="GROUPS",
+        help=(
+            "Tắt tạm các nhóm hook để bisect detector, ví dụ 'webgl,canvas' "
+            "hoặc 'all'. Chỉ áp dụng cho lần chạy này."
+        ),
+    )
     return parser
 
 
@@ -448,6 +511,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     common.print_data_notice()
+    if args.stealth_disable:
+        os.environ["ANTIDETECT_STEALTH_DISABLE"] = args.stealth_disable
+        print(f"[*] Stealth groups disabled for this run: {args.stealth_disable}")
     manager = ProfileManager()
     profiles, missing = common.resolve_profiles(manager, args.profile)
     if missing:

@@ -106,10 +106,23 @@ def test_extract_detector_signals_keeps_verdicts_from_original_sites():
     assert pixelscan["pixelscan_masking"] == "detected"
     assert pixelscan["pixelscan_bot_check"] == "no automated behavior detected"
 
+    # The live 2026-10-23 Pixelscan page contains FAQ text mentioning
+    # "masking detected" while the result card says "No masking detected".
+    pixelscan_clean = extract_detector_signals(
+        "Your Browser Fingerprint is consistent\nNo masking detected\n"
+        "Why do I see inconsistent results? Masking detected is a common question.",
+        "https://pixelscan.net/fingerprint-check",
+    )
+    assert pixelscan_clean["pixelscan_fingerprint"] == "consistent"
+    assert pixelscan_clean["pixelscan_masking"] == "not detected"
+
     creepjs = extract_detector_signals(
-        "25% like headless: fafdf9d1\n0% headless: 52defe05\n20% stealth: 71bd68ae",
+        "25% like headless: fafdf9d1\n0% headless: 52defe05\n20% stealth: 71bd68ae\n"
+        "0% resistance: 8ab41f90\nLies: 7",
         "https://abrahamjuliot.github.io/creepjs/",
     )
     assert creepjs["creepjs_like_headless"] == "25%"
-    assert creepjs["creepjs_headless_detected"] == "0%"
+    assert creepjs["creepjs_headless"] == "0%"
     assert creepjs["creepjs_stealth"] == "20%"
+    assert creepjs["creepjs_resistance"] == "0%"
+    assert creepjs["creepjs_lies_count"] == "7"

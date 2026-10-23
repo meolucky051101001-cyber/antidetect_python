@@ -1,8 +1,8 @@
 # ⚠️ GIỚI HẠN KỸ THUẬT & KHUYẾN NGHỊ — ANTIDETECT PYTHON
 
-Cập nhật: **2026-10-23**. Tài liệu này ghi các giới hạn còn lại sau đợt hardening.
-Các kết quả test chỉ chứng minh những gì đã chạy, không phải cam kết vượt mọi
-detector.
+Cập nhật: **2026-10-23**, sau khi triển khai S1–S9 và Phase D. Tài liệu này ghi
+các giới hạn còn lại; kết quả test chỉ chứng minh những gì đã chạy, không phải
+cam kết vượt mọi detector.
 
 ---
 
@@ -25,6 +25,8 @@ detector.
   `getImageData()` nhất quán; pixel bán trong suốt không bị đổi.
 - WebGL thật vẫn phụ thuộc driver/GPU host; vendor/renderer có thể không khớp với
   khả năng thực tế của GPU (extension, max texture size, shader precision).
+- Từ S5, noise chỉ áp dụng cho canvas phức tạp (>=64 màu opaque, >=256 px);
+  canvas đơn giản giữ pixel native để tránh dấu hiệu "rgba noise".
 - AudioContext noise có thể bị phát hiện nếu so sánh nhiều mẫu hoặc kiểm tra
   tính chất vật lý của tín hiệu.
 - `readPixels()` noise đã sửa lỗi collision của hai seed chẵn, nhưng không đảm
@@ -37,8 +39,10 @@ detector.
   - profile có proxy bật, và
   - `webrtc_mode` là `block` hoặc `disable_non_proxied`.
 - Mode `auto` không thêm cờ; hành vi WebRTC phụ thuộc Chrome và proxy.
-- JavaScript hook chỉ can thiệp một phần API; không đảm bảo chặn mọi đường rò rỉ
-  (STUN/TURN, mDNS, IPv6, extension, worker đặc biệt).
+- Từ S8, toàn bộ JavaScript hook WebRTC đã được bỏ; chỉ dùng Chrome policy
+  flags (`disable_non_proxied_udp`, `enforce-webrtc-ip-permission-check`) và
+  mDNS. Cách này không can thiệp constructor/API nên không tạo thêm dấu hiệu
+  wrapper, nhưng vẫn phụ thuộc phiên bản Chrome và cấu hình proxy.
 - Audit ngày 2026-10-23 trên profile tạm **không proxy**:
   - browser public IP trùng host direct IP;
   - WebRTC không trả private/local address, host candidate ở dạng mDNS;
@@ -72,25 +76,46 @@ detector.
 
 - Đã chạy baseline `tools/detector_audit.py` ngày 2026-10-23 trên **một profile
   tạm, một GPU, không proxy**; đây không phải tỉ lệ pass trên nhiều cấu hình.
-- Kết quả baseline:
-  - CreepJS: `25% like headless`, `0% headless`, `20% stealth`;
-  - Pixelscan: fingerprint `inconsistent`, `masking detected`, nhưng
-    `No automated behavior detected`;
+- Kết quả baseline sau S1–S9:
+  - CreepJS: `31% like headless`, `0% headless`, `0% stealth` (clean Chrome cùng
+    máy: `25% like headless`; chênh do `noTaskbar`, xem mục 9);
+  - Pixelscan: thay đổi giữa các lần (`consistent` + `No masking detected` hoặc
+    `masking detected`), nhưng luôn `No automated behavior detected`;
   - BrowserLeaks Canvas: uniqueness `100%`;
-  - BrowserLeaks WebGL: unmasked vendor/renderer lộ GPU host thật (RTX 4090);
-  - BrowserLeaks Client Hints: `Sec-CH-Device-Memory: 16` trong khi fingerprint
-    config và `navigator.deviceMemory` là `8`.
-- Các bất nhất **đã xác nhận** nhưng chưa sửa: Client Hints device-memory với
-  config, và WebGL unmasked lộ GPU host. Không tự động thêm noise/fix chỉ từ một
-  baseline.
+  - BrowserLeaks WebGL: unmasked vendor/renderer theo profile; giới hạn
+    texture/viewport dùng bảng native của host;
+  - BrowserLeaks Client Hints: `Sec-CH-Device-Memory: 16` và
+    `navigator.deviceMemory: 16` (đã khớp sau S1/S6).
+- WebGL unmasked vẫn có thể lộ GPU host nếu profile khai báo GPU khác; đây là
+  giới hạn của việc chỉ đổi vendor/renderer qua JS, không thay driver thật.
+- Client Hints device-memory chỉ được gửi khi server gửi `Accept-CH` (và có thể
+  cần `Critical-CH`); nếu site không opt-in thì không có header để so sánh.
 - `detector_audit.py` bấm scan Pixelscan và chờ CreepJS/Pixelscan, nhưng site có
   thể đổi UI, rate-limit, challenge hoặc chặn automation. Challenge là `WARN`,
   không phải `PASS`.
 - `audit_fingerprint.py` cũ dùng Playwright `add_init_script`; hai harness mới
   (`leak_audit.py`, `detector_audit.py`) dùng BrowserLauncher + CDP thật nhưng
   không thay thế kiểm thử headed E2E trên từng profile.
-- E2E hiện có xác minh 16 check cốt lõi trên một profile Chrome thật, không phải
+- E2E hiện có xác minh 34 check cốt lõi trên một profile Chrome thật, không phải
   toàn bộ bề mặt fingerprint.
+
+### 6.1. Hook visibility, `toString` và `noTaskbar`
+
+- Từ S4, tool **không** giả `Function.prototype.toString`; các wrapper của
+  `HTMLCanvasElement.toDataURL`, `CanvasRenderingContext2D.getImageData`,
+  `WebGLRenderingContext.getParameter` và
+  `NavigatorUAData.getHighEntropyValues` có thể bị đọc source nếu detector
+  explicitly gọi `toString` trên chúng.
+- Đây là đánh đổi có chủ ý: Proxy `toString` từng bị CreepJS phát hiện
+  (`hasToStringProxy: true`) và đẩy stealth lên `20%`. Sau khi bỏ, stealth về
+  `0%`; audit chỉ còn kiểm tra `Function.prototype.toString` là native.
+- CDP `Emulation.setDeviceMetricsOverride(width=0, height=0)` trả
+  `screen.availHeight == screen.height`, nên CreepJS báo `noTaskbar: true` và
+  `like headless` tăng từ 25% (clean Chrome) lên 31%.
+- Không thêm hook `Screen.availHeight` để sửa `noTaskbar`; hook này có nguy cơ
+  làm mất kết quả stealth 0% và đã bị loại khỏi phạm vi.
+- `screen.availHeight`/`availWidth` vì vậy bằng kích thước screen đầy đủ; các
+  giá trị `screen`, DPR, CSS device-width/height/resolution vẫn khớp.
 
 ## 7. Bảo mật & vận hành
 

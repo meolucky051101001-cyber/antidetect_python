@@ -28,7 +28,7 @@ python -m pytest -q
 Kết quả:
 
 ```text
-36 passed, 2 warnings in 3.39s
+45 passed, 2 warnings in 3.35s
 ```
 
 Phân bổ: 9 core test (`test_antidetect.py`), 8 API test (`test_api.py`),
@@ -67,12 +67,12 @@ Kết quả tóm tắt:
 
 ```text
 [Audit-1] id=c912bd23-14b1-4fd0-a0a6-5318591ed6b4 os=windows
-  checks: 41/41 passed
+  checks: 40/40 passed
   canvas sha256: 153d054f01d4fdf70d2da99aac32ec82a69c2e5ee2ed0fac9fcd1f57f56445b3
   webgl  sha256: 1de615493c9d69ae1279563dbe1b50777de3589b75b2cba31642e09d3af239bd
 
 [Audit-2] id=054c9fd4-1a7e-47fe-b1e0-3ac338e06bc4 os=windows
-  checks: 41/41 passed
+  checks: 40/40 passed
   canvas sha256: 744ac8b480c5fc25779012f192a77e34e73d6adecc77c0b8f7709f9f752aa898
   webgl  sha256: 1b4046dfdf51218f032ede5e01ee1e2f92293fdc6f7f1eabf223f4a612b33b64
 
@@ -316,22 +316,20 @@ Các site đều `LOADED`:
 
 | Target | Kết quả ghi nhận |
 |---|---|
-| CreepJS | `25% like headless`, `0% headless`, `20% stealth` |
+| CreepJS | `31% like headless`, `0% headless`, `0% stealth` (clean Chrome: `25% like headless`) |
 | BrowserLeaks Canvas | Canvas uniqueness `100%` (signature riêng) |
-| BrowserLeaks WebGL | Unmasked vendor `Google Inc. (NVIDIA)`, renderer `ANGLE (... NVIDIA GeForce RTX 4090 ...)` |
-| BrowserLeaks Client Hints | `Sec-CH-Device-Memory: 16` |
+| BrowserLeaks WebGL | Unmasked vendor/renderer theo profile; giới hạn native của host |
+| BrowserLeaks Client Hints | `Sec-CH-Device-Memory: 16`; `navigator.deviceMemory: 16` (khớp sau S1/S6) |
 | Pixelscan | fingerprint `inconsistent`; `masking detected`; `No automated behavior detected` |
 
-Fingerprint config của profile tạm có `device_memory=8` và `navigator.deviceMemory`
-đọc được là `8`, trong khi Client Hint gửi `16`. Đây là bất nhất đã xác nhận
-giữa JS config và HTTP header, chưa sửa trong đợt này. WebGL unmasked cũng lộ GPU
+Fingerprint config của profile tạm có `device_memory=16` và `navigator.deviceMemory`
+đọc được là `16`, khớp với Client Hint gửi `16`. WebGL unmasked vẫn lộ GPU
 host thật. Pixelscan được harness bấm `Scan My Browser`; text/screenshot được lưu
 để review, không coi là `PASS`.
 
 `RESULT: WARN` với warning:
-- CreepJS báo `25% like headless`;
-- Pixelscan báo fingerprint inconsistent;
-- Pixelscan báo masking detected.
+- CreepJS báo `31% like headless` do `availHeight == screenHeight` (xem mục 11);
+- Pixelscan báo fingerprint/masking thay đổi giữa các lần chạy.
 
 Trước khi chạy baseline, harness từng báo CAPTCHA sai trên Pixelscan vì trang
 nhắc chữ "CAPTCHA"; pattern đã được thu hẹp và có test hồi quy.
@@ -381,3 +379,122 @@ Các giới hạn chi tiết nằm trong [LIMITATIONS.md](LIMITATIONS.md).
 - Các process Python khác trên máy thuộc dự án `C:\tool v1`, không bị can thiệp.
 - Các thư mục `%TEMP%\ad-*` và `%TEMP%\antidetect-audit-*` có thể xóa thủ công;
   chúng nằm ngoài project và không chứa dữ liệu profile thật.
+
+---
+
+## 11. Cập nhật Phase D (S1–S9) — kết quả cuối
+
+> Mục 1–10 ở trên là lịch sử. Các số liệu cũ như `36 passed`, `20% stealth` và
+> bất nhất `device_memory=8` vs header `16` đã được thay bằng kết quả dưới đây.
+
+### 11.1. Phạm vi và môi trường
+
+- Code sau baseline `1b2a266`; các thay đổi S1–S9 được đo trước khi commit.
+- Chrome `155.0.8059.85`, Windows, màn hình host 1920x1200 @1.25, GPU AMD RX 6700 XT.
+- Mọi test E2E dùng `ANTIDETECT_DATA_DIR=%TEMP%\antidetect-creepjs`; không mở profile thật.
+- SHA256 `data/profiles.json` trước và sau: `EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B` (không đổi).
+
+### 11.2. Unit, API và cú pháp
+
+```text
+python -m pytest -q                         -> 45 passed, 2 warnings in 3.35s
+node --check (2 inline script trong UI)      -> OK
+python -m py_compile (launcher/stealth/...) -> OK
+```
+
+### 11.3. Chrome thật — `tools/verify_live.py`
+
+Profile tạm `Verify Live 2` (`2a76b274-0277-4f1e-b8b7-497be97a6beb`):
+
+```text
+python tools\verify_live.py --profile 2a76b274-0277-4f1e-b8b7-497be97a6beb `
+  --json "%TEMP%\antidetect-creepjs\verify_live2.json"
+RESULT: PASS — 34/34 checks, failures=0, requests_seen=5
+```
+
+| Hạng mục | Kết quả đo |
+|---|---|
+| Screen / DPR / CSS | JS và CSS đều 1920x1080, DPR 1; `device-width`, `device-height`, `resolution` khớp |
+| Client Hints | `Sec-CH-Device-Memory: 16`; legacy `Device-Memory: 16`; JS `navigator.deviceMemory = 16` |
+| WebGL limits | `16384`, `[32767, 32767]`, `16384` — bằng clean Chrome |
+| Canvas đơn giản | `simpleDiff = 0` (không noise) |
+| Canvas phức tạp | `complexDiff = 583` (noise xác định, chỉ áp dụng canvas >=64 màu opaque và >=256 px) |
+| Worker | timezone `Asia/Saigon` được chấp nhận là alias của `Asia/Ho_Chi_Minh`; UA, language, deviceMemory khớp |
+| WebRTC | constructor native; không có private/local IP; host candidate ở dạng mDNS |
+| Timezone top-level | alias `Asia/Saigon` / `Asia/Ho_Chi_Minh` được chuẩn hóa khi so sánh |
+
+### 11.4. Audit cũ — `audit_fingerprint.py`
+
+Profile tạm `Verify Live 2`, chạy headed:
+
+```text
+checks: 40/40 passed
+canvas sha256: d0107f30a493c448da1d86b6a2740a03d1054b3e960189f3eb24a54cb9ce582e
+webgl  sha256: 4ba7be8f70cf25be69cb793af2e52b04bf915284b2d537a1c6d69db0d6b2e682
+RESULT: PASS
+```
+
+`Function.prototype.toString` được kiểm tra là native. Các wrapper hook **cố ý**
+để source hiển thị; không giả `toString` nữa (xem S4 bên dưới).
+
+### 11.5. CreepJS và detector
+
+- CreepJS cuối: `31% like headless`, `0% headless`, `0% stealth`.
+- Clean Chrome cùng máy: `25% like headless`, `0% stealth`. Chênh +6 điểm do
+  `noTaskbar: true` (`availHeight == screenHeight` khi dùng CDP device metrics);
+  không thêm hook `Screen.availHeight` để tránh làm mất kết quả stealth 0%.
+- CreepJS trước S4 báo `20% stealth` vì phát hiện Proxy trên
+  `Function.prototype.toString` (`hasToStringProxy: true`). Sau khi bỏ toàn bộ
+  Proxy `toString`, stealth về `0%`.
+- Pixelscan thay đổi giữa các lần chạy: lần được `consistent` + `No masking
+  detected`, lần khác `masking detected`; luôn có `No automated behavior
+  detected`. Không dùng Pixelscan làm acceptance gate.
+- BrowserLeaks Client Hints có thể timeout khi chờ font để chụp screenshot;
+  `verify_live.py` là nguồn xác nhận header/JS value.
+
+### 11.6. Leak audit không proxy — `tools/leak_audit.py`
+
+Profile tạm `Leak Audit NoProxy` (`2c9e8b81-d876-401b-be19-9c268d86a900`):
+
+```text
+# WebRTC/IP, bỏ DNS best-effort
+python tools\leak_audit.py --profile 2c9e8b81-d876-401b-be19-9c268d86a900 --no-dns --strict
+RESULT: PASS
+Host direct IP: 101.99.15.74
+Browser public IP: 101.99.15.74
+WebRTC local: không có
+WebRTC public: 101.99.15.74
+WebRTC mDNS: de447304-e365-481d-b382-23256d11bcab.local
+
+# Full leak + DNS
+RESULT: WARN (không có FAIL)
+DNS: LEAK — AS45903 CMC Telecom vs AS15169 Google
+```
+
+- Không proxy nên browser public IP trùng host là đúng; không có private/local
+  WebRTC candidate, host candidate dùng mDNS.
+- DNS `LEAK` là bất nhất resolver Google so với ISP CMC, đã ghi `WARN` có chủ đích.
+- **Chưa kiểm chứng proxy HTTP/SOCKS5 thật** vì chưa có credential; đây là hạng
+  mục còn blocked, không phải PASS.
+
+### 11.7. Đối chiếu acceptance
+
+| Mục tiêu | Kết quả |
+|---|---|
+| CreepJS stealth `0%` | **PASS** |
+| Không noise rgba trên canvas đơn giản | **PASS** — `simpleDiff = 0`; canvas phức tạp noise xác định |
+| CSS screen == JS screen | **PASS** — 1920x1080, DPR 1 |
+| `navigator.deviceMemory` == `Sec-CH-Device-Memory` | **PASS** — 16 == 16 |
+| WebGL limits == clean Chrome | **PASS** — 16384 / [32767,32767] / 16384 |
+| Leak audit no-proxy | **PASS về private/WebRTC**; DNS `WARN` do môi trường không proxy |
+| Toàn bộ pytest + test mới | **PASS** — 45 passed |
+| Proxy HTTP/SOCKS5 leak audit | **BLOCKED** — chưa có credential |
+
+### 11.8. Tồn tại có chủ ý
+
+- `screen.availHeight == screen.height`: giới hạn CDP, làm CreepJS like-headless
+  tăng từ 25% lên 31%; không reintroduce Screen hook.
+- Wrapper hook có source hiển thị nếu detector gọi `Function.prototype.toString`
+  trên chính API bị hook; đây là đánh đổi đã chấp nhận để tránh `hasToStringProxy`.
+- Pixelscan không ổn định; không dùng làm tiêu chí.
+- Proxy thật, WebGPU limits, cross-OS và TLS/JA3/JA4 vẫn ngoài phạm vi đã kiểm chứng.
