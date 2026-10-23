@@ -1,0 +1,274 @@
+import argparse
+import sys
+import os
+import json
+
+# Add root folder to sys.path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+from antidetect.models import ProxyConfig
+from antidetect.storage import ProfileManager
+from antidetect.launcher import BrowserLauncher
+from antidetect.fingerprint import generate_fingerprint
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Antidetect Python CLI — Điều khiển trình duyệt Antidetect qua dòng lệnh"
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Lệnh cần thực thi")
+
+    # Lệnh: list
+    subparsers.add_parser("list", help="Liệt kê tất cả profile")
+
+    # Lệnh: create
+    create_parser = subparsers.add_parser("create", help="Tạo profile mới")
+    create_parser.add_argument("--name", default="Profile Mới", help="Tên profile")
+    create_parser.add_argument(
+        "--os",
+        default="windows",
+        choices=["windows", "macos", "linux"],
+        help="Hệ điều hành giả lập",
+    )
+    create_parser.add_argument(
+        "--proxy",
+        help="Proxy định dạng protocol://user:pass@host:port hoặc protocol://host:port",
+    )
+
+    # Lệnh: start
+    start_parser = subparsers.add_parser("start", help="Khởi chạy profile")
+    start_parser.add_argument("id", help="ID của profile cần khởi chạy")
+    start_parser.add_argument("--url", help="Đường dẫn URL cần mở ngay sau khi bật")
+    start_parser.add_argument("--detach", action="store_true", help="Chạy profile ở chế độ nền và thoát CLI mà không tắt trình duyệt")
+
+    # Lệnh: start-all
+    start_all_parser = subparsers.add_parser("start-all", help="Khởi chạy toàn bộ profile cùng lúc")
+    start_all_parser.add_argument("--delay", type=float, default=0.8, help="Độ trễ (giây) giữa các profile (mặc định: 0.8s)")
+    start_all_parser.add_argument("--url", help="Đường dẫn URL cần mở ngay sau khi bật")
+    start_all_parser.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=8,
+        help="Số profile mở đồng thời tối đa; 0 = không giới hạn (mặc định: 8)",
+    )
+    start_all_parser.add_argument("--detach", action="store_true", help="Chạy toàn bộ profile ở chế độ nền và thoát CLI mà không tắt trình duyệt")
+
+    # Lệnh: stop
+    stop_parser = subparsers.add_parser("stop", help="Dừng profile đang chạy")
+    stop_parser.add_argument("id", help="ID của profile cần dừng")
+
+    # Lệnh: stop-all
+    subparsers.add_parser("stop-all", help="Dừng toàn bộ các profile đang chạy")
+
+    # Lệnh: delete
+    del_parser = subparsers.add_parser("delete", help="Xóa profile")
+    del_parser.add_argument("id", help="ID của profile cần xóa")
+
+    # Lệnh: reset-fp
+    rfp_parser = subparsers.add_parser("reset-fp", help="Sinh ngẫu nhiên bộ dấu vân tay mới cho profile")
+    rfp_parser.add_argument("id", help="ID của profile")
+    rfp_parser.add_argument("--os", choices=["windows", "macos", "linux"], help="Hệ điều hành mới (tùy chọn)")
+
+    # Lệnh: set-proxy
+    proxy_parser = subparsers.add_parser("set-proxy", help="Cài đặt hoặc cập nhật proxy cho profile")
+    proxy_parser.add_argument("id", help="ID của profile")
+    proxy_parser.add_argument("--proxy", help="Proxy định dạng protocol://user:pass@host:port hoặc protocol://host:port")
+    proxy_parser.add_argument("--disable", action="store_true", help="Tắt proxy cho profile này")
+
+    args = parser.parse_args()
+
+    manager = ProfileManager()
+    launcher = BrowserLauncher(manager)
+
+    if args.command == "list":
+        profiles = manager.list_profiles()
+        print(f"\n{'ID':<38} {'Tên':<20} {'Hệ điều hành':<12} {'Trạng thái'}")
+        print("-" * 80)
+        for p in profiles:
+            status = "Đang chạy" if launcher.is_running(p.id) else "Đã dừng"
+            print(f"{p.id:<38} {p.name:<20} {p.fingerprint.os:<12} {status}")
+        print(f"\nTổng cộng: {len(profiles)} profile.\n")
+
+    elif args.command == "create":
+        proxy_cfg = ProxyConfig()
+        if args.proxy:
+            # Parse proxy — tự thêm http:// nếu thiếu scheme
+            try:
+                from urllib.parse import urlparse
+
+                proxy_str = args.proxy
+                if "://" not in proxy_str:
+                    proxy_str = f"http://{proxy_str}"
+                parsed = urlparse(proxy_str)
+                proxy_cfg.enabled = True
+                proxy_cfg.protocol = parsed.scheme or "http"
+                proxy_cfg.host = parsed.hostname or ""
+                proxy_cfg.port = parsed.port or 8080
+                proxy_cfg.username = parsed.username
+                proxy_cfg.password = parsed.password
+            except Exception as e:
+                print(f"Lỗi phân tích cú pháp proxy: {e}")
+                sys.exit(1)
+
+        fp = generate_fingerprint(target_os=args.os)
+        p = manager.create_profile(
+            name=args.name,
+            target_os=args.os,
+            proxy=proxy_cfg,
+            fingerprint=fp,
+        )
+        print(f"Đã tạo profile thành công! ID: {p.id}")
+
+    elif args.command == "start":
+        clean_url = None
+        if hasattr(args, "url") and args.url:
+            clean_url = args.url.strip()
+            u = clean_url.lower()
+            if not (u.startswith("http://") or u.startswith("https://")):
+                print("Lỗi: URL phải bắt đầu bằng http:// hoặc https://")
+                sys.exit(1)
+        res = launcher.launch(args.id, open_url=clean_url)
+        if res.get("success"):
+            print(f"Khởi chạy profile thành công!")
+            print(f"Remote Debugging Port: {res.get('port')}")
+            print(f"CDP Endpoint: {res.get('ws_endpoint')}")
+            if getattr(args, "detach", False):
+                launcher.unregister_cleanup()
+                print("Profile đang chạy ở chế độ nền (detached).")
+            else:
+                print(f"Nhấn Ctrl+C để dừng profile và thoát.")
+                # Giữ tiến trình chạy để CDP daemon thread không bị kill
+                try:
+                    import time as _time
+                    while launcher.is_running(args.id):
+                        _time.sleep(1)
+                    print(f"Trình duyệt đã đóng.")
+                except KeyboardInterrupt:
+                    print(f"\nĐang dừng profile...")
+                    launcher.stop(args.id)
+                    print(f"Đã dừng profile thành công.")
+        else:
+            print(f"Lỗi khởi chạy: {res.get('error')}")
+
+    elif args.command == "start-all":
+        clean_url = None
+        if hasattr(args, "url") and args.url:
+            clean_url = args.url.strip()
+            u = clean_url.lower()
+            if not (u.startswith("http://") or u.startswith("https://")):
+                print("Lỗi: URL phải bắt đầu bằng http:// hoặc https://")
+                sys.exit(1)
+        print("Đang khởi chạy toàn bộ profile...")
+        res = launcher.launch_all(delay=args.delay, open_url=clean_url, max_concurrent=args.max_concurrent)
+        print(f"Đã kích hoạt {len(res)} profile:")
+        running_ids = []
+        for r in res:
+            sub_res = r["result"]
+            status_text = "Thành công" if sub_res.get("success") else f"Thất bại ({sub_res.get('error')})"
+            print(f" - {r['name']} ({r['profile_id'][:8]}...): {status_text}")
+            if sub_res.get("success"):
+                running_ids.append(r["profile_id"])
+
+        if getattr(args, "detach", False):
+            launcher.unregister_cleanup()
+            print("\nToàn bộ profile đang chạy ở chế độ nền (detached).")
+        elif running_ids:
+            print(f"\n{len(running_ids)} profile đang chạy. Nhấn Ctrl+C để dừng toàn bộ profile và thoát.")
+            try:
+                import time as _time
+                while any(launcher.is_running(pid) for pid in running_ids):
+                    _time.sleep(1)
+                print("Toàn bộ trình duyệt đã đóng.")
+            except KeyboardInterrupt:
+                print("\nĐang dừng toàn bộ profile...")
+                launcher.stop_all()
+                print("Đã dừng toàn bộ profile thành công.")
+
+    elif args.command == "stop":
+        res = launcher.stop(args.id)
+        print(res.get("message", res.get("error", "Đã dừng")))
+        if not res.get("success"):
+            sys.exit(1)
+
+    elif args.command == "stop-all":
+        res = launcher.stop_all()
+        print(res.get("message", "Đã dừng toàn bộ các profile đang chạy."))
+        if not res.get("success"):
+            print("Profile chưa dừng được: " + ", ".join(res.get("failed_profile_ids", [])))
+            sys.exit(1)
+
+    elif args.command == "delete":
+        from antidetect.storage import ProfileDeletionError
+        try:
+            deleted = manager.delete_profile(args.id)
+        except ProfileDeletionError as e:
+            print(str(e))
+            sys.exit(1)
+        if deleted:
+            print(f"Đã xóa profile {args.id} thành công.")
+        else:
+            print(f"Không tìm thấy profile {args.id}.")
+            sys.exit(1)
+
+    elif args.command == "reset-fp":
+        p = manager.get_profile(args.id)
+        if not p:
+            print(f"Không tìm thấy profile {args.id}.")
+            sys.exit(1)
+        os_to_use = args.os or p.fingerprint.os
+        new_fp = generate_fingerprint(
+            target_os=os_to_use,
+            timezone=p.fingerprint.timezone,
+            locale=p.fingerprint.locale,
+            latitude=p.fingerprint.latitude if p.fingerprint.latitude is not None else 21.0285,
+            longitude=p.fingerprint.longitude if p.fingerprint.longitude is not None else 105.8542
+        )
+        p.fingerprint = new_fp
+        manager.update_profile(p)
+        print(f"Đã đổi dấu vân tay mới cho profile '{p.name}'!")
+        print(f"- OS: {new_fp.os}")
+        print(f"- Màn hình: {new_fp.screen_width}x{new_fp.screen_height}")
+        print(f"- Canvas Seed: #{new_fp.canvas_noise_seed}")
+        print(f"- GPU: {new_fp.webgl_renderer}")
+
+    elif args.command == "set-proxy":
+        p = manager.get_profile(args.id)
+        if not p:
+            print(f"Không tìm thấy profile {args.id}.")
+            sys.exit(1)
+        if args.disable:
+            p.proxy.enabled = False
+            manager.update_profile(p)
+            print(f"Đã tắt proxy cho profile '{p.name}'.")
+        elif args.proxy:
+            from urllib.parse import urlparse
+            proxy_str = args.proxy
+            if "://" not in proxy_str:
+                proxy_str = f"http://{proxy_str}"
+            parsed = urlparse(proxy_str)
+            p.proxy.enabled = True
+            p.proxy.protocol = parsed.scheme or "http"
+            p.proxy.host = parsed.hostname or ""
+            p.proxy.port = parsed.port or 8080
+            p.proxy.username = parsed.username
+            p.proxy.password = parsed.password
+            manager.update_profile(p)
+            print(f"Đã cập nhật proxy cho profile '{p.name}': {p.proxy.to_display_url()}")
+        else:
+            print("Vui lòng cung cấp --proxy <url> hoặc --disable.")
+
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

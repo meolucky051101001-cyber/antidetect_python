@@ -1,0 +1,26 @@
+# Runtime data and secrets (never commit)
+data/
+exports/
+backups/
+workspace/
+workspace_backup_safety/
+temp_dir/
+test_out_dir/
+*.dpapi
+*.lock
+*.pid
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Logs and local artifacts
+*.log
+app.log
+*.zip
+.DS_Store
+Thumbs.db

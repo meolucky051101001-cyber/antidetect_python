@@ -1,0 +1,486 @@
+import os
+import sys
+import json
+import shutil
+import time
+import threading
+import re
+import uuid
+from typing import List, Optional
+from .models import Profile, FingerprintConfig, ProxyConfig
+from .fingerprint import generate_fingerprint
+from .secrets import (
+    SecretStoreCorruption,
+    get_proxy_password,
+    set_proxy_password,
+    delete_proxy_password,
+    migrate_plaintext_passwords,
+)
+
+# Regex kiểm tra profile_id hợp lệ (UUID v4 hoặc chuỗi alphanumeric-dash)
+_VALID_PROFILE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,63}$")
+
+
+class ProfileDeletionError(RuntimeError):
+    """Directory/metadata deletion failed; state must stay retryable."""
+
+
+def _safe_log(message: str) -> None:
+    """Log without crashing on legacy cp1252 consoles (Vietnamese text)."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        try:
+            print(message.encode("ascii", "backslashreplace").decode("ascii"))
+        except Exception:
+            pass
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Tests and portable deployments can point data/ elsewhere without touching
+# the user's real browser profiles.
+DATA_DIR = os.environ.get("ANTIDETECT_DATA_DIR") or os.path.join(BASE_DIR, "data")
+PROFILES_JSON = os.path.join(DATA_DIR, "profiles.json")
+PROFILES_DATA_DIR = os.path.join(DATA_DIR, "profiles")
+LOCK_FILE = os.path.join(DATA_DIR, "profiles.lock")
+
+
+class InterProcessLock:
+    """P1-07: Khóa liên tiến trình sử dụng file lock của hệ điều hành (msvcrt / fcntl)."""
+    def __init__(self, lock_path: str = LOCK_FILE, timeout: float = 8.0):
+        self.lock_path = lock_path
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        start = time.monotonic()
+        os.makedirs(os.path.dirname(os.path.abspath(self.lock_path)), exist_ok=True)
+        while time.monotonic() - start < self.timeout:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    self.fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT)
+                    msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    self.fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT)
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except (OSError, IOError):
+                if self.fd is not None:
+                    try:
+                        os.close(self.fd)
+                    except OSError:
+                        pass
+                    self.fd = None
+                time.sleep(0.05)
+        # Fail closed: callers must not write metadata without a real lock.
+        raise TimeoutError(
+            f"Không lấy được khóa dữ liệu sau {self.timeout:.1f}s: {self.lock_path}"
+        )
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.fd is not None:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+
+
+class ProfileManager:
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._corrupted = False  # Cờ bảo vệ chống ghi đè khi file hỏng
+        self._cache: Optional[List[Profile]] = None
+        self._cache_mtime: float = 0.0
+        os.makedirs(DATA_DIR, exist_ok=True)
+        os.makedirs(PROFILES_DATA_DIR, exist_ok=True)
+        self._ensure_profiles_file()
+
+    def _ensure_profiles_file(self):
+        with self._lock:
+            if not os.path.exists(PROFILES_JSON):
+                temp_file = f"{PROFILES_JSON}.tmp"
+                with open(temp_file, "w", encoding="utf-8") as f:
+                    json.dump([], f)
+                os.replace(temp_file, PROFILES_JSON)
+                self._cache = []
+                self._cache_mtime = os.stat(PROFILES_JSON).st_mtime_ns
+
+    def _validate_profile_id(self, profile_id: str):
+        """Kiểm tra profile_id hợp lệ để chống path traversal."""
+        if not profile_id or not _VALID_PROFILE_ID.match(profile_id):
+            raise ValueError(f"Profile ID không hợp lệ: {profile_id}")
+
+    def list_profiles(self) -> List[Profile]:
+        with self._lock:
+            if not os.path.exists(PROFILES_JSON):
+                self._ensure_profiles_file()
+                return []
+            try:
+                # P2-05: Kiểm tra cache trong bộ nhớ qua mtime_ns của file
+                mtime = os.stat(PROFILES_JSON).st_mtime_ns
+                if self._cache is not None and getattr(self, "_cache_mtime", None) == mtime:
+                    return [p.model_copy(deep=True) for p in self._cache]
+
+                with open(PROFILES_JSON, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if not content:
+                        raise ValueError("Empty metadata file")
+                    data = json.loads(content)
+                    if not isinstance(data, list):
+                        raise ValueError("Metadata root must be a list")
+                    if any(not isinstance(item, dict) or not item.get('id') for item in data):
+                        raise ValueError("Profile entry must have a persistent ID")
+                    profiles = [Profile.model_validate(item) for item in data]
+                    for profile in profiles:
+                        self._validate_profile_id(profile.id)
+                        if profile.proxy and not profile.proxy.password:
+                            pwd = get_proxy_password(
+                                profile.id,
+                                identity=profile.proxy.identity_key(),
+                            )
+                            if pwd:
+                                profile.proxy.password = pwd
+                    if len({p.id for p in profiles}) != len(profiles):
+                        raise ValueError("Duplicate profile IDs")
+                    self._corrupted = False
+                    self._cache = profiles
+                    self._cache_mtime = mtime
+                    return [p.model_copy(deep=True) for p in profiles]
+            except (ValueError, UnicodeError) as e:
+                self._cache = None
+                backup_path = f"{PROFILES_JSON}.corrupt.{time.time_ns()}"
+                backed_up = False
+                try:
+                    if not self._corrupted:
+                        shutil.copy2(PROFILES_JSON, backup_path)
+                        backed_up = True
+                except Exception:
+                    pass
+                self._corrupted = True  # Đặt cờ chống ghi đè
+                raise RuntimeError(
+                    "profiles.json bị hỏng hoặc sai cấu trúc. Đã khóa ghi và giữ nguyên file gốc. "
+                    + (f"Bản sao: {backup_path}. " if backed_up else "")
+                    + "Hãy khôi phục từ bản sao hợp lệ trước khi tiếp tục."
+                ) from e
+            except Exception as e:
+                _safe_log(f"[Storage] Lỗi đọc profiles.json: {type(e).__name__}: {e}")
+                raise e
+
+    def _create_timestamped_backup(self):
+        """Tạo bản sao lưu tự động trước khi ghi đè, giữ tối đa 10 bản sao gần nhất."""
+        if not os.path.exists(PROFILES_JSON):
+            return
+        try:
+            if os.path.getsize(PROFILES_JSON) == 0:
+                return
+            backup_dir = os.path.join(DATA_DIR, "backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            backup_path = os.path.join(backup_dir, f"profiles_{ts}_{uuid.uuid4().hex[:6]}.json")
+            shutil.copy2(PROFILES_JSON, backup_path)
+            # Dọn dẹp giữ tối đa 10 bản sao
+            backups = sorted(
+                [os.path.join(backup_dir, f) for f in os.listdir(backup_dir) if f.startswith("profiles_") and f.endswith(".json")],
+                key=os.path.getmtime
+            )
+            while len(backups) > 10:
+                oldest = backups.pop(0)
+                try:
+                    os.remove(oldest)
+                except OSError:
+                    pass
+        except Exception as e:
+            _safe_log(f"[Storage] Cảnh báo tạo backup: {type(e).__name__}: {e}")
+
+    def save_profiles(self, profiles: List[Profile]):
+        lock_path = os.path.join(DATA_DIR, "profiles.lock")
+        with self._lock, InterProcessLock(lock_path):
+            # Re-read the current file even when callers invoke save directly.
+            self.list_profiles()
+            # Chống ghi đè khi file đang bị hỏng
+            if self._corrupted:
+                raise RuntimeError(
+                    "Không thể lưu: profiles.json đang bị hỏng. "
+                    "Khôi phục file backup thủ công trước."
+                )
+            # P0-02: Tự động di chuyển mật khẩu plaintext vào kho DPAPI an toàn
+            has_plaintext_secret = any(
+                p.proxy
+                and p.proxy.password
+                and p.proxy.password != "********"
+                and str(p.proxy.password).strip()
+                for p in profiles
+            )
+            try:
+                migrate_plaintext_passwords(profiles)
+            except SecretStoreCorruption as e:
+                # Never silently drop a password the caller asked us to save.
+                if has_plaintext_secret:
+                    raise RuntimeError(
+                        "Không thể lưu mật khẩu proxy vì secrets.dpapi đang hỏng. "
+                        "Hãy khôi phục kho secret trước khi lưu profile."
+                    ) from e
+                _safe_log(f"[Storage] Cảnh báo kho secret hỏng: {e}")
+            except Exception as e:
+                _safe_log(f"[Storage] Di chuyển mật khẩu proxy sang DPAPI: {type(e).__name__}: {e}")
+
+            # P0-01: Tạo bản sao lưu timestamped trước khi replace
+            self._create_timestamped_backup()
+
+            dump_list = []
+            for p in profiles:
+                d = p.model_dump(context={"include_secrets": False})
+                if d.get("proxy"):
+                    d["proxy"]["password"] = None  # Luôn để null trên đĩa
+                dump_list.append(d)
+
+            temp_file = f"{PROFILES_JSON}.tmp.{uuid.uuid4().hex}"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(
+                    dump_list,
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_file, PROFILES_JSON)
+            self._cache = [p.model_copy(deep=True) for p in profiles]
+            try:
+                self._cache_mtime = os.stat(PROFILES_JSON).st_mtime_ns
+            except Exception:
+                self._cache_mtime = 0
+
+    def get_profile(self, profile_id: str) -> Optional[Profile]:
+        profiles = self.list_profiles()
+        for p in profiles:
+            if p.id == profile_id:
+                # Nạp mật khẩu proxy từ DPAPI nếu có, nhưng chỉ khi identity khớp.
+                if p.proxy and not p.proxy.password:
+                    pwd = get_proxy_password(p.id, identity=p.proxy.identity_key())
+                    if pwd:
+                        p.proxy.password = pwd
+                return p
+        return None
+
+    def get_profile_dir(self, profile_id: str) -> str:
+        self._validate_profile_id(profile_id)
+        p_dir = os.path.join(PROFILES_DATA_DIR, profile_id)
+        # Kiểm tra thêm: đường dẫn phải nằm trong PROFILES_DATA_DIR
+        real_dir = os.path.realpath(p_dir)
+        if not real_dir.startswith(os.path.realpath(PROFILES_DATA_DIR)):
+            raise ValueError(f"Path traversal detected: {profile_id}")
+        os.makedirs(p_dir, exist_ok=True)
+        return p_dir
+
+    def create_profile(
+        self,
+        name: str = "Profile Mới",
+        target_os: str = "windows",
+        proxy: Optional[ProxyConfig] = None,
+        fingerprint: Optional[FingerprintConfig] = None,
+        notes: str = "",
+        tags: Optional[List[str]] = None,
+    ) -> Profile:
+        with self._lock:
+            if fingerprint is None:
+                fingerprint = generate_fingerprint(target_os=target_os)
+
+            if proxy is None:
+                proxy = ProxyConfig()
+
+            new_p = Profile(
+                name=name,
+                fingerprint=fingerprint,
+                proxy=proxy,
+                notes=notes,
+                tags=tags or [],
+            )
+
+            # Tạo thư mục dữ liệu riêng cho profile
+            self.get_profile_dir(new_p.id)
+
+            profiles = self.list_profiles()
+            profiles.append(new_p)
+            self.save_profiles(profiles)
+            return new_p
+
+    def update_profile(self, updated: Profile, expected_revision: Optional[int] = None) -> Optional[Profile]:
+        from .models import REDACTED_SECRET
+        with self._lock:
+            profiles = self.list_profiles()
+            found = False
+            for i, p in enumerate(profiles):
+                if p.id == updated.id:
+                    # P0-01: Kiểm tra xung đột phiên bản nếu caller yêu cầu
+                    current_rev = getattr(p, "revision", 1) or 1
+                    if expected_revision is not None and current_rev != expected_revision:
+                        raise RuntimeError(
+                            f"Conflict: Profile đã bị sửa đổi bởi phiên khác (revision hiện tại {current_rev} != {expected_revision})"
+                        )
+                    updated.revision = current_rev + 1
+                    updated.updated_at = int(time.time())
+
+                    old_identity = p.proxy.identity_key() if p.proxy else None
+                    new_identity = (
+                        updated.proxy.identity_key() if updated.proxy else None
+                    )
+                    identity_changed = old_identity != new_identity
+                    supplied = (
+                        updated.proxy.password
+                        if updated.proxy and updated.proxy.password
+                        else None
+                    )
+                    supplied_is_real = bool(
+                        supplied
+                        and supplied != REDACTED_SECRET
+                        and str(supplied).strip()
+                    )
+
+                    if supplied_is_real:
+                        # A new password is only ever bound to the new identity.
+                        set_proxy_password(
+                            updated.id, str(supplied), identity=new_identity
+                        )
+                    elif identity_changed:
+                        # Blank password + changed proxy = do not reuse the old
+                        # credential for a different host/port/user.
+                        try:
+                            delete_proxy_password(updated.id)
+                        except SecretStoreCorruption as e:
+                            _safe_log(
+                                f"[Storage] Không xóa được secret cũ của {updated.id}: {e}"
+                            )
+                        updated.proxy.password = None
+                    else:
+                        # Same endpoint: blank/redacted means "keep existing".
+                        pwd = get_proxy_password(updated.id, identity=new_identity)
+                        updated.proxy.password = pwd
+
+                    profiles[i] = updated
+                    found = True
+                    break
+            if found:
+                self.save_profiles(profiles)
+                return updated
+            return None
+
+    def delete_profile(self, profile_id: str) -> bool:
+        """Delete a profile with retryable, secret-safe ordering.
+
+        Order: profile directory -> metadata -> secret. If the directory cannot
+        be removed, metadata and the DPAPI secret are left untouched so the
+        user can retry after closing the browser. Only a successful metadata
+        save allows the secret to be removed.
+        """
+        self._validate_profile_id(profile_id)
+        with self._lock:
+            profiles = self.list_profiles()
+            new_list = [p for p in profiles if p.id != profile_id]
+            if len(new_list) == len(profiles):
+                return False
+
+            p_dir = os.path.join(PROFILES_DATA_DIR, profile_id)
+            if os.path.exists(p_dir):
+                last_error = None
+                for attempt in range(3):
+                    try:
+                        shutil.rmtree(p_dir)
+                        last_error = None
+                        break
+                    except PermissionError as e:
+                        last_error = e
+                        if attempt < 2:
+                            time.sleep(0.5 * (attempt + 1))
+                    except Exception as e:
+                        last_error = e
+                        break
+
+                if os.path.exists(p_dir):
+                    _safe_log(
+                        f"[Storage] Không thể xóa thư mục profile {profile_id} "
+                        f"(file đang bị khóa). Hãy đóng trình duyệt trước khi xóa. "
+                        f"Chi tiết: {type(last_error).__name__ if last_error else 'unknown'}"
+                    )
+                    raise ProfileDeletionError(
+                        "Không thể xóa thư mục profile (file đang bị khóa). "
+                        "Metadata và mật khẩu proxy được giữ nguyên; hãy đóng trình duyệt rồi thử lại."
+                    )
+
+            # Directory is gone. Persist the metadata removal before deleting
+            # the DPAPI entry: if this write fails, the secret is still needed
+            # for a retry.
+            self.save_profiles(new_list)
+
+            try:
+                delete_proxy_password(profile_id)
+            except SecretStoreCorruption as e:
+                # The profile is already gone; do not resurrect metadata just
+                # because the encrypted store is unreadable. Leave an audit log.
+                _safe_log(
+                    f"[Storage] Profile {profile_id} đã xóa nhưng không dọn được secret: {e}"
+                )
+            except Exception as e:
+                _safe_log(
+                    f"[Storage] Profile {profile_id} đã xóa nhưng dọn secret thất bại: "
+                    f"{type(e).__name__}: {e}"
+                )
+            return True
+
+    def duplicate_profile(
+        self, profile_id: str, new_name: Optional[str] = None, copy_data: bool = False
+    ) -> Optional[Profile]:
+        with self._lock:
+            orig = self.get_profile(profile_id)
+            if not orig:
+                return None
+
+            name = new_name or f"{orig.name} (Bản sao)"
+            new_fp = generate_fingerprint(
+                target_os=orig.fingerprint.os,
+                timezone=orig.fingerprint.timezone,
+                locale=orig.fingerprint.locale,
+                latitude=orig.fingerprint.latitude or 21.0285,
+                longitude=orig.fingerprint.longitude or 105.8542,
+            )
+
+            new_profile = self.create_profile(
+                name=name,
+                target_os=orig.fingerprint.os,
+                proxy=orig.proxy.model_copy(),
+                fingerprint=new_fp,
+                notes=orig.notes,
+                tags=orig.tags.copy(),
+            )
+
+            # M16: Tùy chọn sao chép dữ liệu phiên (cookies, session) nếu copy_data=True
+            if copy_data and new_profile:
+                orig_dir = os.path.join(PROFILES_DATA_DIR, profile_id)
+                new_dir = os.path.join(PROFILES_DATA_DIR, new_profile.id)
+                # Không nhân bản file cookies.json rời; phiên trình duyệt chỉ nằm trong user_data.
+                orig_user_data = os.path.join(orig_dir, "user_data")
+                new_user_data = os.path.join(new_dir, "user_data")
+                if os.path.exists(orig_user_data):
+                    try:
+                        def ignore_locks(d, files):
+                            return [f for f in files if f in ("lockfile", "DevToolsActivePort", "SingletonLock", "SingletonCookie", "SingletonSocket")]
+                        shutil.copytree(orig_user_data, new_user_data, dirs_exist_ok=True, ignore=ignore_locks)
+                    except Exception as e:
+                        _safe_log(
+                            f"[Storage] Lỗi sao chép dữ liệu user_data: "
+                            f"{type(e).__name__}: {e}"
+                        )
+
+            return new_profile

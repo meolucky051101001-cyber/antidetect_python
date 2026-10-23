@@ -1,0 +1,14 @@
+<!doctype html><html lang="vi"><meta charset="utf-8"><title>Mở Antidetect Browser</title>
+<body><p id="message">Hãy mở ứng dụng từ shortcut hoặc chạy run.py để xác thực phiên làm việc.</p>
+<script>
+(async () => {
+    const key = location.hash.slice(1);
+    history.replaceState(null, '', location.pathname);
+    if (!key) return;
+    try {
+        const r = await fetch('/auth/login', {method:'POST', headers:{Authorization:'Bearer ' + key}});
+        if (!r.ok) throw new Error('Phiên mở ứng dụng không hợp lệ. Hãy mở lại shortcut.');
+        location.replace('/');
+    } catch(e) { document.getElementById('message').textContent=e.message; }
+})();
+</script></body></html>
