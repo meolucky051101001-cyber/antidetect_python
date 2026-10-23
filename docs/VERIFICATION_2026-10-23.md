@@ -360,8 +360,8 @@ Hai proxy HTTP từ ảnh người dùng được test trong thư mục dữ li�
 
 | Proxy | Kết nối trực tiếp | Kết quả |
 |---|---|---|
-| `160.250.166.89:23951` (`SLpfLP`) | `CONNECT tunnel failed, response 407` | Không dùng được với credential đã cung cấp |
-| `113.160.166.27:46787` (`nbxeOA`, egress `117.0.181.67`) | HTTP 200, IP Việt Nam, Viettel `AS7552`, Hanoi | Dùng để audit |
+| `160.250.166.89:23951` (tài khoản proxy #1) | `CONNECT tunnel failed, response 407` | Không dùng được với credential đã cung cấp |
+| `113.160.166.27:46787` (tài khoản proxy #2, egress `117.0.181.67`) | HTTP 200, IP Việt Nam, Viettel `AS7552`, Hanoi | Dùng để audit |
 
 Profile tạm `31e137dc-5658-4a6e-8102-d1b5466221a8` (`Proxy Test Viettel`),
 fingerprint Windows/timezone `Asia/Ho_Chi_Minh`, `webrtc_mode=disable_non_proxied`.
