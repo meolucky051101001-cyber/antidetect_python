@@ -2,7 +2,7 @@
 
 Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, can thiệp dấu vân tay qua Chrome DevTools Protocol (CDP), hỗ trợ proxy xác thực và dashboard local.
 
-> **Trạng thái 2026-10-23:** bản hardening sau review độc lập, đã triển khai S1–S9 (host RAM/screen, native WebGL limits, deviceMemory/Client Hints, canvas gate, worker/iframe CDP, bỏ Proxy `toString`). CreepJS stealth `0%`, leak audit no-proxy không lộ private/WebRTC; **chưa phải sản phẩm production-grade**, proxy thật và Pixelscan vẫn chưa ổn định. Xem [FIXES.md](FIXES.md), [docs/VERIFICATION_2026-10-23.md](docs/VERIFICATION_2026-10-23.md) và [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+> **Trạng thái 2026-10-23:** bản hardening sau review độc lập, đã triển khai S1–S9 (host RAM/screen, native WebGL limits, deviceMemory/Client Hints, canvas gate, worker/iframe CDP, bỏ Proxy `toString`). CreepJS stealth `0%`, leak audit no-proxy không lộ private/WebRTC. Đã test proxy HTTP thật: browser IP đi đúng egress proxy và WebRTC không còn lộ IP host sau khi thêm `--webrtc-ip-handling-policy` (Chrome 155); DNS resolver Google vẫn lệch ASN với egress proxy nên full DNS là `FAIL`/cần review thủ công. **Chưa phải sản phẩm production-grade**; xem [FIXES.md](FIXES.md), [docs/VERIFICATION_2026-10-23.md](docs/VERIFICATION_2026-10-23.md) và [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ---
 
@@ -22,7 +22,7 @@ Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, ca
 3. **Proxy và WebRTC**
    - HTTP và SOCKS5; proxy có username/password dùng Chrome auth extension/CDP.
    - Mật khẩu proxy lưu bằng Windows DPAPI và gắn với **identity** của proxy (protocol + host + port + username). Đổi endpoint sẽ không tái sử dụng mật khẩu cũ.
-   - Cờ WebRTC chỉ được bật khi profile có proxy và mode là `block`/`disable_non_proxied`; mode `auto` không tự thêm cờ. Từ S8, toàn bộ JS WebRTC hook đã bỏ; chỉ dùng policy flags + mDNS.
+   - Cờ WebRTC chỉ được bật khi profile có proxy và mode là `block`/`disable_non_proxied`; mode `auto` không tự thêm cờ. Từ S8, toàn bộ JS WebRTC hook đã bỏ; chỉ dùng policy flags + mDNS. Từ bản vá proxy 2026-10-23 có thêm `--webrtc-ip-handling-policy=disable_non_proxied_udp` vì Chrome 155 chỉ với `--force-webrtc-ip-handling-policy` vẫn để STUN/UDP đi thẳng và lộ IP thật.
 
 4. **Dashboard local**
    - Tailwind CSS và Lucide được vendor tại `web/static/vendor/`, **không tải CDN** khi chạy.
@@ -165,13 +165,17 @@ python tools\detector_audit.py --profile "<id-or-name>" --url https://example.co
 
 Mặc định harness mở CreepJS, BrowserLeaks Canvas/WebGL/Client Hints và Pixelscan. Nó lưu title, URL cuối, text, screenshot, snapshot fingerprint cơ bản và tự bấm nút scan của Pixelscan. Challenge/CAPTCHA được ghi `WARN`, không bao giờ được coi là `PASS`. Đây là **baseline**, không phải chứng nhận vượt detector.
 
-Kết quả chạy thật ngày **2026-10-23** trên profile tạm `Audit Smoke` (không proxy):
+Kết quả chạy thật ngày **2026-10-23** trên profile tạm `Audit Smoke` (không proxy) và profile tạm có proxy HTTP:
 
-- IP/WebRTC (`--no-dns`): `PASS`; browser IP trùng host direct IP, WebRTC không lộ private IP, chỉ có mDNS host candidate.
-- Full leak + DNS: `WARN`; bash.ws báo `DNS may be leaking` với ASN `AS45903 CMC Telecom Infrastructure Company` (internet access) và `AS15169 Google LLC` (DNS). Đây là bất nhất DNS của phiên không proxy, **không** phải bằng chứng rò rỉ proxy vì chưa test proxy thật.
+- IP/WebRTC no-proxy (`--no-dns`): `PASS`; browser IP trùng host direct IP, WebRTC không lộ private IP, chỉ có mDNS host candidate.
+- Full leak + DNS no-proxy: `WARN`; bash.ws báo `DNS may be leaking` với ASN `AS45903 CMC Telecom Infrastructure Company` (internet access) và `AS15169 Google LLC` (DNS). Đây là bất nhất DNS của phiên không proxy, không phải bằng chứng rò rỉ proxy.
+- Proxy HTTP `113.160.166.27:46787` (egress `117.0.181.67`, Viettel `AS7552`): trước khi sửa, WebRTC trả srflx `101.99.15.74` là IP thật của host. Sau khi thêm `--webrtc-ip-handling-policy=disable_non_proxied_udp`, `leak_audit.py --no-dns --strict` trả `PASS` — browser IP đi proxy, không còn public/local WebRTC candidate.
+- Proxy HTTP #1 `160.250.166.89:23951` trả `407 Proxy Authentication Required` với đúng credential đã cấp; cần kiểm tra lại mật khẩu hoặc whitelist IP.
+- Full DNS qua proxy vẫn `FAIL`/cần review: bash.ws thấy resolver Google `AS15169` lệch egress Viettel `AS7552`. HTTP proxy resolve hostname phía proxy và Chrome DoH dùng Google, nên đây là lệch ASN resolver, không phải bằng chứng DNS đi thẳng từ ISP nội bộ. Muốn DNS khớp proxy cần SOCKS5 remote DNS hoặc proxy có DNS riêng.
 - Detector smoke `https://example.com`: `PASS`.
 - Detector baseline: `WARN`; CreepJS báo `31% like headless`, `0% headless`, `0% stealth` (clean Chrome cùng máy: `25% like headless`); Pixelscan thay đổi giữa các lần (`consistent`/`inconsistent`, `No masking detected`/`masking detected`) nhưng luôn `No automated behavior detected`; BrowserLeaks Canvas uniqueness `100%`; WebGL unmasked theo profile, limits native của host; Client Hints gửi `Sec-CH-Device-Memory: 16`, khớp `navigator.deviceMemory: 16`.
-- Chưa có proxy HTTP/SOCKS5 thật để chứng minh E2E rò rỉ IP/WebRTC/DNS **qua proxy**. Không sửa fingerprint chỉ từ một baseline.
+- **Sự cố dữ liệu thật trong lúc test:** `conftest.py` cũ để test hardening ghi nhầm vào `data/profiles.json` và `data/secrets.dpapi`. Đã phát hiện, backup toàn bộ trạng thái, khôi phục `profiles.json` (SHA256 `EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B`) và `secrets.dpapi` từ ZIP delivery 2026-10-22; 7 profile và secret Profile 1 đã kiểm tra lại. Đã sửa isolation ở `conftest.py`, `test_audit_tools.py` và `run_all_tests.py`; chạy lại pytest **không làm đổi hash** hai file thật.
+- Không sửa fingerprint chỉ từ một baseline; chưa test proxy SOCKS5 hoặc nhiều nhà cung cấp trên nhiều tỉnh/ASN.
 
 ---
 
@@ -193,7 +197,7 @@ python tools/probe_fingerprint.py --strict
 # Chrome thật: 34 check screen/CSS/Client Hints/WebGL/canvas/worker/WebRTC
 python tools\verify_live.py --profile "<id-or-name>" --json "$env:TEMP\verify_live.json"
 
-# Leak audit no-proxy (proxy thật chưa có credential)
+# Leak audit đầy đủ (dùng thêm --no-dns nếu chỉ cần IP/WebRTC)
 python tools\leak_audit.py --profile "<id-or-name>" --json "$env:TEMP\leak.json"
 ```
 
@@ -201,12 +205,14 @@ Kết quả đã chạy ngày **2026-10-23**:
 
 | Hạng mục | Kết quả |
 |---|---|
-| `pytest -q` | **45 passed** (9 core + 8 API + 11 hardening + 8 audit + 9 stealth consistency) |
+| `pytest -q` | **47 passed** (9 core + 8 API + 11 hardening + 10 audit + 9 stealth consistency) |
 | `run_all_tests.py` | **9/9 unit**, **8/8 API** |
+| Dữ liệu thật sau test | `profiles.json` SHA256 `EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B`; `secrets.dpapi` SHA256 `584CED2CD9C154169F94EC67D025B15B2853895BD7A5614D0A59C0A879154148`; pytest/run_all_tests không đổi hash |
 | Audit profile tạm | **40/40 check**, canvas/WebGL hash ổn định trong profile, 0 warning |
 | Chrome E2E thật | `verify_live.py` **34/34 PASS**; `configuration_verified=true`; runtime state + port thật |
 | CreepJS | `0% stealth`, `0% headless`; `31% like headless` (clean Chrome 25%) |
-| Leak no-proxy | `--no-dns --strict`: **PASS**; không private/WebRTC leak. Full DNS: `WARN` do không proxy; proxy thật chưa test |
+| Leak no-proxy | `--no-dns --strict`: **PASS**; không private/WebRTC leak. Full DNS: `WARN` do không proxy |
+| Leak proxy HTTP | `--no-dns --strict`: **PASS** — egress `117.0.181.67`, WebRTC sạch sau fix. Full DNS: **FAIL/review** — resolver Google lệch ASN với egress Viettel |
 | Cross-process stop | `cli.py stop-all` dừng Chrome, runtime file về `{}`, PID không còn trong tasklist |
 | Server stop | `python -m antidetect.server_control stop` trả exit 0 qua API |
 | UI local | `/static/vendor/tailwind.js` và lucide trả 200; CSP không còn host CDN; Tailwind/Lucide hoạt động |
@@ -265,7 +271,8 @@ antidetect_python/
 - Audit/probe mới (`tools/verify_live.py`, `tools/leak_audit.py`, `tools/detector_audit.py`) dùng `BrowserLauncher` + CDP thật; `audit_fingerprint.py` cũ vẫn dùng Playwright `add_init_script`. Không có harness nào thay thế kiểm thử trên nhiều GPU/proxy/phiên bản Chrome.
 - Baseline detector mới chạy **một profile tạm, một GPU, không proxy**; Pixelscan thay đổi giữa các lần, kết quả `WARN` không phải chứng nhận vượt detector.
 - WebGPU mới che adapter info; features/limits/device vẫn do GPU host quyết định.
-- Chưa kiểm thử E2E rò rỉ IP/WebRTC/DNS qua proxy HTTP/SOCKS5 thật; DNS bash.ws là best-effort.
+- Đã test E2E IP/WebRTC qua **một** proxy HTTP thật; kết quả `PASS` sau khi thêm `--webrtc-ip-handling-policy`. DNS qua proxy vẫn `FAIL/review` vì resolver Google lệch ASN với egress Viettel; chưa test SOCKS5. DNS bash.ws là best-effort.
+- **Không phân phối ZIP `ANTIDETECT_COMPLETE_DELIVERY_2026-10-22.zip`** (186 MB) vì ZIP đó chứa `data/profiles/` và dữ liệu người dùng. Bản code sạch để giao là `exports/ANTIDETECT_CODE_2026-10-23.zip`, chỉ gồm source/docs/tests.
 - Chưa hỗ trợ Firefox; giả lập macOS/Linux trên host Windows vẫn là thực nghiệm; TLS/JA3/JA4 không thay đổi được bằng CDP.
 
 Xem chi tiết tại [docs/LIMITATIONS.md](docs/LIMITATIONS.md).

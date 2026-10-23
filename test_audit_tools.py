@@ -1,4 +1,16 @@
 """Pure-function tests for the real-profile audit harness."""
+import atexit
+import os
+import shutil
+import tempfile
+
+# Import the audit tools only after ANTIDETECT_DATA_DIR is set. Without this,
+# importing tools.leak_audit binds antidetect.storage.DATA_DIR to the real
+# data/ directory during pytest collection.
+_TEST_DATA_DIR = tempfile.mkdtemp(prefix="antidetect-audit-tools-")
+os.environ["ANTIDETECT_DATA_DIR"] = _TEST_DATA_DIR
+atexit.register(shutil.rmtree, _TEST_DATA_DIR, True)
+
 from tools.detector_audit import detect_challenge, extract_detector_signals, parse_target
 from tools.leak_audit import (
     classify_dns_verdict,
@@ -10,12 +22,23 @@ from tools.leak_audit import (
 )
 
 
+def test_tests_use_isolated_data_dir():
+    import antidetect.storage as storage_module
+
+    repo_data = os.path.realpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    )
+    assert os.path.realpath(storage_module.DATA_DIR) != repo_data
+
+
 def test_classify_ip_separates_local_public_and_mdns():
     assert classify_ip("192.168.1.20") == "local"
     assert classify_ip("10.0.0.5") == "local"
     assert classify_ip("fe80::1") == "local"
     assert classify_ip("8.8.8.8") == "public"
     assert classify_ip("2001:4860:4860::8888") == "public"
+    assert classify_ip("0.0.0.0") == "unspecified"
+    assert classify_ip("::") == "unspecified"
     assert classify_ip("4f3a2b1c-1234-5678-9abc-def012345678.local") == "mdns"
     assert classify_ip("not-an-ip") == "invalid"
 
@@ -37,6 +60,20 @@ def test_summarize_webrtc_extracts_candidates_and_sdp():
     assert summary["public"] == ["8.8.8.8"]
     assert len(summary["addresses"]) == 3
     assert any(item["source"] == "sdp" for item in summary["addresses"])
+
+
+def test_summarize_webrtc_treats_zero_address_as_unspecified_not_local():
+    payload = {
+        "supported": True,
+        "gatheringState": "complete",
+        "candidates": [],
+        "sdp": "v=0\r\nc=IN IP4 0.0.0.0\r\n",
+        "error": None,
+    }
+    summary = summarize_webrtc(payload)
+    assert summary["local"] == []
+    assert summary["unspecified"] == ["0.0.0.0"]
+    assert summary["candidate_count"] == 0
 
 
 def test_parse_ip_text_handles_json_and_plain_text():

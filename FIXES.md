@@ -14,18 +14,22 @@ hoặc vượt qua mọi hệ thống chống bot.
 
 | Hạng mục | Kết quả |
 |---|---|
-| `python -m pytest -q` | **45 passed** - 9 core + 8 API + 11 hardening + 8 audit tool + 9 stealth consistency |
+| `python -m pytest -q` | **47 passed** - 9 core + 8 API + 11 hardening + 10 audit tool + 9 stealth consistency |
 | `python run_all_tests.py` | **9/9 unit**, **8/8 API** |
 | Audit Playwright, 1 profile tạm | **40/40 check**, 0 failure, 0 warning; canvas/WebGL hash ổn định |
 | Chrome E2E thật | `verify_live.py` **34/34 PASS**, `configuration_verified=true`, actual CDP port, runtime state được ghi |
 | Leak audit trên profile tạm, không proxy | `--no-dns --strict`: **PASS**; browser IP trùng host, không lộ private IP/WebRTC. Full DNS: `WARN` (Google DNS vs CMC internet) |
+| Leak audit proxy HTTP thật | Proxy #1 `160.250.166.89:23951`: **BLOCKED** - HTTP 407 với credential đã cấp. Proxy #2 `113.160.166.27:46787` (egress `117.0.181.67`): sau khi thêm `--webrtc-ip-handling-policy`, `--no-dns --strict` **PASS**; full DNS **FAIL/review** do resolver Google lệch ASN egress Viettel |
 | Detector baseline trên profile tạm | CreepJS `31% like headless`, `0% headless`, `0% stealth` (clean Chrome 25%); Pixelscan thay đổi giữa các lần; không CAPTCHA |
 | Cross-process stop | `cli.py stop-all` dừng Chrome; runtime file về `{}`; PID không còn trong tasklist |
 | Server identity + stop | `server_control status` đúng PID/port/health; `stop` qua API, exit 0 |
 | UI asset local | Tailwind/Lucide trả HTTP 200 từ `/static/vendor/`; CSP không còn host CDN |
+| Dữ liệu thật sau sự cố test | Khôi phục từ ZIP delivery 2026-10-22: `profiles.json` SHA256 `EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B`, `secrets.dpapi` SHA256 `584CED2CD9C154169F94EC67D025B15B2853895BD7A5614D0A59C0A879154148`; 7 profile + secret Profile 1 kiểm tra lại |
 
-Mọi test dùng `ANTIDETECT_DATA_DIR` trỏ tới thư mục tạm. Không sửa
-`data/profiles.json` thật và không đụng secret thật trong quá trình kiểm thử.
+Mọi test hiện dùng `ANTIDETECT_DATA_DIR` trỏ tới thư mục tạm. Trước khi vá
+isolation, một lần chạy test đã ghi nhầm vào `data/profiles.json` và
+`secrets.dpapi` thật; đã khôi phục từ ZIP delivery và xác nhận lại hash
+(xem P0-7).
 
 Chi tiết lệnh và output: [docs/VERIFICATION_2026-10-23.md](docs/VERIFICATION_2026-10-23.md).
 
@@ -140,6 +144,37 @@ Port trả về là port dự kiến, không phải port CDP thật.
 - `test_corrupt_secret_store_is_backed_up_and_not_overwritten`.
 - Test thủ công: sau khi làm hỏng file, bytes không đổi, có backup, set bị chặn.
 
+### P0-7. Cô lập dữ liệu test (sự cố data thật)
+
+**Trước:** `conftest.py` chỉ set `ANTIDETECT_DATA_DIR` trong session fixture, chạy
+sau khi pytest đã import test modules. `test_audit_tools.py` import
+`tools.leak_audit` → `antidetect.storage` trước khi env được set, nên
+`storage.DATA_DIR` bind vào `data/` thật; `test_hardening.py` lại pin env về
+`storage_module.DATA_DIR`, khiến test tạo/xóa profile và ghi secret vào data
+thật. Phát hiện qua hash `profiles.json` khác `EF69...`, backup lúc 16:17 và
+các file `secrets.dpapi.corrupt.*`.
+
+**Sau:**
+- `conftest.py` set env ngay ở module import, trước khi pytest collect test
+  modules; session fixture assert `storage.DATA_DIR` không phải `data/` thật rồi
+  giữ storage/secrets cùng thư mục.
+- `test_audit_tools.py` và `run_all_tests.py` tự set temp dir trước khi import app.
+- `test_hardening.py::_pin_data_dir` assert không trỏ data thật.
+- Thêm regression test `test_tests_use_isolated_data_dir`.
+
+**Khôi phục:**
+- Backup toàn bộ trạng thái bị ảnh hưởng vào
+  `%TEMP%\antidetect-data-backup-20261023_162855`.
+- Lấy `data/profiles.json` + `data/secrets.dpapi` từ
+  `exports/ANTIDETECT_COMPLETE_DELIVERY_2026-10-22.zip` (đúng hash expected),
+  khôi phục; chuyển các file `secrets.dpapi.corrupt.*` ra khỏi `data/`.
+- Xác nhận 7 profile, đủ thư mục, secret Profile 1 đọc được, hash `EF69...` /
+  `584C...`.
+- Chạy lại `pytest` 47 test và `run_all_tests.py`: hash hai file thật không đổi.
+
+**Bài học:** mọi entry point test phải set env trước khi import app; không dựa
+vào fixture session. ZIP delivery cũ chứa data thật, không được phân phối.
+
 ---
 
 ## 3. P1 — Fingerprint và UI
@@ -147,10 +182,15 @@ Port trả về là port dự kiến, không phải port CDP thật.
 ### P1-1. WebRTC flags theo mode + proxy
 
 - Thêm `build_webrtc_flags(profile, fp)`.
-- Chỉ thêm `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` và
+- Chỉ thêm `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`,
+  `--webrtc-ip-handling-policy=disable_non_proxied_udp` và
   `--enforce-webrtc-ip-permission-check` khi proxy bật và mode là
   `block`/`disable_non_proxied`; mode `auto` không thêm cờ.
 - Không còn biến đổi hành vi WebRTC cho kết nối trực tiếp.
+- **Vá 2026-10-23 (proxy thật):** Chrome 155 vẫn để STUN srflx lộ IP host khi
+  chỉ có cờ `force-...`; bổ sung `--webrtc-ip-handling-policy`. Sau vá,
+  `leak_audit.py --no-dns --strict` qua proxy HTTP trả `PASS`. Đánh đổi: không
+  còn ICE candidate, SDP chỉ còn `c=IN IP4 0.0.0.0`.
 
 ### P1-2. Bỏ cờ tắt WebGPU sai
 
@@ -217,12 +257,17 @@ Port trả về là port dự kiến, không phải port CDP thật.
 - Thêm `tools/leak_audit.py`:
   - lấy IP public IPv4/IPv6 của host (requests, bỏ env proxy) và của browser;
   - so sánh danh sách IP khi proxy bật, gồm cả WebRTC public candidate;
-  - parse ICE candidate + SDP, phân loại `local`/`public`/`mDNS`;
+  - parse ICE candidate + SDP, phân loại `local`/`public`/`mDNS`/`unspecified`;
   - fail nếu WebRTC lộ private/local address hoặc IP trùng host direct khi proxy bật;
+  - `0.0.0.0`/`::` được coi là `unspecified`, không fail nhầm khi policy chặn
+    hết candidate;
   - chạy bash.ws DNS best-effort, bấm nút test thật, lưu text/ASN/screenshot;
   - phân loại DNS `CLEAN`/`LEAK`/`REVIEW`/`MANUAL`.
 - Kết quả profile tạm không proxy: IP/WebRTC `PASS`; DNS lần cuối `LEAK`
   (Google DNS vs CMC internet), do đó toàn bộ audit là `WARN`, không phải fail.
+- Kết quả proxy HTTP thật: IP/WebRTC `PASS` sau vá; DNS vẫn `FAIL/review` do
+  resolver Google lệch ASN với egress Viettel (chi tiết mục 8.6 của
+  `docs/VERIFICATION_2026-10-23.md`).
 
 ### P1-10. Detector baseline có evidence
 
@@ -272,11 +317,13 @@ Port trả về là port dự kiến, không phải port CDP thật.
 | `run.py` | second-instance OTC flow |
 | `cli.py`, `stop.bat` | fail-closed stop/delete, exit codes |
 | `tools/audit_common.py` | helper launch/attach/cleanup cho audit |
-| `tools/leak_audit.py` | audit IP/WebRTC/DNS thật |
+| `tools/leak_audit.py` | audit IP/WebRTC/DNS thật; `unspecified` cho `0.0.0.0`/`::` |
 | `tools/detector_audit.py` | baseline CreepJS/BrowserLeaks/Pixelscan |
 | `audit_fingerprint.py` | WebGL pixel hash, collision warning, WARN status |
-| `test_hardening.py` | 11 regression test mới |
-| `test_audit_tools.py` | 8 pure-function test cho audit |
+| `test_hardening.py` | 11 regression test mới + guard data thật |
+| `test_audit_tools.py` | 10 pure-function test cho audit + isolation guard |
+| `conftest.py` | set `ANTIDETECT_DATA_DIR` trước khi collect test |
+| `run_all_tests.py` | temp data dir cho legacy unittest/API runner |
 | `requirements.txt` | `tzdata` |
 
 ---
@@ -293,8 +340,10 @@ Port trả về là port dự kiến, không phải port CDP thật.
 4. **Hai audit harness mới dùng BrowserLauncher + CDP thật**, nhưng
    `audit_fingerprint.py` cũ vẫn dùng Playwright `add_init_script`; chưa có
    kiểm thử E2E cho mọi tổ hợp Chrome/Edge + proxy + WebRTC.
-5. **Chưa có proxy HTTP/SOCKS5 thật** để chứng minh rò rỉ IP/WebRTC/DNS qua proxy.
-   DNS bash.ws là best-effort; kết quả lần cuối `LEAK` dù profile không proxy.
+5. **Đã test một proxy HTTP thật**: browser IP + WebRTC `PASS` sau khi thêm
+   `--webrtc-ip-handling-policy` (Chrome 155), nhưng DNS vẫn `FAIL/review` vì
+   resolver Google lệch ASN với egress Viettel; chưa test proxy SOCKS5. DNS
+   bash.ws là best-effort; kết quả lần cuối `LEAK` dù profile không proxy.
 6. **WebGPU** chỉ che adapter info; features/limits/device là host thật.
 7. **Cross-OS spoofing** (macOS/Linux trên Windows) vẫn thực nghiệm; TLS/JA3/JA4
    không thay đổi bằng CDP.

@@ -34,25 +34,48 @@ cam kết vượt mọi detector.
 
 ## 3. WebRTC / IP / DNS
 
-- Cờ `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` và
-  `--enforce-webrtc-ip-permission-check` chỉ được thêm khi:
+- Cờ WebRTC chỉ được thêm khi:
   - profile có proxy bật, và
   - `webrtc_mode` là `block` hoặc `disable_non_proxied`.
+- Bộ cờ hiện tại:
+  - `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`;
+  - `--webrtc-ip-handling-policy=disable_non_proxied_udp` — bắt buộc từ Chrome
+    155: khi chỉ có cờ `force-...`, Chrome vẫn parse preference nhưng STUN/UDP
+    vẫn đi thẳng qua interface host và trả về IP thật;
+  - `--enforce-webrtc-ip-permission-check`.
 - Mode `auto` không thêm cờ; hành vi WebRTC phụ thuộc Chrome và proxy.
 - Từ S8, toàn bộ JavaScript hook WebRTC đã được bỏ; chỉ dùng Chrome policy
-  flags (`disable_non_proxied_udp`, `enforce-webrtc-ip-permission-check`) và
-  mDNS. Cách này không can thiệp constructor/API nên không tạo thêm dấu hiệu
-  wrapper, nhưng vẫn phụ thuộc phiên bản Chrome và cấu hình proxy.
+  flags và mDNS. Cách này không can thiệp constructor/API nên không tạo thêm
+  dấu hiệu wrapper, nhưng vẫn phụ thuộc phiên bản Chrome và cấu hình proxy.
 - Audit ngày 2026-10-23 trên profile tạm **không proxy**:
   - browser public IP trùng host direct IP;
   - WebRTC không trả private/local address, host candidate ở dạng mDNS;
   - WebRTC public candidate trùng IP public của browser.
-- **Chưa kiểm chứng qua proxy thật**: chưa có bằng chứng WebRTC/DNS không rò rỉ
-  khi bật HTTP/SOCKS5, IPv6 hoặc proxy có DNS riêng.
+- Audit ngày 2026-10-23 trên profile tạm **có proxy HTTP thật**
+  (`113.160.166.27:46787`, egress `117.0.181.67`, Viettel `AS7552`):
+  - trước khi thêm `--webrtc-ip-handling-policy`, Chrome 155 vẫn phát sinh ICE
+    srflx trỏ thẳng IP public của host (`101.99.15.74`) dù đã có
+    `--force-webrtc-ip-handling-policy`;
+  - sau khi thêm cờ thứ hai, `tools/leak_audit.py --no-dns --strict` trả
+    `PASS`: browser public IP là IP proxy, WebRTC không còn public/local
+    candidate;
+  - trade-off: WebRTC không còn ICE candidate (SDP chỉ còn `c=IN IP4 0.0.0.0`),
+    trang có thể nhận ra WebRTC bị chặn; không thể dùng WebRTC thật qua HTTP
+    proxy nếu vẫn muốn chặn UDP đi thẳng.
+  - DNS bash.ws vẫn báo `LEAK` vì resolver là Google (`AS15169`) trong khi
+    egress là Viettel (`AS7552`). HTTP proxy thường resolve hostname ở phía
+    proxy và Chrome DoH dùng Google, nên đây là **lệch ASN resolver**, chưa đủ
+    bằng chứng DNS truy vấn đi thẳng từ ISP nội bộ. Muốn DNS ASN khớp proxy
+    cần SOCKS5 remote DNS hoặc proxy có DNS riêng.
+- Proxy HTTP `160.250.166.89:23951` trong ảnh người dùng trả
+  `407 Proxy Authentication Required` với đúng username/password đã cung cấp
+  (có thể sai mật khẩu, whitelist IP hoặc proxy chưa mở), nên chưa thể audit.
+- `leak_audit.py` phân loại `0.0.0.0`/`::` là `unspecified`, không còn fail nhầm
+  thành local leak khi policy WebRTC chặn hết candidate.
 - `leak_audit.py` so sánh cả danh sách IPv4/IPv6 nếu endpoint trả về, nhưng
   IPv6 có thể không resolve trong một số mạng. DNS bash.ws là best-effort:
   - lần chạy cuối báo `LEAK` vì DNS resolver Google (`AS15169`) khác ISP internet
-    access CMC (`AS45903`);
+    access CMC (`AS45903`) trên profile không proxy;
   - profile không proxy nên tool chỉ ghi `WARN`;
   - kết quả có thể đổi theo mạng/Chrome DoH, không nên coi là trạng thái cố định.
 
@@ -130,6 +153,13 @@ cam kết vượt mọi detector.
   chia sẻ cùng queue.
 - GeoIP dùng dịch vụ HTTPS bên thứ ba (`ipwho.is`, fallback `ipinfo.io`); cần
   cân nhắc quyền riêng tư và độ tin cậy.
+- Test isolation từng có lỗi: `conftest.py` set `ANTIDETECT_DATA_DIR` quá muộn,
+  khiến test hardening ghi nhầm vào `data/` thật. Đã khôi phục dữ liệu và vá
+  `conftest.py`/`test_audit_tools.py`/`run_all_tests.py`; mọi entry point test
+  phải set env trước khi import app. Xem FIXES P0-7.
+- ZIP `ANTIDETECT_COMPLETE_DELIVERY_2026-10-22.zip` chứa `data/profiles/` và
+  secret thật; **không phân phối**. Bản code sạch là
+  `exports/ANTIDETECT_CODE_2026-10-23.zip`.
 
 ## 8. Nền tảng & tính năng
 

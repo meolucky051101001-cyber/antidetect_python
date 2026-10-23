@@ -108,8 +108,13 @@ def build_webrtc_flags(profile: Profile, fp) -> List[str]:
         return []
     mode = getattr(fp, "webrtc_mode", "disable_non_proxied")
     if mode in ("disable_non_proxied", "block"):
+        # Chrome 155 no longer honours the force switch on its own (the
+        # preference is parsed, but STUN still leaves through the host's UDP
+        # path).  The pref-style switch below is what actually blocks
+        # non-proxied UDP; keep both for older Chromium builds.
         return [
             "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+            "--webrtc-ip-handling-policy=disable_non_proxied_udp",
             "--enforce-webrtc-ip-permission-check",
         ]
     return []

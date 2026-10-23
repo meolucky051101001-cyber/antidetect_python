@@ -28,12 +28,13 @@ python -m pytest -q
 Kết quả:
 
 ```text
-45 passed, 2 warnings in 3.35s
+47 passed, 2 warnings in 3.66s
 ```
 
 Phân bổ: 9 core test (`test_antidetect.py`), 8 API test (`test_api.py`),
-11 hardening regression test (`test_hardening.py`) và 8 pure-function test cho
-audit harness (`test_audit_tools.py`). Hai warning là deprecation của
+11 hardening regression test (`test_hardening.py`), 10 pure-function test cho
+audit harness (`test_audit_tools.py`) và 9 stealth consistency test
+(`test_stealth_consistency.py`). Hai warning là deprecation của
 `starlette.testclient`/`httpx`, không phải lỗi của tool.
 
 ```powershell
@@ -256,12 +257,17 @@ RESULT: PASS
 
 `configuration_verified=true`, `cdp_ready=true`. Đây là bằng chứng cho profile
 không proxy: browser IP trùng host direct IP, WebRTC không lộ private IPv4/IPv6,
-host candidate được che bằng mDNS. Chưa chứng minh được hành vi qua proxy vì
-chưa có proxy thật.
+host candidate được che bằng mDNS. Hành vi qua proxy được kiểm chứng bổ sung ở
+mục 8.6.
 
 Ghi chú: endpoint IPv6 `v6.ipify.org` không resolve được trong môi trường chạy
 (`getaddrinfo failed`); audit vẫn thu được IPv4 và ghi lỗi IPv6 vào JSON để
 review. Code so sánh cả danh sách IPv4/IPv6 nếu endpoint trả về.
+
+Kiểm tra hồi quy sau khi vá WebRTC (profile tạm `Verify Live Temp`
+`34ed8cbd-60e2-47ec-90b1-db4c3361d58a`, `--no-dns --strict`): **PASS**;
+browser public IP trùng host `171.255.56.185` + IPv6, WebRTC public trùng host,
+host candidate ở dạng mDNS, không có private/local candidate.
 
 ### 8.3. DNS best-effort
 
@@ -347,14 +353,76 @@ Các lần audit tạo/đóng page nhanh làm lộ race trong CDP auto-attach: t
 Các lần chạy cuối không còn traceback này. Đây là sửa độ ồn/vòng đời, không phải
 bằng chứng fingerprint đã hoàn hảo.
 
+### 8.6. Proxy HTTP thật (bổ sung 2026-10-23)
+
+Hai proxy HTTP từ ảnh người dùng được test trong thư mục dữ liệu tạm
+`%TEMP%\antidetect-proxy-test`; không chạm 7 profile thật.
+
+| Proxy | Kết nối trực tiếp | Kết quả |
+|---|---|---|
+| `160.250.166.89:23951` (`SLpfLP`) | `CONNECT tunnel failed, response 407` | Không dùng được với credential đã cung cấp |
+| `113.160.166.27:46787` (`nbxeOA`, egress `117.0.181.67`) | HTTP 200, IP Việt Nam, Viettel `AS7552`, Hanoi | Dùng để audit |
+
+Profile tạm `31e137dc-5658-4a6e-8102-d1b5466221a8` (`Proxy Test Viettel`),
+fingerprint Windows/timezone `Asia/Ho_Chi_Minh`, `webrtc_mode=disable_non_proxied`.
+
+**Trước khi sửa — FAIL:**
+
+```text
+Browser public IP: 117.0.181.67        # đúng egress proxy
+WebRTC local: không có
+WebRTC public: 101.99.15.74            # IP thật của host
+WebRTC mDNS: ...local
+DNS: LEAK — AS7552 Viettel vs AS15169 Google LLC
+RESULT: FAIL
+```
+
+**Sau khi thêm `--webrtc-ip-handling-policy=disable_non_proxied_udp` — PASS (không DNS):**
+
+```powershell
+$env:ANTIDETECT_DATA_DIR = "$env:TEMP\antidetect-proxy-test"
+python tools\leak_audit.py --profile 31e137dc-5658-4a6e-8102-d1b5466221a8 `
+  --no-dns --strict --json "$env:TEMP\antidetect-proxy-test\leak_proxy_viettel_nodns.json"
+```
+
+```text
+Host direct IP: 171.255.56.185, 2401:d800:25a:6c03:208f:1b71:b33:4cf4
+Browser public IP: 117.0.181.67
+WebRTC local: không có
+WebRTC public: không có
+WebRTC mDNS: không có
+RESULT: PASS
+```
+
+**Full audit kèm DNS — FAIL có chủ đích:**
+
+```text
+Browser public IP: 117.0.181.67
+WebRTC local/public/mDNS: không có
+DNS: LEAK — AS7552 Viettel Group; AS15169 Google LLC
+RESULT: FAIL
+```
+
+Bash.ws xác nhận internet access là IP proxy (`117.0.181.67`, Viettel), nhưng
+resolver hiển thị Google. Đây là lệch ASN resolver, không phải bằng chứng DNS
+truy vấn đi thẳng từ ISP nội bộ: HTTP proxy resolve hostname ở phía proxy và
+Chrome DoH dùng Google. Muốn DNS ASN khớp egress proxy cần SOCKS5 remote DNS
+hoặc proxy có DNS riêng; không sửa được chỉ bằng flag Chrome. Vì vậy mục
+`--no-dns --strict` được dùng làm acceptance cho IP/WebRTC proxy, còn full DNS
+vẫn giữ `FAIL` để buộc review thủ công.
+
 ---
 
 ## 9. Việc chưa kiểm chứng / giới hạn
 
-- Baseline detector mới chạy **một profile tạm, một GPU, không proxy**; chưa có
-  nhiều profile/GPU/Chrome/Edge và chưa có proxy HTTP/SOCKS5 thật.
-- Chưa chứng minh E2E rò rỉ IP/WebRTC/DNS **qua proxy**. Khi có proxy, cần chạy
-  lại `leak_audit.py` trên đúng profile và đối chiếu IP proxy, IPv6, WebRTC và DNS.
+- Baseline detector mới chạy **một profile tạm, một GPU**; đã audit thêm **một
+  proxy HTTP thật** (xem 8.6) nhưng chưa có nhiều profile/GPU/Chrome/Edge và
+  chưa có proxy SOCKS5.
+- Audit proxy HTTP ngày 2026-10-23: browser IP và WebRTC đã `PASS`, nhưng DNS
+  vẫn `FAIL` do resolver Google lệch ASN với egress Viettel; cần review thủ
+  công hoặc SOCKS5 remote DNS nếu muốn DNS khớp proxy.
+- Proxy `160.250.166.89:23951` trả HTTP 407 với credential đã cung cấp; cần
+  kiểm tra lại mật khẩu/whitelist IP trước khi coi là proxy hỏng.
 - DNS bash.ws là best-effort; kết quả có thể đổi theo mạng/Chrome DoH. Lần cuối
   trả `LEAK` dù profile không proxy.
 - Pixelscan/CreepJS có thể đổi giao diện, rate-limit hoặc challenge; challenge là
@@ -393,11 +461,16 @@ Các giới hạn chi tiết nằm trong [LIMITATIONS.md](LIMITATIONS.md).
 - Chrome `155.0.8059.85`, Windows, màn hình host 1920x1200 @1.25, GPU AMD RX 6700 XT.
 - Mọi test E2E dùng `ANTIDETECT_DATA_DIR=%TEMP%\antidetect-creepjs`; không mở profile thật.
 - SHA256 `data/profiles.json` trước và sau: `EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B` (không đổi).
+- Sự cố isolation ngày 2026-10-23: một lần chạy test trước đó đã ghi nhầm vào
+  `data/profiles.json` và `data/secrets.dpapi`. Đã backup, khôi phục đúng hai
+  file từ ZIP delivery 2026-10-22, xác nhận 7 profile + secret Profile 1, rồi
+  vá `conftest.py`/`test_audit_tools.py`/`run_all_tests.py`. Lần chạy 47 test
+  sau vá không làm đổi hash; chi tiết ở FIXES P0-7.
 
 ### 11.2. Unit, API và cú pháp
 
 ```text
-python -m pytest -q                         -> 45 passed, 2 warnings in 3.35s
+python -m pytest -q                         -> 47 passed, 2 warnings in 3.66s
 node --check (inline script trong UI)        -> OK
 python -m py_compile (launcher/stealth/...) -> OK
 ```
@@ -474,8 +547,10 @@ DNS: LEAK — AS45903 CMC Telecom vs AS15169 Google
 - Không proxy nên browser public IP trùng host là đúng; không có private/local
   WebRTC candidate, host candidate dùng mDNS.
 - DNS `LEAK` là bất nhất resolver Google so với ISP CMC, đã ghi `WARN` có chủ đích.
-- **Chưa kiểm chứng proxy HTTP/SOCKS5 thật** vì chưa có credential; đây là hạng
-  mục còn blocked, không phải PASS.
+- Đã kiểm chứng thêm proxy HTTP thật ở mục 8.6: proxy thứ nhất trả 407, proxy
+  thứ hai `PASS` về browser IP + WebRTC sau khi thêm
+  `--webrtc-ip-handling-policy`; DNS vẫn `FAIL`/cần review vì resolver Google
+  lệch ASN với Viettel.
 
 ### 11.7. Đối chiếu acceptance
 
@@ -487,8 +562,10 @@ DNS: LEAK — AS45903 CMC Telecom vs AS15169 Google
 | `navigator.deviceMemory` == `Sec-CH-Device-Memory` | **PASS** — 16 == 16 |
 | WebGL limits == clean Chrome | **PASS** — 16384 / [32767,32767] / 16384 |
 | Leak audit no-proxy | **PASS về private/WebRTC**; DNS `WARN` do môi trường không proxy |
-| Toàn bộ pytest + test mới | **PASS** — 45 passed |
-| Proxy HTTP/SOCKS5 leak audit | **BLOCKED** — chưa có credential |
+| Toàn bộ pytest + test mới | **PASS** - 47 passed |
+| Proxy HTTP #1 `160.250.166.89:23951` | **BLOCKED** — HTTP 407 với credential đã cấp |
+| Proxy HTTP #2 `113.160.166.27:46787` — IP/WebRTC | **PASS** — egress `117.0.181.67`, không public/local WebRTC candidate |
+| Proxy HTTP #2 — DNS | **FAIL/review** — resolver Google `AS15169` lệch egress Viettel `AS7552` |
 
 ### 11.8. Tồn tại có chủ ý
 
@@ -497,4 +574,6 @@ DNS: LEAK — AS45903 CMC Telecom vs AS15169 Google
 - Wrapper hook có source hiển thị nếu detector gọi `Function.prototype.toString`
   trên chính API bị hook; đây là đánh đổi đã chấp nhận để tránh `hasToStringProxy`.
 - Pixelscan không ổn định; không dùng làm tiêu chí.
-- Proxy thật, WebGPU limits, cross-OS và TLS/JA3/JA4 vẫn ngoài phạm vi đã kiểm chứng.
+- Proxy thật đã kiểm chứng một phần ở mục 8.6 (một HTTP proxy, một profile
+  tạm). Proxy SOCKS5, WebGPU limits, cross-OS và TLS/JA3/JA4 vẫn ngoài phạm vi
+  đã kiểm chứng.

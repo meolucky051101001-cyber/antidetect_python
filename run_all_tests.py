@@ -1,10 +1,20 @@
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 if DIR not in sys.path:
     sys.path.insert(0, DIR)
+
+# Isolate the legacy unittest/API runner too. test_api.py has its own temp
+# directory, but set one here before importing it so this entry point can
+# never fall back to the real data/ directory.
+_RUN_DATA_DIR = tempfile.mkdtemp(prefix="antidetect-runall-")
+os.environ["ANTIDETECT_DATA_DIR"] = _RUN_DATA_DIR
+atexit.register(shutil.rmtree, _RUN_DATA_DIR, True)
 
 import test_api
 

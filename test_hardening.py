@@ -49,6 +49,9 @@ manager = ProfileManager()
 @pytest.fixture(autouse=True)
 def _pin_data_dir():
     """Keep secrets.py's dynamic env lookup aligned with storage.DATA_DIR."""
+    data_dir = os.path.realpath(storage_module.DATA_DIR)
+    repo_data = os.path.realpath(os.path.join(BASE_DIR, "data"))
+    assert data_dir != repo_data, "Tests must not use the real data directory"
     old = os.environ.get("ANTIDETECT_DATA_DIR")
     os.environ["ANTIDETECT_DATA_DIR"] = storage_module.DATA_DIR
     yield
@@ -300,7 +303,11 @@ def test_webrtc_flags_follow_mode_and_proxy():
     fp.webrtc_mode = "auto"
     assert build_webrtc_flags(profile, fp) == []
     fp.webrtc_mode = "disable_non_proxied"
-    assert any("force-webrtc" in flag for flag in build_webrtc_flags(profile, fp))
+    flags = build_webrtc_flags(profile, fp)
+    assert any("force-webrtc" in flag for flag in flags)
+    # Chrome 155 ignores the force switch alone; the pref-style switch is the
+    # one that actually blocks non-proxied UDP.
+    assert "--webrtc-ip-handling-policy=disable_non_proxied_udp" in flags
 
     profile.proxy.enabled = False
     assert build_webrtc_flags(profile, fp) == []

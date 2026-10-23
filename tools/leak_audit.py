@@ -131,11 +131,14 @@ def classify_ip(address: str) -> str:
     if not normalized:
         return "invalid"
     ip = ipaddress.ip_address(normalized)
+    if ip.is_unspecified:
+        # Chrome puts c=IN IP4 0.0.0.0 in the SDP when a policy blocks all
+        # ICE candidates.  That is a "no address" marker, not a LAN leak.
+        return "unspecified"
     if (
         ip.is_private
         or ip.is_loopback
         or ip.is_link_local
-        or ip.is_unspecified
         or ip.is_reserved
         or ip.is_multicast
     ):
@@ -184,7 +187,14 @@ def extract_webrtc_addresses(payload: Dict[str, Any]) -> List[Dict[str, str]]:
 
 def summarize_webrtc(payload: Dict[str, Any]) -> Dict[str, Any]:
     addresses = extract_webrtc_addresses(payload)
-    groups: Dict[str, List[str]] = {"local": [], "public": [], "mdns": [], "other": [], "invalid": []}
+    groups: Dict[str, List[str]] = {
+        "local": [],
+        "public": [],
+        "mdns": [],
+        "unspecified": [],
+        "other": [],
+        "invalid": [],
+    }
     for item in addresses:
         groups.setdefault(item["kind"], []).append(item["address"])
     return {
@@ -197,6 +207,7 @@ def summarize_webrtc(payload: Dict[str, Any]) -> Dict[str, Any]:
         "local": sorted(set(groups.get("local", []))),
         "public": sorted(set(groups.get("public", []))),
         "mdns": sorted(set(groups.get("mdns", []))),
+        "unspecified": sorted(set(groups.get("unspecified", []))),
         "other": sorted(set(groups.get("other", []))),
         "invalid": sorted(set(groups.get("invalid", []))),
     }
@@ -507,6 +518,8 @@ def audit_profile(
         webrtc = profile_result["webrtc"]
 
         proxy_enabled = bool(profile.proxy and profile.proxy.enabled)
+        webrtc_mode = getattr(profile.fingerprint, "webrtc_mode", "auto")
+        proxy_blocks_udp = proxy_enabled and webrtc_mode in ("block", "disable_non_proxied")
         if not webrtc.get("supported"):
             profile_result["failures"].append("WebRTC không khả dụng hoặc không thể kiểm tra")
         if webrtc.get("error"):
@@ -515,7 +528,7 @@ def audit_profile(
             profile_result["failures"].append(
                 "WebRTC lộ địa chỉ local/private: " + ", ".join(webrtc["local"])
             )
-        if webrtc.get("candidate_count") == 0:
+        if webrtc.get("candidate_count") == 0 and not proxy_blocks_udp:
             profile_result["warnings"].append("WebRTC không trả về ICE candidate")
 
         browser_info = profile_result["browser_ip"] or {}
