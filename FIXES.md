@@ -14,12 +14,12 @@ hoặc vượt qua mọi hệ thống chống bot.
 
 | Hạng mục | Kết quả |
 |---|---|
-| `python -m pytest -q` | **36 passed** — 9 core + 8 API + 11 hardening + 8 audit tool |
+| `python -m pytest -q` | **45 passed** - 9 core + 8 API + 11 hardening + 8 audit tool + 9 stealth consistency |
 | `python run_all_tests.py` | **9/9 unit**, **8/8 API** |
-| Audit Playwright, 2 profile tạm | **41/41 check/profile**, 0 failure, 0 warning; canvas hash và WebGL pixel hash khác nhau |
-| Chrome E2E thật | `configuration_verified=true`, **16/16 check**, actual CDP port, runtime state được ghi |
-| Leak audit trên profile tạm, không proxy | IP/WebRTC `PASS`; browser IP trùng host direct IP, không lộ private IP; DNS best-effort lần cuối `LEAK`/`WARN` (Google DNS vs CMC internet) |
-| Detector baseline trên profile tạm | `WARN`; CreepJS `25% like headless`, Pixelscan `inconsistent` + `masking detected`; không CAPTCHA |
+| Audit Playwright, 1 profile tạm | **40/40 check**, 0 failure, 0 warning; canvas/WebGL hash ổn định |
+| Chrome E2E thật | `verify_live.py` **34/34 PASS**, `configuration_verified=true`, actual CDP port, runtime state được ghi |
+| Leak audit trên profile tạm, không proxy | `--no-dns --strict`: **PASS**; browser IP trùng host, không lộ private IP/WebRTC. Full DNS: `WARN` (Google DNS vs CMC internet) |
+| Detector baseline trên profile tạm | CreepJS `31% like headless`, `0% headless`, `0% stealth` (clean Chrome 25%); Pixelscan thay đổi giữa các lần; không CAPTCHA |
 | Cross-process stop | `cli.py stop-all` dừng Chrome; runtime file về `{}`; PID không còn trong tasklist |
 | Server identity + stop | `server_control status` đúng PID/port/health; `stop` qua API, exit 0 |
 | UI asset local | Tailwind/Lucide trả HTTP 200 từ `/static/vendor/`; CSP không còn host CDN |
@@ -208,7 +208,7 @@ Port trả về là port dự kiến, không phải port CDP thật.
   trắng.
 - Thêm cảnh báo collision `webglPixelHash` giữa các profile.
 - Khi có warning, in `RESULT: WARN` thay vì PASS; `--strict` trả exit 1.
-- Chạy 2 profile tạm: 41/41 check/profile, canvas hash và WebGL pixel hash đều khác.
+- Chạy 2 profile tạm: 40/40 check, canvas hash và WebGL pixel hash đều khác.
 
 ### P1-9. Harness audit rò rỉ IP/WebRTC/DNS
 
@@ -233,10 +233,12 @@ Port trả về là port dự kiến, không phải port CDP thật.
   Pixelscan.
 - Challenge/CAPTCHA là `WARN`, không bao giờ là `PASS`; đã thu hẹp pattern để
   không báo CAPTCHA sai khi trang chỉ nhắc chữ "CAPTCHA".
-- Baseline 2026-10-23: CreepJS `25% like headless`, `0% headless`, `20% stealth`;
-  Pixelscan `inconsistent` + `masking detected` + bot check không phát hiện hành
-  vi tự động; Canvas uniqueness `100%`; WebGL unmasked RTX 4090; Client Hint
-  `Device-Memory: 16` lệch config `8`.
+- Baseline 2026-10-23 sau S1–S9: CreepJS `31% like headless`, `0% headless`,
+  `0% stealth` (clean Chrome cùng máy: `25% like headless`); Pixelscan thay đổi
+  giữa các lần (`consistent`/`inconsistent`, `No masking detected`/`masking
+  detected`) + luôn `No automated behavior detected`; Canvas uniqueness `100%`;
+  WebGL unmasked theo profile, limits native host; Client Hints
+  `Device-Memory: 16` khớp `navigator.deviceMemory: 16`.
 - Chưa sửa fingerprint từ baseline này; cần chạy lại với proxy và nhiều profile.
 
 ### P1-11. Launcher background task race
