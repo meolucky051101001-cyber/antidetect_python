@@ -1,12 +1,15 @@
 # ⚠️ GIỚI HẠN KỸ THUẬT & KHUYẾN NGHỊ — ANTIDETECT PYTHON
 
-Cập nhật: **2026-10-23**, sau khi triển khai S1–S9 và Phase D. Tài liệu này ghi
-các giới hạn còn lại; kết quả test chỉ chứng minh những gì đã chạy, không phải
-cam kết vượt mọi detector.
+Cập nhật: **2026-10-24**, sau S1–S9, Phase D, R1–R4 + P0 (2026-10-23) và đợt
+review production 2026-10-24 (xem mục 6.2/6.3). Tài liệu này ghi các giới hạn
+còn lại; kết quả test chỉ chứng minh những gì đã chạy, không phải cam kết vượt
+mọi detector.
 
 ---
 
 ## 1. TLS / JA3 / JA4
+
+- Từ 2026-10-24 (GĐ3): TLS **diversity** khả thi qua browser pin đa phiên bản (đã đo: 2 patch version khác JA3/JA4 khác nhau; xem OPERATIONS 4.3) và `leak_audit` đo JA3/JA4 từ trong browser. **Rewriting** TLS (đổi JA3 cùng một binary) vẫn không khả thi mà không fork Chromium — MITM buộc root CA lạ, dấu hiệu detect tệ hơn JA3 trùng. JA3 hash xoay GREASE giữa các connection; JA4 ổn định theo binary.
 
 - TLS Client Hello do BoringSSL + Winsock tạo ra trước khi JavaScript/CDP chạy.
 - CDP không thay đổi được JA3/JA4, thứ tự cipher, extension hay ALPN.
@@ -93,9 +96,19 @@ cam kết vượt mọi detector.
 
 ## 5. Cross-OS / Fingerprint nhất quán
 
-- Giả lập macOS/Linux trên host Windows là thực nghiệm: font, GPU, media devices,
-  touch, screen, keyboard layout, WebGPU và TLS vẫn có thể lộ host thật.
-- User-Agent/Client Hints được đồng bộ theo brand Chrome/Edge/Chromium đang cài,
+- Giả lập macOS/Linux trên host Windows là thực nghiệm: GPU driver, WebGPU,
+  TLS và **font render metric thật** vẫn có thể lộ host. Từ 2026-10-24, phần
+  *enumeration* cross-OS đã được che đầy đủ: `document.fonts.check` strict
+  theo danh sách chuẩn của OS đích (Windows 61 / macOS 92 / Linux 22 font),
+  `measureText` che font host bằng fallback, speech voices trả bộ chuẩn của
+  OS đích (`instanceof` pass) — nhưng **độ rộng ký tự (font metrics) khi đo
+  thực tế** vẫn là xấp xỉ heuristic, không phải metric thật của font trên OS
+  đích như Chromium fork (AdsPower/GoLogin) làm được.
+- Battery/NetworkInformation hooks là **opt-in, mặc định tắt**
+  (`ANTIDETECT_STEALTH_ENABLE=battery,network` để bật): thực nghiệm cho thấy
+  chính sự tồn tại của wrapper trên hai API này bị Pixelscan phát hiện, kể cả
+  khi giá trị đồng bộ native; same-OS để native là an toàn nhất.
+- User-Agent/Client Hints được đồng bộ với **Chrome / Edge / Chromium** thực tế đang cài,
   nhưng không thể biến Chrome Windows thành Safari/macOS thật.
 - Chưa có kiểm thử tự động cho mọi tổ hợp OS/GPU/ngôn ngữ.
 
@@ -103,9 +116,10 @@ cam kết vượt mọi detector.
 
 - Đã chạy baseline `tools/detector_audit.py` ngày 2026-10-23 trên **một profile
   tạm, một GPU, không proxy**; đây không phải tỉ lệ pass trên nhiều cấu hình.
-- Kết quả baseline sau S1–S9:
+- Kết quả baseline sau S1–S9 (trước R1–R4/P0, xem mục 6.1):
   - CreepJS: `31% like headless`, `0% headless`, `0% stealth` (clean Chrome cùng
-    máy: `25% like headless`; chênh do `noTaskbar`, xem mục 9);
+    máy: `25% like headless`; chênh do `noTaskbar`, đã xử lý bởi R2 — kết quả
+    sau R2 + P0: `0% like headless`, xem mục 6.1);
   - Pixelscan: thay đổi giữa các lần (`consistent` + `No masking detected` hoặc
     `masking detected`), nhưng luôn `No automated behavior detected`;
   - BrowserLeaks Canvas: uniqueness `100%`;
@@ -126,23 +140,72 @@ cam kết vượt mọi detector.
 - E2E hiện có xác minh 34 check cốt lõi trên một profile Chrome thật, không phải
   toàn bộ bề mặt fingerprint.
 
-### 6.1. Hook visibility, `toString` và `noTaskbar`
+### 6.1. Hook visibility, `toString` và work-area (R1/R2/P0)
 
-- Từ S4, tool **không** giả `Function.prototype.toString`; các wrapper của
-  `HTMLCanvasElement.toDataURL`, `CanvasRenderingContext2D.getImageData`,
-  `WebGLRenderingContext.getParameter` và
-  `NavigatorUAData.getHighEntropyValues` có thể bị đọc source nếu detector
-  explicitly gọi `toString` trên chúng.
-- Đây là đánh đổi có chủ ý: Proxy `toString` từng bị CreepJS phát hiện
-  (`hasToStringProxy: true`) và đẩy stealth lên `20%`. Sau khi bỏ, stealth về
-  `0%`; audit chỉ còn kiểm tra `Function.prototype.toString` là native.
-- CDP `Emulation.setDeviceMetricsOverride(width=0, height=0)` trả
-  `screen.availHeight == screen.height`, nên CreepJS báo `noTaskbar: true` và
-  `like headless` tăng từ 25% (clean Chrome) lên 31%.
-- Không thêm hook `Screen.availHeight` để sửa `noTaskbar`; hook này có nguy cơ
-  làm mất kết quả stealth 0% và đã bị loại khỏi phạm vi.
-- `screen.availHeight`/`availWidth` vì vậy bằng kích thước screen đầy đủ; các
-  giá trị `screen`, DPR, CSS device-width/height/resolution vẫn khớp.
+- **R1 — native-source registry (2026-10-23):** các wrapper
+  (`HTMLCanvasElement.toDataURL`, `CanvasRenderingContext2D.getImageData`,
+  `WebGLRenderingContext.getParameter`, getter `hardwareConcurrency`, …) được
+  đăng ký vào `WeakMap` riêng và `Function.prototype.toString` được thay bằng
+  concise method **không dùng Proxy**, nên `toString` trên wrapper trả
+  `[native code]` (kể cả cross-realm iframe và worker). Không dùng Proxy vì
+  CreepJS có check `hasToStringProxy`. User function giữ source thật;
+  `Function.prototype.toString.call(1)` vẫn throw `TypeError`.
+- **R2 — work-area getters:** CDP `Emulation.setDeviceMetricsOverride` không mô
+  hình taskbar nên `screen.availHeight == screen.height` làm CreepJS báo
+  `noTaskbar`. Tool giờ hook **chỉ** các getter work-area
+  (`availWidth`/`availHeight`/`availLeft`/`availTop`) và chỉ khi giá trị khác
+  CDP native; `screen.width/height`, DPR, `matchMedia` vẫn do Chrome emulation
+  quản lý. Trên host 1920x1080 taskbar 48 CSS px: `availHeight = 1032`.
+  Sau R2, CreepJS về `0% like headless`.
+- **Giới hạn cross-OS taskbar:** same-OS dùng work area thật của host (Windows:
+  `SPI_GETWORKAREA`); profile macOS/Linux trên host khác dùng hằng số mô phỏng
+  (macOS menu bar 25 px, Linux panel 32 px, Windows taskbar 40 px) nên có thể
+  lệch kích thước taskbar thật của OS đích. Host nhiều màn hình/ĐP scale khác
+  nhau cũng có thể lệch.
+- **P0 — CDP keepalive (đã sửa 2026-10-23):** trước đây `reader_loop` gọi
+  `send()` ngay trong nhánh idle-timeout, tự deadlock sau ~30 giây, đóng phiên
+  CDP và làm Chrome reset device metrics/timezone/UA sau ~35–40 giây (fingerprint
+  mâu thuẫn như `screen.height=1200` + `availHeight=1032`). Giờ keepalive chạy
+  trong task riêng (`keepalive_loop`), reader là nơi duy nhất đọc response. Đã
+  verify 100 giây không reset (xem `docs/VERIFICATION_2026-10-23.md` mục 12).
+
+### 6.2. Trade-off noise vs "masking detected" (2026-10-24)
+
+Bisect trên Pixelscan chứng minh **mỗi nhóm noise (canvas, webgl, audio) riêng
+lẻ đủ để bị chấm "masking detected"** — hash noise lệch khỏi mọi Chrome thật.
+Nhóm `media` (label thiết bị bị ghi đè) và `worker` (blob-URL wrap) cũng gây
+masking. Tool hỗ trợ 2 chế độ per-profile qua `fingerprint.stealth_disable`:
+
+- **Unique (mặc định, noise bật):** mỗi profile có hash riêng — chống liên kết
+  profile qua fingerprint — nhưng detector kiểu Pixelscan chấm "masking
+  detected". CreepJS 0%.
+- **Authentic (tắt `canvas,webgl,audio,media,worker`):** fingerprint trùng
+  Chrome thật trên máy — Pixelscan "not detected"; đổi lại các profile cùng máy
+  **chia sẻ hash** canvas/WebGL/audio và **GPU profile phải khai báo đúng GPU
+  host** (`verify_live.py` sẽ FAIL nếu lệch). CreepJS như headless bằng đúng
+  baseline clean Chrome của máy (25% trên máy hiện tại).
+
+Không có chế độ nào đồng thời "hash unique" và "không masking" — đây là giới hạn
+căn bản của phương pháp inject JS, không phải bug. Chọn theo use-case (xem
+`docs/OPERATIONS.md` mục 4).
+
+### 6.3. Đã fix trong đợt review production 2026-10-24
+
+- **Grease brand `sec-ch-ua`:** bảng hardcode sai so Chrome thật (`Not_A Brand`
+  + thứ tự brands). Giờ đo brands/fullVersionList thật bằng Chrome phụ standalone
+  (cache theo `browser_version`) — header khớp tuyệt đối Chrome host.
+- **`profiles.json` lost-update xuyên process** (server + CLI cùng ghi mất
+  profile): mọi read-modify-write giờ nằm trong interprocess lock reentrant.
+- **CLI atexit từng đóng toàn bộ browser đang chạy** (kể cả của server): giờ
+  chỉ dừng process do chính nó launch.
+- **`secrets.dpapi`:** thêm fsync + backup timestamped (giữ 5 bản) — trước đó
+  không có backup và mất điện giữa ghi có thể mất toàn bộ mật khẩu proxy.
+- **API:** `/start` thêm cờ `degraded`; `switch-location-all` ghi batch 1 lần
+  và báo đúng kết quả; `duplicate` không nuốt lỗi copytree; các gọi
+  `is_running`/`list_profiles` chạy off event-loop (trước đó PowerShell block
+  5s/lần có thể đóng băng API sau restart).
+
+Chi tiết và bằng chứng: `docs/VERIFICATION_2026-10-24.md`.
 
 ## 7. Bảo mật & vận hành
 
@@ -172,6 +235,26 @@ cam kết vượt mọi detector.
 - Không có cơ chế chống debugger, memory dump hay malware cùng user.
 - Không đảm bảo profile không bị lộ do extension, service worker, cache hoặc lỗi
   Chrome bên ngoài tool.
+- **DOMRect/MediaDevices per-profile (2026-10-24)**: lấp hai vector nối
+  profile lớn nhất còn sót. DOMRect dùng offset nhất quán mọi element — site
+  phụ thuộc pixel-perfect positioning (canvas editor, drag-drop tinh) có thể
+  lệch dưới nửa pixel; getUserMedia (stream camera/mic thật) không nằm trong
+  phạm vi enumerateDevices hook. CreepJS baseline desktop là 25% like-headless
+  (cả Chrome sạch) — so tool với CHROME SẠCH CÙNG MÁY, không so với con số
+  0% của thời điểm heuristic cũ.
+- **Liệt kê fanpage Facebook (2026-10-24)** đọc DOM trang
+  `facebook.com/bookmarks/pages` bằng heuristic link/aria-label. Facebook đổi
+  giao diện thường xuyên nên danh sách có thể thiếu/sai mục; mỗi mục hiển thị
+  kèm link để kiểm tra bằng mắt. Thu thập chỉ đọc, không thao tác nào lên tài khoản.
+- **Tuổi + trạng thái đăng bài của fanpage (deep sync, 2026-10-24)**: quét từng
+  page (feed + about) để lấy bài gần nhất và ngày tạo. (a) Feed chỉ hiện một số
+  bài gần đây — "bài cuối" đúng với những page còn bài hiển thị; page khóa
+  feed/cũ sâu có thể trả "Không rõ". (b) Ngày tạo parse từ text "Ngày tạo
+  trang" best-effort (dd/mm ưu tiên VN, tháng tiếng Anh, ISO); parse fail →
+  hiển thị raw text, tuổi/sẵn sàng để trống. (c) "Sẵn sàng" chỉ căn tuổi ≥ 30
+  ngày, chưa xét chất lượng nội dung. Đường này **chưa verify với page thật**
+  (không dùng dữ liệu thật để test) — lần đầu chạy trên profile thật cần đối
+  chiếu vài page bằng mắt.
 
 ---
 

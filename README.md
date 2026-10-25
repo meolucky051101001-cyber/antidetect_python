@@ -2,7 +2,7 @@
 
 Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, can thiệp dấu vân tay qua Chrome DevTools Protocol (CDP), hỗ trợ proxy xác thực và dashboard local.
 
-> **Trạng thái 2026-10-23:** bản hardening sau review độc lập, đã triển khai S1–S9 (host RAM/screen, native WebGL limits, deviceMemory/Client Hints, canvas gate, worker/iframe CDP, bỏ Proxy `toString`). CreepJS stealth `0%`, leak audit no-proxy không lộ private/WebRTC. Đã test proxy HTTP thật: **Proxy 1 full audit `PASS`** (browser IP/WebRTC sạch + DNS `CLEAN`, resolver VNPT khớp egress); Proxy 2 chỉ `PASS` IP/WebRTC, DNS Google vẫn lệch ASN với egress Viettel. **Chưa phải sản phẩm production-grade**; xem [FIXES.md](FIXES.md), [docs/VERIFICATION_2026-10-23.md](docs/VERIFICATION_2026-10-23.md) và [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+> **Trạng thái 2026-10-24:** đã qua review toàn diện + hardening production (xem [docs/VERIFICATION_2026-10-24.md](docs/VERIFICATION_2026-10-24.md)): khóa interprocess cho profiles.json, atexit không còn đóng browser của process khác, secrets.dpapi có fsync + backup, API thêm cờ `degraded`, `sec-ch-ua` khớp Chrome thật (đo grease brands runtime), và 2 chế độ stealth per-profile — **Unique** (mặc định: hash riêng mỗi profile, Pixelscan "masking detected") và **Authentic** (`stealth_disable` 5 nhóm: trùng Chrome thật trên máy, Pixelscan "not detected"; xem [docs/OPERATIONS.md](docs/OPERATIONS.md)). Nâng cấp chống phát hiện hướng AdsPower/GoLogin: font enumeration cross-OS đầy đủ (61 Win/92 macOS/22 Linux), speech voices chuẩn cross-OS (`instanceof` pass), battery/connection native-sync (hooks opt-in — wrapper bị Pixelscan phát hiện dù giá trị đúng), DOMRect/MediaDevices per-profile (chống nối profile), shader precision cross-OS, sync vị trí theo IP proxy (API + nút trong Edit modal); **GĐ2**: browser pin Chrome-for-Testing per-profile (`tools/install_browser.py`) — fingerprint ổn định khi Chrome tự update, verify_live drift baseline, detector matrix + Iphey/Fingerprint demo; **GĐ3**: audio noise per-index hash (không artifact phổ), TLS diversity qua pin đa phiên bản + JA3/JA4 đo trong leak_audit (MITM rewriting không khả thi — bỏ có lý do); **GĐ4**: `antidetect/human.py` HumanInput — gõ/chuột/scroll như người thật qua CDP Input domain cho automation (không inject JS, zero bề mặt detect mới). Dashboard: dark/light mode, filter chips + tag, multi-select bulk actions, wizard tạo hàng loạt, export/import profiles, lịch tự động (scheduler), API token dài hạn, stats fanpage, viewer app.log, uptime/RAM per profile. Trước đó (2026-10-23): S1–S9 + R1–R4 + P0 — CreepJS 0% stealth, keepalive CDP đã sửa. Leak audit proxy HTTP thật: Proxy 1 full PASS. **Chưa phải sản phẩm production-grade**; xem [FIXES.md](FIXES.md), [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ---
 
@@ -15,9 +15,9 @@ Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, ca
 2. **Fingerprint qua CDP**
    - Canvas/OffscreenCanvas noise xác định theo `canvas_noise_seed`; `toDataURL()`, `toBlob()` và `getImageData()` nhất quán. Từ S5, noise chỉ áp dụng cho canvas phức tạp (>=64 màu opaque, >=256 px); canvas đơn giản giữ pixel native.
    - WebGL vendor/renderer và `readPixels()` noise theo profile; giới hạn texture/viewport dùng bảng native đo từ Chrome sạch, không dùng số giả.
-   - Screen/DPR đặt qua `Emulation.setDeviceMetricsOverride`; `deviceMemory` lấy bucket của host (2/4/8/16/32); CPU cores, timezone, locale và geolocation theo profile.
+   - Screen/DPR đặt qua `Emulation.setDeviceMetricsOverride`; từ R2, các getter work-area (`screen.availWidth/availHeight/availLeft/availTop`) hook theo work area thật của host (same-OS) hoặc default theo platform (cross-OS) để mô phỏng taskbar. `deviceMemory` lấy bucket của host (2/4/8/16/32); CPU cores, timezone, locale và geolocation theo profile.
    - Client Hints và User-Agent đồng bộ với **Chrome / Edge / Chromium** thực tế đang cài; `Sec-CH-Device-Memory` khớp `navigator.deviceMemory` khi site opt-in.
-   - Từ S4 **không** giả `Function.prototype.toString`; wrapper hook có source hiển thị nếu bị kiểm tra trực tiếp, nhưng CreepJS không còn phát hiện `hasToStringProxy`.
+   - Từ R1, `Function.prototype.toString` được thay bằng concise method với native-source registry (`WeakMap`, không Proxy): wrapper hook trả `[native code]`, kể cả cross-realm iframe/worker; user function giữ source thật. CreepJS không phát hiện `hasToStringProxy`.
 
 3. **Proxy và WebRTC**
    - HTTP và SOCKS5; proxy có username/password dùng Chrome auth extension/CDP.
@@ -28,6 +28,7 @@ Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, ca
    - Tailwind CSS và Lucide được vendor tại `web/static/vendor/`, **không tải CDN** khi chạy.
    - FastAPI + REST API; xác thực bằng session cookie hoặc Bearer access key.
    - One-Time Code (OTC) TTL 60 giây; instance thứ hai lấy OTC từ server đang chạy, không tự sinh OTC cục bộ.
+   - **Fanpage Facebook per profile**: nút cờ (flag) trên mỗi profile → modal liệt kê các fanpage profile đó sở hữu/quản lý, đọc trực tiếp từ phiên Chrome đang chạy (tab `facebook.com/bookmarks/pages` với session đã đăng nhập, đóng tab ngay sau khi đọc); kết quả được lưu vào profile để xem lại khi đã đóng. `?refresh=1&deep=1` quét thêm từng page: ngày tạo, bài đăng gần nhất → badge **Đang đăng/Dừng** (ngưỡng 7 ngày) và **Sẵn sàng** (ngâm đủ 30 ngày).
 
 5. **Vòng đời trình duyệt**
    - Trạng thái launch được ghi atomic vào `data/browser_runtime.json`.
@@ -172,7 +173,7 @@ Kết quả chạy thật ngày **2026-10-23** trên profile tạm `Audit Smoke`
 - Proxy HTTP #1 `160.250.166.89:23951` (egress VNPT `AS45899`, Hà Nội): sau khi sửa đúng case username, `leak_audit.py --dns --strict` trả **PASS** — browser IP đi proxy, WebRTC không còn public/local candidate, bash.ws báo `DNS is not leaking`, resolver VNPT `AS45899` khớp egress. Đây là **full pass** cho Proxy 1.
 - Proxy HTTP #2 `113.160.166.27:46787` (egress `117.0.181.67`, Viettel `AS7552`): trước khi sửa, WebRTC trả srflx `101.99.15.74` là IP thật của host. Sau khi thêm `--webrtc-ip-handling-policy=disable_non_proxied_udp`, `leak_audit.py --no-dns --strict` trả `PASS`; full DNS vẫn `FAIL/review` vì resolver Google `AS15169` lệch egress Viettel. Endpoint mới `27.76.87.148:46787` trong ảnh không kết nối được.
 - Detector smoke `https://example.com`: `PASS`.
-- Detector baseline: `WARN`; CreepJS báo `31% like headless`, `0% headless`, `0% stealth` (clean Chrome cùng máy: `25% like headless`); Pixelscan thay đổi giữa các lần (`consistent`/`inconsistent`, `No masking detected`/`masking detected`) nhưng luôn `No automated behavior detected`; BrowserLeaks Canvas uniqueness `100%`; WebGL unmasked theo profile, limits native của host; Client Hints gửi `Sec-CH-Device-Memory: 16`, khớp `navigator.deviceMemory: 16`.
+- Detector baseline sau S1–S9: `WARN`; CreepJS `31% like headless`, `0% headless`, `0% stealth` (clean Chrome cùng máy: `25% like headless`). Sau R2 + P0 (cùng ngày): CreepJS **`0% like headless`, `0% headless`, `0% stealth`** — đọc sớm (~20s) và muộn (~45–60s) đều ổn định; Pixelscan thay đổi giữa các lần (`consistent`/`inconsistent`, `No masking detected`/`masking detected`) nhưng luôn `No automated behavior detected`; BrowserLeaks Canvas uniqueness `100%`; WebGL unmasked theo profile, limits native của host; Client Hints gửi `Sec-CH-Device-Memory: 16`, khớp `navigator.deviceMemory: 16`.
 - **Sự cố dữ liệu thật trong lúc test:** `conftest.py` cũ để test hardening ghi nhầm vào `data/profiles.json` và `data/secrets.dpapi`. Đã phát hiện, backup toàn bộ trạng thái, khôi phục `profiles.json` (SHA256 `EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B`) và `secrets.dpapi` từ ZIP delivery 2026-10-22; 7 profile và secret Profile 1 đã kiểm tra lại. Đã sửa isolation ở `conftest.py`, `test_audit_tools.py` và `run_all_tests.py`; chạy lại pytest **không làm đổi hash** hai file thật.
 - Không sửa fingerprint chỉ từ một baseline; chưa test proxy SOCKS5 hoặc nhiều nhà cung cấp trên nhiều tỉnh/ASN.
 
@@ -198,18 +199,22 @@ python tools\verify_live.py --profile "<id-or-name>" --json "$env:TEMP\verify_li
 
 # Leak audit đầy đủ (dùng thêm --no-dns nếu chỉ cần IP/WebRTC)
 python tools\leak_audit.py --profile "<id-or-name>" --json "$env:TEMP\leak.json"
+
+# E2E smoke: khởi động server thật + Chrome thật, sweep toàn bộ API
+# (tự từ chối nếu ANTIDETECT_DATA_DIR trỏ vào data/ thật)
+python tools\e2e_smoke.py
 ```
 
 Kết quả đã chạy ngày **2026-10-23**:
 
 | Hạng mục | Kết quả |
 |---|---|
-| `pytest -q` | **47 passed** (9 core + 8 API + 11 hardening + 10 audit + 9 stealth consistency) |
+| `pytest -q` | **75 passed** (9 core + 12 API + 11 hardening + 10 audit + 9 stealth consistency + 7 CDP regression + 45 production hardening) |
 | `run_all_tests.py` | **9/9 unit**, **8/8 API** |
 | Dữ liệu thật sau test | `profiles.json` SHA256 `EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B`; `secrets.dpapi` SHA256 `584CED2CD9C154169F94EC67D025B15B2853895BD7A5614D0A59C0A879154148`; pytest/run_all_tests không đổi hash |
 | Audit profile tạm | **40/40 check**, canvas/WebGL hash ổn định trong profile, 0 warning |
 | Chrome E2E thật | `verify_live.py` **34/34 PASS**; `configuration_verified=true`; runtime state + port thật |
-| CreepJS | `0% stealth`, `0% headless`; `31% like headless` (clean Chrome 25%) |
+| CreepJS (sau R2 + P0) | `0% like headless`, `0% headless`, `0% stealth` — ổn định khi đọc sớm và muộn |
 | Leak no-proxy | `--no-dns --strict`: **PASS**; không private/WebRTC leak. Full DNS: `WARN` do không proxy |
 | Leak proxy HTTP #1 | `--dns --strict`: **PASS** — egress VNPT `113.185.48.131`/`113.185.44.5`, WebRTC sạch, DNS `CLEAN` AS45899 |
 | Leak proxy HTTP #2 | `--no-dns --strict`: **PASS** — egress `117.0.181.67`, WebRTC sạch. Full DNS: **FAIL/review** — resolver Google lệch ASN egress Viettel |
@@ -266,8 +271,9 @@ antidetect_python/
 - Lock file fail-closed: hết timeout sẽ raise lỗi thay vì ghi không lock. Secret store hỏng được backup và chặn ghi để tránh mất dữ liệu.
 - CSP hiện vẫn cần `script-src 'unsafe-inline'` vì dashboard còn inline script/handler; đã bỏ hoàn toàn script/style/font từ CDN.
 - Canvas 2D chỉ thêm noise cho pixel alpha = 255 và chỉ cho canvas phức tạp (>=64 màu opaque, >=256 px); canvas đơn giản giữ pixel native. Đây là giới hạn có chủ ý để tránh "rgba noise".
-- Từ S4 không giả `Function.prototype.toString`; wrapper hook có source hiển thị nếu bị kiểm tra trực tiếp. Đổi lại, CreepJS không còn báo `hasToStringProxy` và stealth về `0%`.
-- CDP device metrics khiến `screen.availHeight == screen.height` (`noTaskbar: true`), làm CreepJS like-headless tăng từ 25% lên 31%; không thêm Screen hook để tránh mất stealth 0%.
+- Từ R1, `Function.prototype.toString` dùng native-source registry (WeakMap + concise method, không Proxy): wrapper hook trả `[native code]` kể cả cross-realm; CreepJS không báo `hasToStringProxy`, stealth giữ `0%`.
+- Từ R2, các getter work-area (`availWidth`/`availHeight`/`availLeft`/`availTop`) hook theo taskbar host; `screen.width/height`, DPR, `matchMedia` vẫn do CDP quản lý. Cross-OS dùng default theo platform nên có thể lệch taskbar thật của OS đích.
+- Đã sửa lỗi P0: `reader_loop` CDP từng gọi `send()` trong nhánh idle-timeout, tự deadlock sau ~30 giây và làm Chrome reset screen/timezone/UA sau ~40 giây. Giờ keepalive chạy task riêng; đã verify 100 giây không reset.
 - Audit/probe mới (`tools/verify_live.py`, `tools/leak_audit.py`, `tools/detector_audit.py`) dùng `BrowserLauncher` + CDP thật; `audit_fingerprint.py` cũ vẫn dùng Playwright `add_init_script`. Không có harness nào thay thế kiểm thử trên nhiều GPU/proxy/phiên bản Chrome.
 - Baseline detector mới chạy **một profile tạm, một GPU, không proxy**; Pixelscan thay đổi giữa các lần, kết quả `WARN` không phải chứng nhận vượt detector.
 - WebGPU mới che adapter info; features/limits/device vẫn do GPU host quyết định.

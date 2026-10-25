@@ -372,3 +372,162 @@ và được giữ làm mốc trước khi sửa fingerprint.
 Tuy nhiên, đây **không phải** kết luận tool an toàn tuyệt đối hay vượt detector.
 Chưa chấm lại điểm review; các giới hạn ở mục 5 vẫn cần được xử lý trước khi dùng
 cho tài khoản có giá trị cao.
+
+---
+
+## 7. Cập nhật R1–R4 + P0 (2026-10-23, sau mục 6)
+
+Đợt sửa tiếp theo trong cùng ngày, sau khi baseline ở mục 1 được ghi. Chi tiết
+lệnh/output: `docs/VERIFICATION_2026-10-23.md` mục 12.
+
+| Fix | Nội dung | Kiểm chứng |
+|---|---|---|
+| **P0** | `reader_loop` CDP gọi `send()` ngay trong nhánh idle-timeout, tự deadlock sau ~30 giây → đóng phiên CDP → Chrome reset device metrics/timezone/UA sau ~40 giây (fingerprint mâu thuẫn `height=1200` + `availHeight=1032`). Sửa: tách `keepalive_loop` task riêng, reader chỉ đọc response | Poll 100 giây trên CreepJS: screen/timezone/UA ổn định cả 21 mẫu; CreepJS đọc sớm + muộn đều `0%`; `stop()` sạch |
+| **R1** | Wrapper hook lộ source qua `toString`. Sửa: native-source registry (WeakMap + concise method, không Proxy vì CreepJS có `hasToStringProxy`) | `verify_live.py` native-source check PASS; test `test_function_to_string_registry_is_present` |
+| **R2** | `noTaskbar` do `availHeight == height`. Sửa: hook **chỉ** các getter work-area (`availWidth/availHeight/availLeft/availTop`) theo taskbar host; `screen.width/height`/DPR/`matchMedia` vẫn do CDP | CreepJS `31% like headless` → `0%`; `audit_fingerprint.py`/`verify_live.py` expect work-area (availHeight 1032) |
+| **R3** | UI chỉ hiện warning khi CDP fail. Sửa: `startProfile()`/`testFingerprint()` hiển thị `data.warnings`/`data.warning` cả khi `cdp_ready !== false` | `test_cdp_regressions.py::test_r3_ui_shows_warnings_even_when_cdp_ready` |
+| **R4** | Verification đua với navigation. Sửa: stealth áp vào `about:blank` bằng `Runtime.evaluate`; `cdp_ready` set sau khi resume; navigate chờ core verify (phase 1) + `Page.loadEventFired` (timeout 10s); HTTPS yêu cầu Client Hints ở phase 2 | Launch trực tiếp `https://example.com`: `configuration_verified=true`, `client_hints_brand/platform=true` |
+
+Kết quả test sau đợt này: `python -m pytest -q` → **54 passed** (47 cũ + 7
+regression trong `test_cdp_regressions.py`). SHA256 `data/profiles.json` không
+đổi: `EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B`.
+
+---
+
+## 8. Review toàn diện + hardening production (2026-10-24)
+
+Chi tiết lệnh/output và bằng chứng bisect: `docs/VERIFICATION_2026-10-24.md`.
+Runbook vận hành: `docs/OPERATIONS.md`.
+
+| Fix | Nội dung | Kiểm chứng |
+|---|---|---|
+| **B1 (BLOCKER)** | `profiles.json` read-modify-write nằm ngoài interprocess lock → server + CLI cùng ghi mất profile mới im lặng. Sửa: `ReentrantInterProcessLock` quanh toàn bộ RMW của create/update/delete/duplicate; rmtree ra ngoài lock | `test_create_waits_for_interprocess_lock_and_keeps_data` |
+| **H1** | atexit quét runtime store → `cli.py list` thoát là đóng toàn bộ browser (kể cả của server). Sửa: chỉ dừng `active_processes` của chính process | `test_cleanup_on_exit_only_stops_own_processes` |
+| **H2** | `secrets.dpapi` không fsync + không backup → một sự cố mất toàn bộ mật khẩu proxy. Sửa: fsync + backup giữ 5 bản trong `data/backups/` | `test_secret_store_backup_created_and_rotated`, fsync spy |
+| **H3** | `save_profiles` nuốt lỗi migrate secret → mật khẩu "lưu thành công" nhưng mất. Sửa: có plaintext thì raise, hủy ghi | `test_save_profiles_raises_when_secret_migrate_fails_with_plaintext` |
+| **M1** | `browser_runtime.json` upsert/remove không khóa cross-process → process này xóa record process kia. Sửa: file lock + re-load trước mutate | `test_runtime_store_two_instances_do_not_clobber` |
+| **API** | `/start` thêm `degraded`; switch-location-all batch + báo đúng kết quả; duplicate không nuốt lỗi copytree; is_running/list_profiles off event-loop | test static + `test_api.py` |
+| **F1** | Bisect chứng minh mỗi nhóm noise (canvas/webgl/audio) + media + worker đều đủ làm Pixelscan "masking detected". Thêm `stealth_disable` per-profile (UI 5 checkbox) → chế độ **authentic** = Pixelscan not detected | Live: `audit-final-authentic.json` — Pixelscan not detected, verify_live PASS |
+| **F2** | Grease brand `sec-ch-ua` hardcode sai Chrome thật (`Not_A Brand` vs `Not(A:Brand`, sai thứ tự). Sửa: đo brands runtime bằng Chrome phụ standalone, cache theo browser_version | Live probe: sec-ch-ua khớp tuyệt đối Chrome sạch cùng máy |
+
+Test sau đợt này: **68 passed** (54 + 14 trong `test_production_hardening.py`).
+SHA256 `data/profiles.json` không đổi.
+
+### 8.1. Vòng review thứ ba (cùng ngày)
+
+Self-review toàn bộ fix trên (không phát hiện lỗi mới) + tối ưu các LOW còn sót:
+`_ensure_profiles_file` tmp uuid + fsync (L2); `cli.py delete` dừng browser
+trước (L3); xóa dead code `_clear_process` (L5); `expected_revision` wire vào
+`PUT /api/profiles/{id}` (stale → 409); DELETE trả đúng 404/400 thay vì
+409/500; UI thêm badge **Authentic/Partial** cho chế độ stealth của từng
+profile. **73 passed** sau đợt này; `verify_live.py` PASS không regression. Chi
+tiết: `docs/VERIFICATION_2026-10-24.md` mục 8.
+
+### 8.2. Đợt kiểm tra cuối (E2E đầy đủ)
+
+Thêm `tools/e2e_smoke.py` (server thật + Chrome thật qua API): **24/24 PASS** —
+auth/401/403, CRUD, expected_revision 409, start 3.8s `degraded=false`,
+cookies export, switch-all, shutdown sạch. CLI chạy song song server xác nhận
+trên thực tế: browser sống sau khi CLI thoát (H1), profile CLI tạo không mất
+khi server ghi (B1). Fingerprint bản cuối: verify_live PASS, audit 44/44,
+CreepJS 0% stealth, Pixelscan masking not detected, keepalive 100s stable.
+Chi tiết: `docs/VERIFICATION_2026-10-24.md` mục 9.
+
+### 8.3. Tính năng liệt kê fanpage Facebook của profile (2026-10-24)
+
+Đọc trực tiếp từ phiên Chrome đang chạy: mở tab `bookmarks/pages` bằng CDP của
+profile (stealth như mọi tab), scrape DOM (retry khi execution context chưa
+sẵn sàng), đóng tab trong `finally`. API
+`GET /api/profiles/{id}/facebook/pages?refresh=1` lưu cache vào
+`profile.facebook_pages`; UI có nút cờ + modal. Kiểm chứng: unit (mock) +
+live trên profile tạm (redirect login.php nhận diện đúng trong 1.3s);
+**75 passed** + E2E 24/24 không regression. Chi tiết:
+`docs/VERIFICATION_2026-10-24.md` mục 10.
+
+### 8.4. Tối ưu quy mô ~20 profile (2026-10-24, cuối ngày)
+
+Scale test thật lộ lỗi kẹt vô hạn của `launch_all` (slot-logic chờ browser đóng
+trong khi start-all giữ browser mở — 23+ phút cho 5/9 profile). Đã sửa bằng
+ThreadPoolExecutor song song + auto max_concurrent theo RAM (8GB→4/16GB→6/
+≥32GB→8) + API thread-pool 64 worker + double-check lock cho native-brands
+probe. Kiểm chứng: **80 passed**; scale test 8 profile batch 4 mở xong trong
+**8.1 giây** (trước fix kẹt vô hạn), 0 degraded, stop-all sạch. Chi tiết:
+`docs/VERIFICATION_2026-10-24.md` mục 12; runbook: `docs/OPERATIONS.md` 4.1.
+
+### 8.5. Quản lý fanpage nâng cao (2026-10-24, cuối ngày)
+
+`deep sync`: quét từng page (feed + about) lấy ngày tạo + bài gần nhất →
+trạng thái Đang đăng/Dừng (≤7 ngày) và Sẵn sàng (tuổi ≥30 ngày). Pure helpers
+có unit test boundary; JS payload verify runtime trên Chrome thật; smoke
+server thật với deep=1 an toàn khi chưa login. **83 passed**. Chi tiết:
+`docs/VERIFICATION_2026-10-24.md` mục 13.
+
+### 8.6. Vòng review thứ tư (2026-10-24, cuối ngày)
+
+Bắt 2 bug thật qua regression: (1) record runtime stale của profile đã xóa
+chặn shutdown vĩnh viễn — `stop` giờ xử lý ghost profile + dọn record; (2)
+verify_live so exact connection native dao động → đổi sang structural check.
+**85 passed**; E2E 24/24; verify_live PASS. Chi tiết:
+`docs/VERIFICATION_2026-10-24.md` mục 14.
+
+### 8.7. Giai đoạn 1 anti-detection (2026-10-24, cuối ngày)
+
+DOMRect/ClientRects/SVGRect per-profile noise + MediaDevices bộ device
+per-profile + shader precision cross-OS + sync vị trí theo IP proxy (API +
+UI). Bắt 1 sự cố: lỗi f-string brace làm cả payload vỡ syntax — đã fix và
+thêm test `node --check` payload vĩnh viễn. Live probe chứng minh: 2 seed cho
+DOMRect/MediaDevices khác nhau với instanceof nguyên vẹn. CreepJS Unique và
+Authentic đều **bằng đúng baseline Chrome sạch của máy (25% like-headless —
+đã đo trực tiếp trên Chrome không hook)**; Pixelscan authentic not detected.
+**90 passed**; E2E 24/24. Chi tiết: `docs/VERIFICATION_2026-10-24.md` mục 15.
+
+### 8.8. Giai đoạn 2 (2026-10-24, cuối ngày)
+
+Browser pin Chrome-for-Testing (`tools/install_browser.py`, resolution
+per-profile STRICT → env → browsers/ mới nhất → installed; đã cài thật
+155.0.8059.84 và E2E 24/24 chạy trọn trên pin), verify_live drift baseline
+(`--save-baseline` + tự so — ua đổi = Chrome update → re-audit farm), detector
+matrix + Iphey (chạy thật: "Trustworthy") + Fingerprint demo. Cascade test phát hiện test cũ giả lập sai 'missing browser' khi pin tồn tại — đã sửa. **95 passed**.
+Chi tiết: `docs/VERIFICATION_2026-10-24.md` mục 16; runbook
+`docs/OPERATIONS.md` mục 4.2.
+
+### 8.9. Giai đoạn 3 (2026-10-24, cuối ngày)
+
+Audio noise rework per-index hash (bỏ artifact phổ tuần hoàn 100/13, noise
+mỗi sample ±5e-5); TLS: bỏ MITM rewriting (phá cert — lý do ghi rõ), thay bằng
+TLS diversity qua browser pin + JA3/JA4 probe trong leak_audit (đo thật: pin
+.84 vs installed .85 khác cả JA3 lẫn JA4; JA3 xoay GREASE — so bằng JA4);
+WebGPU preset bỏ (same-OS user). Mock test còn bắt 1 bug thật
+(`new_page` ngoài try). **97 passed**; detector sau rework: CreepJS 0%/0%/0%,
+Pixelscan not detected, Iphey Trustworthy. Chi tiết:
+`docs/VERIFICATION_2026-10-24.md` mục 17.
+
+### 8.10. Giai đoạn 4 (2026-10-24, cuối ngày)
+
+Behavioral layer `antidetect/human.py` (HumanInput): type/click/move/scroll
+qua CDP Input domain với mô hình người thật (keystroke lognormal + thinking
+pause, bezier + overshoot, scroll gia tốc) — không inject JS. Fork Chromium
+dành sau (không cần khi detector sạch; roadmap đã ghi). Live probe: gõ 46 ký
+tự tiếng Việt chính xác, 46 keyup events, 17.6s. **98 passed**. Chi tiết:
+`docs/VERIFICATION_2026-10-24.md` mục 18; hướng dẫn `docs/OPERATIONS.md` 4.4.
+
+### 8.11. Dashboard nâng cấp (2026-10-24, cuối ngày)
+
+Dark/Light mode (CSS variables + override utility classes, persist localStorage,
+init trước render), filter chips 5 nhóm kết hợp tìm kiếm, stats "Fanpage Đã
+Đồng Bộ" thay card tĩnh, badge fanpage trên row, viewer `app.log` qua
+`GET /api/system/logs` (read-only, auth). **100 passed**; smoke dashboard qua
+server thật PASS.
+
+### 8.12. Đợt A/B/C — tính năng quản lý (2026-10-24, cuối ngày)
+
+A: uptime/RAM per profile (psutil + cache 5s, ProfileRuntime response), notes
+badge, Export/Import (redact password, confirm header, per-item result).
+B: multi-select + bulk bar (start/stop đám chọn đi qua hàng đợi start-all;
+delete/reset/export tuần tự), wizard bulk-create (fingerprint riêng, proxy
+theo dòng, authentic + GPU host, cap 50). C: scheduler (schedules.json atomic,
+runner daemon 30s, catch-up 60 phút, API CRUD) + sync-location tái dùng cho
+scheduler, tags UI + lọc, API token dài hạn (hash-only DPAPI, rotate/revoke,
+rate-limit). Bug thật bắt qua smoke: `_schedule_store` thiếu global trong
+lifespan (503 scheduler) + route `/export` bị `{profile_id}` nuốt + điều kiện
+độ dài chặn token — cả 3 đã sửa. **114 passed**; smoke server thật PASS.

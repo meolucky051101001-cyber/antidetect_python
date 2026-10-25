@@ -537,7 +537,8 @@ RESULT: PASS
 
 ### 11.5. CreepJS và detector
 
-- CreepJS cuối: `31% like headless`, `0% headless`, `0% stealth`.
+- CreepJS cuối (trước R2/P0): `31% like headless`, `0% headless`, `0% stealth`.
+  Sau R2 + P0: `0% like headless` — xem mục 12.2.
 - Clean Chrome cùng máy: `25% like headless`, `0% stealth`. Chênh +6 điểm do
   `noTaskbar: true` (`availHeight == screenHeight` khi dùng CDP device metrics);
   không thêm hook `Screen.availHeight` để tránh làm mất kết quả stealth 0%.
@@ -593,13 +594,139 @@ DNS: LEAK — AS45903 CMC Telecom vs AS15169 Google
 | Proxy HTTP #2 — DNS | **FAIL/review** — resolver Google `AS15169` lệch egress Viettel `AS7552` |
 | Proxy HTTP mới `27.76.87.148:46787` | **BLOCKED** — connect timeout |
 
-### 11.8. Tồn tại có chủ ý
+### 11.8. Tồn tại có chủ ý (trạng thái tại thời điểm mục 11)
 
-- `screen.availHeight == screen.height`: giới hạn CDP, làm CreepJS like-headless
-  tăng từ 25% lên 31%; không reintroduce Screen hook.
+- `screen.availHeight == screen.height`: giới hạn CDP tại thời điểm đó, làm
+  CreepJS like-headless tăng từ 25% lên 31%. **Đã xử lý bởi R2** (hook work-area
+  getters, xem mục 6.1 LIMITATIONS và mục 12.4).
 - Wrapper hook có source hiển thị nếu detector gọi `Function.prototype.toString`
-  trên chính API bị hook; đây là đánh đổi đã chấp nhận để tránh `hasToStringProxy`.
+  trên chính API bị hook. **Đã xử lý bởi R1** (native-source registry, xem mục
+  12.3).
 - Pixelscan không ổn định; không dùng làm tiêu chí.
 - Proxy thật đã kiểm chứng một phần ở mục 8.6 (một HTTP proxy, một profile
   tạm). Proxy SOCKS5, WebGPU limits, cross-OS và TLS/JA3/JA4 vẫn ngoài phạm vi
   đã kiểm chứng.
+
+---
+
+## 12. Cập nhật R1–R4 + P0 (2026-10-23, sau mục 11)
+
+> Mục 11 ghi trạng thái sau S1–S9. Từ đó, các fix R1–R4 và P0 đã thay đổi một
+> số kết quả: CreepJS `31% like headless` → `0%`; wrapper `toString` giờ trả
+> `[native code]`; CDP session không còn tự đóng sau ~40 giây. Mọi live test
+> dưới đây dùng `ANTIDETECT_DATA_DIR=%TEMP%\opencode\ad-live-r4` với profile
+> tạm `9a636166-8668-46c7-86ba-6d193071d05d` (`R4 live`), không chạm `data/`.
+
+### 12.1. P0 — deadlock CDP keepalive (`antidetect/launcher.py`)
+
+Root cause: `reader_loop` gọi `send("Browser.getVersion")` ngay trong nhánh
+idle-timeout. `send()` chờ future trong `pending_responses` — future chỉ được
+chính `reader_loop` resolve — nên reader tự deadlock: timeout 5 giây làm
+`send()` raise, `reader_loop` break, socket CDP đóng, Chrome detach session và
+reset `Emulation.setDeviceMetricsOverride` / `setTimezoneOverride` /
+`Network.setUserAgentOverride`.
+
+Bằng chứng trước fix (`test_screen_timing.py`, URL không đổi):
+
+```text
+39.4s: screen h=1080, avail h=1032, tz=Asia/Saigon
+40.4s: screen h=1200, avail h=1032, tz=Asia/Bangkok   # CDP reset
+```
+
+Fix: `reader_loop` không còn gọi `send()`; task `keepalive_loop` riêng ping
+`Browser.getVersion` mỗi 20 giây và tự kết thúc khi profile dừng; reader vẫn
+là nơi duy nhất đọc response; `keepalive_task` được cancel trong `finally`
+khi reader kết thúc.
+
+Verify sau fix — launch profile tạm, mở CreepJS, poll mỗi 5 giây trong
+100 giây (`%TEMP%\opencode\p0-keepalive-verify.json`):
+
+```text
+launch: cdp_ready=True, configuration_verified=True
+t=0.0 … t=95.9 (21 mẫu): screen 1920x1080, avail 1920x1032, dpr 1,
+  tz Asia/Saigon, UA + languages không đổi — stable=true
+stop: "Đã xác nhận trình duyệt dừng" (không treo task)
+```
+
+### 12.2. CreepJS sau P0 + R2 — 31% → 0%
+
+```text
+# đọc sớm (~20s sau load, --wait 14): creep-after-p0.json
+creepjs_like_headless: 0%  creepjs_headless: 0%  creepjs_stealth: 0%  — PASS
+
+# đọc muộn (~45-60s sau load, --wait 45): creep-after-p0-late.json
+creepjs_like_headless: 0%  creepjs_headless: 0%  creepjs_stealth: 0%  — PASS
+```
+
+Snapshot `fingerprint` trong cả hai JSON khớp `launch.verification.actual`
+(screen 1920x1080, availHeight 1032, tz Asia/Saigon) — không còn trạng thái
+mâu thuẫn `screen.height=1200` + `availHeight=1032` như trước P0.
+
+Lưu ý lịch sử: trước P0, CreepJS score phụ thuộc thời điểm đọc — đọc trước
+~40 giây cho kết quả tốt, đọc sau đó bị CDP reset làm hỏng fingerprint. Sau
+P0, kết quả ổn định ở cả hai thời điểm.
+
+### 12.3. R1 — `Function.prototype.toString` native-source registry
+
+WeakMap registry + concise method override, không Proxy (CreepJS có
+`hasToStringProxy`):
+
+- `toDataURL`, `getImageData`, `getParameter`, getter `hardwareConcurrency`
+  → `[native code]`, kể cả cross-realm iframe và worker;
+- `Function.prototype.toString.toString()` → native;
+- user function/arrow giữ source thật; non-function vẫn throw `TypeError`.
+
+Test tĩnh: `test_stealth_consistency.py::test_function_to_string_registry_is_present`.
+Live: `tools/verify_live.py` check `toDataURL_native_source`,
+`getImageData_native_source`, `getParameter_native_source`,
+`hardwareConcurrency_getter_native_source` — PASS
+(`%TEMP%\opencode\verify-after-p0.json`).
+
+### 12.4. R2 — screen work-area
+
+`_screen_work_area(fp)` tính work area theo taskbar edge của host (same-OS:
+`SPI_GETWORKAREA`; cross-OS: hằng số theo platform); chỉ hook các getter có
+giá trị khác CDP native. Trên host hiện tại: `availHeight=1032` (taskbar 48
+CSS px). `audit_fingerprint.py` và `tools/verify_live.py` đã được cập nhật để
+expect giá trị work-area (fallback `fp.screen_height` khi work area rỗng) —
+`verify_live.py` sau cập nhật: **PASS toàn bộ**, `screen.availHeight` 1032 ==
+1032.
+
+### 12.5. R3 — UI warning khi launch thành công
+
+`startProfile()` và `testFingerprint()` hiển thị `data.warnings` /
+`data.warning` cả khi `cdp_ready !== false` (else-if chain sau nhánh
+`cdp_ready === false`).
+Test: `test_cdp_regressions.py::test_r3_ui_shows_warnings_even_when_cdp_ready`.
+
+### 12.6. R4 — verification handshake
+
+- stealth áp vào `about:blank` ban đầu bằng `Runtime.evaluate` (vì
+  `Page.addScriptToEvaluateOnNewDocument` chỉ áp cho document mới);
+- `cdp_ready` set sau `Runtime.runIfWaitingForDebugger`;
+- navigation chờ main thread verify core trên `about:blank` (phase 1) trước
+  khi `Page.navigate`, rồi chờ `Page.loadEventFired` với timeout 10 giây;
+- HTTPS: `require_client_hints=True` chỉ ở phase 2 sau navigation;
+- `configuration_verified` chỉ true khi phase cuối cùng pass.
+
+Live: launch trực tiếp `https://example.com` → `configuration_verified=true`,
+`client_hints_brand=true`, `client_hints_platform=true`
+(`%TEMP%\opencode\r4-verify2.json`); sau P0, `verify_live.py` và detector
+audit đều trả `configuration_verified=true`.
+
+### 12.7. Test
+
+```text
+python -m pytest -q
+54 passed, 2 warnings in 3.5s
+```
+
+47 test cũ + 7 regression test mới trong `test_cdp_regressions.py`: P0
+keepalive (reader không gọi `send()`, keepalive task riêng), R4 handshake
+(core verify trước navigate, `loadEventFired` dispatch, client hints HTTPS),
+R3 UI warnings.
+
+### 12.8. Dữ liệu thật không đổi
+
+SHA256 `data/profiles.json` trước và sau đợt R1–R4/P0:
+`EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B`.
