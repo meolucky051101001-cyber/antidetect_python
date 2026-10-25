@@ -332,3 +332,119 @@ def test_edge_brand_and_locale_mapping(monkeypatch):
     normalized = normalize_fingerprint_for_launch(fp, r"C:\Edge\msedge.exe")
     assert normalized.browser_brand == "edge"
     assert "Edg/155.0.0.0" in normalized.user_agent
+
+
+def _load_install_browser():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "install_browser_tool", os.path.join(BASE_DIR, "tools", "install_browser.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeDownloadResponse:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self.headers = {"Content-Length": str(len(payload))}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            chunk, self._payload = self._payload, b""
+        else:
+            chunk, self._payload = self._payload[:n], self._payload[n:]
+        return chunk
+
+
+def _chrome_zip_payload() -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("chrome-win64/chrome.exe", b"fake-chrome")
+    return buf.getvalue()
+
+
+def test_install_browser_verifies_md5_before_extract(monkeypatch, tmp_path):
+    import base64
+    import hashlib
+
+    mod = _load_install_browser()
+    payload = _chrome_zip_payload()
+    expected = base64.b64encode(hashlib.md5(payload).digest()).decode()
+    monkeypatch.setattr(mod, "BROWSERS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        mod, "fetch_metadata",
+        lambda url: {"md5Hash": expected, "size": len(payload)},
+    )
+    monkeypatch.setattr(
+        mod.urllib.request, "urlopen",
+        lambda req, timeout=None: _FakeDownloadResponse(payload),
+    )
+    dest = mod.download_and_extract({
+        "version": "999.0.0.1",
+        "url": (
+            "https://storage.googleapis.com/chrome-for-testing-public/"
+            "999.0.0.1/win64/chrome-win64.zip"
+        ),
+    })
+    assert os.path.exists(os.path.join(dest, "chrome-win64", "chrome.exe"))
+    assert not os.path.exists(dest + ".zip")
+
+
+def test_install_browser_rejects_checksum_mismatch(monkeypatch, tmp_path):
+    import base64
+
+    mod = _load_install_browser()
+    payload = _chrome_zip_payload()
+    monkeypatch.setattr(mod, "BROWSERS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        mod, "fetch_metadata",
+        lambda url: {
+            "md5Hash": base64.b64encode(b"0" * 16).decode(),
+            "size": len(payload),
+        },
+    )
+    monkeypatch.setattr(
+        mod.urllib.request, "urlopen",
+        lambda req, timeout=None: _FakeDownloadResponse(payload),
+    )
+    with pytest.raises(SystemExit):
+        mod.download_and_extract({
+            "version": "999.0.0.2",
+            "url": (
+                "https://storage.googleapis.com/chrome-for-testing-public/"
+                "999.0.0.2/win64/chrome-win64.zip"
+            ),
+        })
+    assert not os.path.isdir(os.path.join(str(tmp_path), "chrome-999.0.0.2"))
+
+
+def test_install_browser_metadata_uses_gcs_object_api(monkeypatch):
+    import json
+
+    mod = _load_install_browser()
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        payload = json.dumps({"md5Hash": "abc", "size": 123}).encode()
+        return _FakeDownloadResponse(payload)
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
+    meta = mod.fetch_metadata(
+        "https://storage.googleapis.com/chrome-for-testing-public/"
+        "155.0.1/win64/chrome-win64.zip"
+    )
+    assert meta["size"] == 123
+    assert "/b/chrome-for-testing-public/o/" in seen["url"]
+    assert "155.0.1%2Fwin64%2Fchrome-win64.zip" in seen["url"]

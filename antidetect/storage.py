@@ -44,6 +44,32 @@ PROFILES_DATA_DIR = os.path.join(DATA_DIR, "profiles")
 LOCK_FILE = os.path.join(DATA_DIR, "profiles.lock")
 
 
+def _replace_with_retry(src: str, dst: str, attempts: int = 6) -> None:
+    """os.replace với backoff ngắn cho sharing violation trên Windows.
+
+    Antivirus/backup agent có thể giữ handle đích vài trăm ms khiến replace
+    ném PermissionError (WinError 5/32/33) dù file nguồn hợp lệ. Retry có
+    giới hạn; thất bại lần cuối thì dọn file tạm và ném lại lỗi gốc.
+    """
+    delay = 0.05
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as exc:
+            transient = isinstance(exc, PermissionError) or getattr(
+                exc, "winerror", None
+            ) in (5, 32, 33)
+            if not transient or attempt == attempts - 1:
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.8)
+
+
 class InterProcessLock:
     """P1-07: Khóa liên tiến trình sử dụng file lock của hệ điều hành (msvcrt / fcntl)."""
     def __init__(self, lock_path: str = LOCK_FILE, timeout: float = 8.0):
@@ -139,7 +165,9 @@ class ProfileManager:
         self._ensure_profiles_file()
 
     def _ensure_profiles_file(self):
-        with self._lock:
+        # Tạo file dưới cùng IPC lock với save_profiles: hai process cùng
+        # khởi động sẽ không ghi đè/đọc phải file tạm của nhau.
+        with self._lock, self._ipc_lock:
             if not os.path.exists(PROFILES_JSON):
                 # Tmp name uuid: 2 process cùng init không giành chung file tạm.
                 temp_file = f"{PROFILES_JSON}.tmp.{uuid.uuid4().hex}"
@@ -147,7 +175,7 @@ class ProfileManager:
                     json.dump([], f)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(temp_file, PROFILES_JSON)
+                _replace_with_retry(temp_file, PROFILES_JSON)
                 self._cache = []
                 self._cache_mtime = os.stat(PROFILES_JSON).st_mtime_ns
 
@@ -298,7 +326,7 @@ class ProfileManager:
                 )
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(temp_file, PROFILES_JSON)
+            _replace_with_retry(temp_file, PROFILES_JSON)
             self._cache = [p.model_copy(deep=True) for p in profiles]
             try:
                 self._cache_mtime = os.stat(PROFILES_JSON).st_mtime_ns

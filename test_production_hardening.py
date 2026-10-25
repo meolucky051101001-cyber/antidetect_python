@@ -12,6 +12,7 @@ import atexit
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -32,6 +33,8 @@ from antidetect.storage import ProfileManager, ReentrantInterProcessLock
 from antidetect.secrets import set_proxy_password, get_proxy_password, _write_all_secrets, _read_all_secrets
 import antidetect.secrets as secrets_module
 import antidetect.storage as storage_module
+import antidetect.launcher as launcher_module
+import antidetect.process_identity as process_identity
 from antidetect.browser_runtime import BrowserRuntimeStore
 from antidetect.launcher import BrowserLauncher
 from antidetect.fingerprint import generate_fingerprint
@@ -213,6 +216,104 @@ def test_runtime_store_two_instances_do_not_clobber():
     assert fresh.get("profile-a") is None
 
 
+def test_runtime_store_long_lived_instance_sees_other_process_writes():
+    """Server giữ store từ lúc khởi động phải thấy record CLI vừa ghi."""
+    path = os.path.join(TEST_DATA_DIR, "runtime-cross-process.json")
+    server = BrowserRuntimeStore(path)
+    cli = BrowserRuntimeStore(path)
+
+    cli.upsert("cli-profile", pid=333, port=3, user_data_dir="C:/tmp/cli-profile")
+    record = server.get("cli-profile")
+    assert record is not None
+    assert record["pid"] == 333
+    assert "cli-profile" in server.all()
+
+    cli.remove("cli-profile")
+    assert server.get("cli-profile") is None
+    assert "cli-profile" not in server.all()
+
+
+def test_identity_unknown_is_not_cached(monkeypatch):
+    """Timeout CIM chỉ là lỗi tạm; cache nó làm stop chờ hết TTL vô ích."""
+    if sys.platform != "win32":
+        pytest.skip("Windows process identity")
+
+    class FakeKernel32:
+        def OpenProcess(self, *_args):
+            return 12345
+
+        def QueryFullProcessImageNameW(self, _handle, _flags, buf, _size):
+            buf.value = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+            return 1
+
+        def CloseHandle(self, _handle):
+            return 1
+
+    class FakeWindll:
+        kernel32 = FakeKernel32()
+
+    user_data_dir = os.path.join(TEST_DATA_DIR, "identity-profile", "user_data")
+    record = {
+        "Name": "chrome.exe",
+        "CommandLine": (
+            f'"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" '
+            f'--user-data-dir="{user_data_dir}" --remote-debugging-port=9333'
+        ),
+        "CreationDate": "20261025000000",
+    }
+
+    process_identity._identity_cache.clear()
+    monkeypatch.setattr(process_identity.ctypes, "windll", FakeWindll())
+
+    def timeout_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="powershell", timeout=5)
+
+    monkeypatch.setattr(process_identity.subprocess, "run", timeout_run)
+    first = process_identity.read_browser_identity(424242, user_data_dir)
+    assert first["state"] == "unknown"
+    assert 424242 not in process_identity._identity_cache
+
+    monkeypatch.setattr(
+        process_identity.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout=json.dumps(record), stderr=""
+        ),
+    )
+    second = process_identity.read_browser_identity(424242, user_data_dir)
+    assert second["state"] == "owned"
+    assert second["port"] == 9333
+
+
+def test_stop_retries_transient_unknown_identity(monkeypatch):
+    m = ProfileManager()
+    launcher = BrowserLauncher(m)
+    p = m.create_profile("stop-retry-identity")
+    user_data_dir = os.path.join(storage_module.DATA_DIR, "profiles", p.id, "user_data")
+    launcher._runtime_store.upsert(
+        p.id, pid=424242, port=9333, user_data_dir=user_data_dir
+    )
+
+    calls = []
+
+    def fake_identity(pid, udd):
+        calls.append((pid, udd))
+        if len(calls) == 1:
+            return {"state": "unknown", "port": None, "created": None}
+        return {"state": "absent", "port": None, "created": None}
+
+    monkeypatch.setattr(launcher_module, "read_browser_identity", fake_identity)
+    try:
+        result = launcher.stop(p.id)
+        assert result["success"] is True
+        assert result["message"] == "Phiên cũ đã kết thúc"
+        assert len(calls) >= 2
+        assert launcher._runtime_store.get(p.id) is None
+    finally:
+        m.delete_profile(p.id)
+        launcher.unregister_cleanup()
+
+
 # --- stealth_disable per-profile + native brands ---
 
 def test_stealth_disable_per_profile_disables_only_listed_groups(monkeypatch):
@@ -359,6 +460,35 @@ def test_launch_all_runs_launches_in_parallel_batches(monkeypatch):
         assert state["peak"] <= 3
         # 6 launch x 0.3s với 3 worker: ~0.6-0.9s. Tuần tự cũ ≥ 1.8s.
         assert elapsed < 1.6, f"quá chậm: {elapsed:.2f}s"
+    finally:
+        for p in created:
+            m.delete_profile(p.id)
+    launcher.unregister_cleanup()
+
+
+def test_launch_all_filters_selected_profile_ids(monkeypatch):
+    """P0: multi-select chỉ launch đúng profile được chọn, không chạy cả farm."""
+    m = ProfileManager()
+    launcher = BrowserLauncher(m)
+    created = [m.create_profile(f"bulk-select-{i}") for i in range(3)]
+    try:
+        launched = []
+
+        def fake_launch(pid, open_url=None):
+            launched.append(pid)
+            return {"success": True, "profile_id": pid}
+
+        monkeypatch.setattr(launcher, "launch", fake_launch)
+        monkeypatch.setattr(launcher, "is_running", lambda pid: False)
+
+        selected = [created[0].id, created[2].id]
+        results = launcher.launch_all(
+            delay=0.0, max_concurrent=2, profile_ids=selected
+        )
+
+        assert set(launched) == set(selected)
+        assert {r["profile_id"] for r in results} == set(selected)
+        assert created[1].id not in launched
     finally:
         for p in created:
             m.delete_profile(p.id)
@@ -806,6 +936,45 @@ def test_install_browser_list_and_targets_in_defaults():
     assert "iphey" in names and "fingerprint-demo" in names
 
 
+def test_browser_version_detection_cft_and_installed_layout(tmp_path, monkeypatch):
+    """P0: browser pin CfT giấu version trong tên thư mục chrome-<x.y.z.w>."""
+    from antidetect import fingerprint as fpm
+
+    pinned = (
+        tmp_path / "browsers" / "chrome-155.0.8059.84"
+        / "chrome-win64" / "chrome.exe"
+    )
+    pinned.parent.mkdir(parents=True)
+    pinned.write_text("", encoding="utf-8")
+    assert fpm.get_version_from_browser_path(str(pinned)) == (
+        "155.0.0.0", "155.0.8059.84")
+
+    # Bản zip Linux đặt chrome.exe ngay trong thư mục version.
+    direct = tmp_path / "chrome-154.0.7712.90" / "chrome.exe"
+    direct.parent.mkdir()
+    direct.write_text("", encoding="utf-8")
+    assert fpm.get_version_from_browser_path(str(direct)) == (
+        "154.0.0.0", "154.0.7712.90")
+
+    # Layout Chrome cài máy (Application/chrome.exe + sibling version) giữ nguyên.
+    app_dir = tmp_path / "Google" / "Chrome" / "Application"
+    (app_dir / "154.0.7712.90").mkdir(parents=True)
+    (app_dir / "155.0.8059.85").mkdir()
+    installed_exe = app_dir / "chrome.exe"
+    installed_exe.write_text("", encoding="utf-8")
+    assert fpm.get_version_from_browser_path(str(installed_exe)) == (
+        "155.0.0.0", "155.0.8059.85")
+
+    # Launch theo pinned phải dùng version/UA của pin, không phải Chrome host.
+    monkeypatch.setattr(
+        fpm, "get_installed_chrome_version", lambda: ("156.0.0.0", "156.0.1.1")
+    )
+    fp = fpm.generate_fingerprint("windows")
+    fixed = fpm.normalize_fingerprint_for_launch(fp, str(pinned))
+    assert fixed.browser_version == "155.0.8059.84"
+    assert "Chrome/155.0.0.0" in fixed.user_agent
+
+
 def test_phase3_audio_noise_no_periodic_pattern(monkeypatch):
     """GĐ3: audio noise per-index hash — bỏ pattern tuần hoàn 100/13."""
     monkeypatch.delenv("ANTIDETECT_STEALTH_DISABLE", raising=False)
@@ -822,9 +991,39 @@ def test_phase3_audio_noise_no_periodic_pattern(monkeypatch):
     assert "for (let i = 0; i < data.length; i++)" in audio_block
     # 2 seed → 2 payload audio khác nhau (audioSeed trong config).
     fp2 = generate_fingerprint("windows")
-    fp2.audio_noise_seed = (fp.audio_noise_seed + 1) or 0.0011
+    fp2.audio_noise_seed = fp.audio_noise_seed + 1
     js2 = get_stealth_script(fp2)
     assert js != js2
+
+
+def test_audio_seed_is_nonzero_int32_and_legacy_migrates():
+    """P0: seed float bị JS >>> 0 cắt thành 0 → mọi profile cùng nhiễu audio."""
+    from antidetect.models import FingerprintConfig
+
+    legacy = FingerprintConfig(audio_noise_seed=0.0002127)
+    assert isinstance(legacy.audio_noise_seed, int)
+    assert legacy.audio_noise_seed > 0
+    # Ổn định qua vòng load/save profile.
+    assert (
+        FingerprintConfig(**legacy.model_dump()).audio_noise_seed
+        == legacy.audio_noise_seed
+    )
+
+    # Hai seed legacy sát nhau từng truncate về cùng 0.
+    a = FingerprintConfig(audio_noise_seed=0.00005).audio_noise_seed
+    b = FingerprintConfig(audio_noise_seed=0.0003).audio_noise_seed
+    assert a != b
+
+    assert FingerprintConfig(audio_noise_seed=0).audio_noise_seed == 12345
+    assert FingerprintConfig(audio_noise_seed=-5).audio_noise_seed == 12345
+
+    fp = generate_fingerprint("windows")
+    assert isinstance(fp.audio_noise_seed, int)
+    assert 1 <= fp.audio_noise_seed <= 2_147_483_647
+
+    js = get_stealth_script(fp)
+    assert "Number(CFG.audioSeed) >>> 0" in js
+    assert "CFG.audioSeed || 12345" not in js
 
 
 def test_phase3_tls_fingerprint_parser():
@@ -935,6 +1134,10 @@ def test_dashboard_theme_and_management_ui():
     assert "fbBadge" in html
     # Logs viewer
     assert "openLogsModal" in html and "/api/system/logs" in html
+    # Fanpage href phải qua safeHref (chặn javascript:/data:) chứ không chỉ
+    # escapeHtml — import JSON độc hại không thể tạo stored XSS.
+    assert "function safeHref" in html
+    assert "escapeHtml(safeHref(pg.url))" in html
 
 
 def test_system_logs_endpoint(monkeypatch, tmp_path):
@@ -1126,17 +1329,66 @@ def test_batch_b_start_all_with_profile_ids(monkeypatch):
 
     from unittest.mock import patch
     try:
+        # Job cũ (nếu có) phải kết thúc trước khi test tạo job mới, nếu không
+        # endpoint trả 409 và test âm thầm bỏ qua đúng phần cần kiểm tra.
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with app_module._start_all_lock:
+                job = app_module._active_start_all_job
+                if job is None or job.get("status") != "running":
+                    break
+            time.sleep(0.05)
         with patch.object(app_module.launcher, "launch_all", side_effect=fake_launch_all):
-            # Job cũ có thể còn "running" từ test khác — dừng poll trước
             r = client.post("/api/profiles/start-all", json={
                 "profile_ids": [p1["id"], p2["id"]]})
-            if r.status_code == 200:
-                assert r.json()["starting_count"] == 2
-                assert called.wait(3)
-                # launch_all không lọc — endpoint đã lọc trước qua status list
+            assert r.status_code == 200, r.text
+            assert r.json()["starting_count"] == 2
+            assert called.wait(3)
+            assert set(captured.get("profile_ids") or []) == {p1["id"], p2["id"]}
     finally:
         for p in (p1, p2, p3):
             client.delete(f"/api/profiles/{p['id']}")
+
+
+def test_scheduler_start_all_callback_receives_profile_ids(monkeypatch):
+    """P0: Scheduler.run gọi cb(ids) — callback phải map vào profile_ids."""
+    import tempfile
+    from datetime import datetime
+    import web.app as app_module
+    from antidetect.scheduler import ScheduleStore, Scheduler
+
+    path = os.path.join(tempfile.mkdtemp(prefix="sched-startall-"), "schedules.json")
+    store = ScheduleStore(path)
+    selected = ["profile-a", "profile-b"]
+    store.add(
+        "Mở đúng profile",
+        datetime.now().strftime("%H:%M"),
+        "start_all",
+        profile_ids=selected,
+    )
+
+    captured = {}
+
+    def fake_launch_all(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(app_module.launcher, "launch_all", fake_launch_all)
+
+    sch = Scheduler(
+        store,
+        callbacks={"start_all": app_module._scheduler_start_all},
+        check_interval=0.05,
+    )
+    sch.start()
+    try:
+        deadline = time.time() + 3
+        while not captured and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        sch.stop()
+        sch.join(timeout=2)
+    assert captured.get("profile_ids") == selected
 
 
 def test_batch_c_scheduler_store_and_due():
@@ -1155,7 +1407,8 @@ def test_batch_c_scheduler_store_and_due():
     assert store.list()[0]["time"] == "08:00"
 
     sch = Scheduler(store, callbacks={}, check_interval=0.2)
-    now = datetime.now()
+    # Ghim 12:00 để rule "5 phút trước" không vắt qua nửa đêm.
+    now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
     # Rule mới trong cửa sổ 60 phút → "due"
     r = {"id": "x", "enabled": True,
          "time": (now - timedelta(minutes=5)).strftime("%H:%M"),
@@ -1164,4 +1417,168 @@ def test_batch_c_scheduler_store_and_due():
     # Đã chạy hôm nay → không
     r["last_run_date"] = now.strftime("%Y-%m-%d")
     assert sch._due(r, now) is None
-    # Chạy hôm qua, lỡ hôm n
+    # Chạy hôm qua, lỡ hôm nay nhưng còn trong cửa sổ catch-up → "catchup"
+    r["last_run_date"] = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    assert sch._due(r, now) == "catchup"
+    # Lỡ quá 60 phút → bỏ, chờ đúng giờ ngày mai
+    r["time"] = "10:00"
+    assert sch._due(r, now) is None
+    # Rule tắt thì không chạy dù đúng giờ
+    r["enabled"] = False
+    r["time"] = "11:00"
+    assert sch._due(r, now) is None
+
+
+class _FakeCDPWebSocket:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, payload):
+        self.sent.append(json.loads(payload))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def _human_with_fake_ws(seed=7):
+    from antidetect.human import HumanInput
+
+    hi = HumanInput(port=0, seed=seed)
+    ws = _FakeCDPWebSocket()
+
+    async def fake_connect():
+        return ws
+
+    hi._connect = fake_connect
+    hi.mouse_path = lambda x0, y0, x1, y1: [(float(x1), float(y1))]
+    hi.key_delay_ms = lambda ch="": 0.0
+    return hi, ws
+
+
+def test_phase4_human_click_release_uses_zero_buttons():
+    hi, ws = _human_with_fake_ws()
+    hi.click(30, 40, double=True)
+    events = [
+        m["params"] for m in ws.sent
+        if m["method"] == "Input.dispatchMouseEvent"
+    ]
+    presses = [e for e in events if e["type"] == "mousePressed"]
+    releases = [e for e in events if e["type"] == "mouseReleased"]
+    assert [e["buttons"] for e in presses] == [1, 1]
+    assert [e["buttons"] for e in releases] == [0, 0]
+    assert [e["clickCount"] for e in presses] == [1, 2]
+    assert [e["clickCount"] for e in releases] == [1, 2]
+
+
+def test_phase4_human_key_events_include_code_and_vk():
+    hi, ws = _human_with_fake_ws()
+    hi.type_text("A1 ế", initial_delay=False)
+    events = [
+        m["params"] for m in ws.sent
+        if m["method"] == "Input.dispatchKeyEvent"
+    ]
+    downs = [e for e in events if e["type"] == "keyDown"]
+    ups = [e for e in events if e["type"] == "keyUp"]
+    assert len(downs) == len(ups) == 4
+
+    a = downs[0]
+    assert (
+        a["key"], a["code"], a["windowsVirtualKeyCode"], a["modifiers"]
+    ) == ("A", "KeyA", 65, 8)
+    one = downs[1]
+    assert (one["code"], one["windowsVirtualKeyCode"]) == ("Digit1", 49)
+    space = downs[2]
+    assert (
+        space["key"], space["code"], space["windowsVirtualKeyCode"]
+    ) == (" ", "Space", 32)
+    vn = downs[3]
+    assert (
+        vn["key"], vn["text"], vn["code"], vn["windowsVirtualKeyCode"]
+    ) == ("ế", "ế", "", 0)
+
+    for down, up in zip(downs, ups):
+        assert down["key"] == up["key"]
+        assert down["code"] == up["code"]
+        assert up["windowsVirtualKeyCode"] == down["windowsVirtualKeyCode"]
+        assert up["nativeVirtualKeyCode"] == down["nativeVirtualKeyCode"]
+
+
+def test_phase4_launcher_empty_selection_is_noop():
+    launcher = BrowserLauncher(manager)
+    calls = []
+    original_stop = launcher.stop
+    launcher.stop = lambda pid: calls.append(pid) or {"success": True}
+    launcher.active_processes["fake-profile"] = object()
+    try:
+        result = launcher.stop_all([])
+        assert calls == []
+        assert result["success"] is True
+
+        launcher.stop_all(None)
+        assert "fake-profile" in calls
+    finally:
+        launcher.stop = original_stop
+        launcher.active_processes.pop("fake-profile", None)
+
+    launched = []
+    launcher.launch = lambda pid, open_url=None: launched.append(pid) or {
+        "success": True
+    }
+    assert launcher.launch_all(profile_ids=[]) == []
+    assert launched == []
+
+
+def test_phase4_save_profiles_retries_transient_replace_error(monkeypatch):
+    """Windows sharing violation (antivirus/backup) — retry thay vì 500 ngay."""
+    profile = manager.create_profile(name="Replace Retry Test")
+    real_replace = os.replace
+    attempts = {"n": 0}
+
+    def flaky_replace(src, dst):
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise PermissionError(13, "sharing violation")
+        return real_replace(src, dst)
+
+    try:
+        monkeypatch.setattr(storage_module.os, "replace", flaky_replace)
+        manager.save_profiles(manager.list_profiles())
+        assert attempts["n"] == 3
+        assert manager.get_profile(profile.id) is not None
+    finally:
+        manager.delete_profile(profile.id)
+
+
+def test_fanpage_deep_sync_marks_failed_scan_as_not_synced(monkeypatch):
+    """Entry rỗng từ deep scan vẫn có key times/created_raw — không được coi
+    là đã quét, nếu không UI báo 'Không rõ' thay vì 'Chưa quét'."""
+    launcher = BrowserLauncher(manager)
+    url = "https://www.facebook.com/deep-test"
+
+    async def fake_pages(port, timeout=0):
+        return {"logged_in": True, "pages": [{"name": "Deep", "url": url}]}
+
+    async def fake_deep_empty(port, pages, timeout=0):
+        return {url: {"times": [], "created_raw": None, "last_post_raw": None}}
+
+    monkeypatch.setattr(launcher, "is_running", lambda pid: True)
+    launcher.active_ports["deep-profile"] = 1234
+    monkeypatch.setattr(launcher, "_facebook_pages_cdp", fake_pages)
+    monkeypatch.setattr(launcher, "_facebook_pages_deep_cdp", fake_deep_empty)
+
+    data = launcher.fetch_facebook_pages("deep-profile", timeout=1, deep=True)
+    assert data["pages"][0]["detail_synced"] is False
+
+    async def fake_deep_ok(port, pages, timeout=0):
+        return {url: {
+            "times": [{"n": 2, "u": "d"}],
+            "created_raw": "Page created on January 1, 2024",
+            "last_post_raw": None,
+        }}
+
+    monkeypatch.setattr(launcher, "_facebook_pages_deep_cdp", fake_deep_ok)
+    data2 = launcher.fetch_facebook_pages("deep-profile", timeout=1, deep=True)
+    assert data2["pages"][0]["detail_synced"] is True

@@ -16,6 +16,8 @@ Browser tải về nằm ở <repo>/browsers/chrome-<version>/ (ngoài data/, tr
 ANTIDETECT_BROWSER_PATH → browsers/ (mới nhất) → Chrome/Edge đã cài.
 """
 import argparse
+import base64
+import hashlib
 import io
 import json
 import os
@@ -24,6 +26,7 @@ import sys
 import time
 import urllib.request
 import zipfile
+from urllib.parse import quote, urlparse
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -61,15 +64,53 @@ def pick_version(versions: list, version: str = None, major: str = None) -> dict
     )
 
 
+def fetch_metadata(download_url: str) -> dict:
+    """Đọc metadata GCS của file zip: md5Hash (base64) + size.
+
+    known-good-versions JSON chỉ có URL/version, không kèm hash. GCS Object
+    Metadata API là nguồn duy nhất CfT công bố (MD5, không có SHA-256).
+    """
+    parsed = urlparse(download_url)
+    if (parsed.hostname or "").lower() != "storage.googleapis.com":
+        raise SystemExit(
+            f"Không hỗ trợ kiểm tra checksum cho host {parsed.hostname!r}."
+        )
+    path = parsed.path.lstrip("/")
+    bucket, _, object_name = path.partition("/")
+    if not bucket or not object_name:
+        raise SystemExit(f"URL tải không hợp lệ: {download_url}")
+    api = (
+        "https://storage.googleapis.com/storage/v1/b/"
+        f"{quote(bucket, safe='')}/o/{quote(object_name, safe='')}"
+    )
+    req = urllib.request.Request(api, headers={"User-Agent": "antidetect-python"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - fail closed, báo rõ nguồn lỗi
+        raise SystemExit(
+            f"Không đọc được metadata checksum từ GCS: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def download_and_extract(entry: dict) -> str:
     dest = os.path.join(BROWSERS_DIR, f"chrome-{entry['version']}")
     if os.path.exists(os.path.join(dest, "chrome-win64", "chrome.exe")):
         print(f"[=] Đã có sẵn: {dest}")
         return dest
+    meta = fetch_metadata(entry["url"])
+    expected_md5 = str(meta.get("md5Hash") or "").strip()
+    expected_size = int(meta.get("size") or 0)
+    if not expected_md5 or expected_size <= 0:
+        raise SystemExit(
+            "GCS không trả md5Hash/size cho archive — hủy cài để tránh "
+            "chạy binary chưa xác minh."
+        )
     os.makedirs(BROWSERS_DIR, exist_ok=True)
     zip_path = dest + ".zip"
     print(f"[*] Tải {entry['url']}")
     t0 = time.time()
+    digest = hashlib.md5()
     req = urllib.request.Request(entry["url"], headers={"User-Agent": "antidetect-python"})
     with urllib.request.urlopen(req, timeout=120) as resp, open(zip_path, "wb") as f:
         total = int(resp.headers.get("Content-Length") or 0)
@@ -79,12 +120,23 @@ def download_and_extract(entry: dict) -> str:
             if not chunk:
                 break
             f.write(chunk)
+            digest.update(chunk)
             done += len(chunk)
             if total:
                 pct = done * 100 // total
                 if pct % 10 == 0:
                     print(f"    {pct}% ({done >> 20}MB)", flush=True)
-    print(f"[*] Tải xong {done >> 20}MB trong {time.time() - t0:.0f}s — giải nén...")
+    actual_md5 = base64.b64encode(digest.digest()).decode("ascii")
+    if done != expected_size or actual_md5 != expected_md5:
+        try:
+            os.remove(zip_path)
+        except OSError:
+            pass
+        raise SystemExit(
+            "Checksum không khớp — đã hủy cài. "
+            f"(size {done}/{expected_size}, md5 {actual_md5}/{expected_md5})"
+        )
+    print(f"[*] Checksum MD5 khớp metadata GCS — tải xong {done >> 20}MB trong {time.time() - t0:.0f}s — giải nén...")
     with zipfile.ZipFile(zip_path) as zf:
         zf.extractall(dest)
     os.remove(zip_path)

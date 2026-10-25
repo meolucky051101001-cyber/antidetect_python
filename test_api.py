@@ -6,7 +6,9 @@ import time
 import tempfile
 import threading
 import asyncio
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+import pytest
 from unittest.mock import patch
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -524,6 +526,269 @@ def test_facebook_pages_ui_and_scraper_present():
     assert "/json/close/" in src
     # Tab được mở bằng session của chính profile (qua CDP của nó).
     assert "def fetch_facebook_pages" in src
+
+
+def _wait_for_bulk_idle(timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if app_module._bulk_launch_lock.acquire(blocking=False):
+            app_module._bulk_launch_lock.release()
+            return
+        time.sleep(0.05)
+    raise AssertionError("bulk launch lock vẫn bị giữ")
+
+
+def test_schedule_partial_update_toggles_enabled():
+    """UI chỉ gửi {enabled} — PUT không được đòi lại time/action (422)."""
+    login()
+    from antidetect.scheduler import ScheduleStore
+
+    path = os.path.join(TEST_DATA_DIR, "schedules-partial-update.json")
+    previous = app_module._schedule_store
+    app_module._schedule_store = ScheduleStore(path)
+    try:
+        created = client.post("/api/schedules", json={
+            "name": "Toggle", "time": "07:30", "action": "start_all", "enabled": True,
+        })
+        assert created.status_code == 200, created.text
+        rule = created.json()["rule"]
+
+        toggled = client.put(f"/api/schedules/{rule['id']}", json={"enabled": False})
+        assert toggled.status_code == 200, toggled.text
+        updated = toggled.json()["rule"]
+        assert updated["enabled"] is False
+        assert updated["time"] == "07:30"
+        assert updated["action"] == "start_all"
+
+        fresh = ScheduleStore(path)
+        assert fresh.list()[0]["enabled"] is False
+
+        bad_time = client.put(f"/api/schedules/{rule['id']}", json={"time": "25:99"})
+        assert bad_time.status_code == 400
+        missing = client.put("/api/schedules/does-not-exist", json={"enabled": False})
+        assert missing.status_code == 404
+    finally:
+        app_module._schedule_store = previous
+
+
+def test_start_all_held_bulk_lock_returns_409_without_stale_job():
+    login()
+    profile = app_module.profile_manager.create_profile(name="Bulk Lock Test")
+    try:
+        _wait_for_bulk_idle()
+        app_module._active_start_all_job = None
+        assert app_module._bulk_launch_lock.acquire(blocking=False)
+        try:
+            response = client.post("/api/profiles/start-all")
+            assert response.status_code == 409, response.text
+            # Không được tạo job "running" nếu chưa nắm được bulk lock.
+            assert app_module._active_start_all_job is None
+        finally:
+            app_module._bulk_launch_lock.release()
+    finally:
+        app_module._active_start_all_job = None
+        app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_start_all_launcher_exception_ends_job_as_failed():
+    login()
+    profile = app_module.profile_manager.create_profile(name="Bulk Failure Test")
+    try:
+        _wait_for_bulk_idle()
+        app_module._active_start_all_job = None
+
+        def boom(**_kwargs):
+            raise RuntimeError("synthetic bulk failure")
+
+        with patch.object(app_module.launcher, "launch_all", side_effect=boom):
+            response = client.post("/api/profiles/start-all")
+            assert response.status_code == 200, response.text
+            job_id = response.json()["job_id"]
+
+            deadline = time.time() + 5
+            job = None
+            while time.time() < deadline:
+                status = client.get("/api/profiles/start-all/status").json()
+                job = status["job"]
+                if job and job["job_id"] == job_id and job["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+            assert job is not None and job["job_id"] == job_id
+            assert job["status"] == "failed"
+            assert "synthetic bulk failure" in job.get("error", "")
+            assert client.get("/api/profiles/start-all/status").json()["active"] is False
+    finally:
+        app_module._active_start_all_job = None
+        app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_profiles_with_status_exposes_uptime_and_ram():
+    """Hàm status còn hiệu lực phải trả uptime/RAM, không bị bản trùng ghi đè."""
+    login()
+    profile = app_module.profile_manager.create_profile(name="Runtime Fields Test")
+    try:
+        fake_port = 6553
+        started = int(time.time()) - 120
+        with patch.object(app_module.launcher, "is_running", return_value=True), \
+             patch.object(app_module.launcher, "active_ports", {profile.id: fake_port}), \
+             patch.object(
+                 app_module.launcher._runtime_store, "get",
+                 return_value={"started_at": started},
+             ), \
+             patch.object(
+                 app_module, "_ram_by_profile_dir",
+                 return_value={profile.id: 321.5},
+             ):
+            items = {p.id: p for p in app_module._profiles_with_status()}
+        item = items[profile.id]
+        assert item.status == "running"
+        assert item.port == fake_port
+        assert item.ram_mb == 321.5
+        assert item.uptime_seconds is not None and item.uptime_seconds >= 118
+    finally:
+        app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_docs_and_openapi_require_session():
+    client.cookies.clear()
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 401, path
+    login()
+    for path in ("/docs", "/redoc"):
+        assert client.get(path).status_code == 200, path
+    schema = client.get("/openapi.json")
+    assert schema.status_code == 200
+    assert "openapi" in schema.json()
+    client.cookies.clear()
+    login()
+
+
+def test_docs_csp_allows_cdn_while_dashboard_stays_strict():
+    login()
+    docs_csp = client.get("/docs").headers["content-security-policy"]
+    assert "https://cdn.jsdelivr.net" in docs_csp
+    assert "https://fonts.googleapis.com" in docs_csp
+    assert "https://fonts.gstatic.com" in docs_csp
+    dashboard_csp = client.get("/").headers["content-security-policy"]
+    assert "cdn.jsdelivr.net" not in dashboard_csp
+    assert "fonts.googleapis.com" not in dashboard_csp
+    assert "script-src 'self' 'unsafe-inline';" in dashboard_csp
+
+
+def test_login_non_ascii_token_returns_401_not_500():
+    class FakeRequest:
+        headers = {"authorization": "Bearer khóa-mở-ứng-dụng-☃"}
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(app_module.login(FakeRequest()))
+    assert excinfo.value.status_code == 401
+
+
+def test_bulk_endpoints_reject_explicit_empty_selection():
+    login()
+    r = client.post("/api/profiles/start-all", json={"profile_ids": []})
+    assert r.status_code == 400, r.text
+    r = client.post("/api/profiles/stop-all", json={"profile_ids": []})
+    assert r.status_code == 400, r.text
+
+
+def test_fanpage_refresh_keeps_cache_when_live_result_empty():
+    login()
+    profile = app_module.profile_manager.create_profile(name="Fanpage Cache Test")
+    old = {
+        "name": "Old Page",
+        "url": "https://www.facebook.com/oldpage",
+        "id": "123456",
+    }
+    profile.facebook_pages = [old]
+    profile.facebook_pages_synced_at = 1700000000
+    app_module.profile_manager.update_profile(profile)
+    try:
+        with patch.object(app_module.launcher, "is_running", return_value=True), \
+             patch.object(
+                 app_module.launcher, "fetch_facebook_pages",
+                 return_value={"logged_in": True, "pages": []},
+             ):
+            r = client.get(f"/api/profiles/{profile.id}/facebook/pages?refresh=1")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["stale"] is True
+            assert data["source"] == "cache"
+            assert [p["url"] for p in data["pages"]] == [old["url"]]
+            assert data["synced_at"] == 1700000000
+
+            r2 = client.get(
+                f"/api/profiles/{profile.id}/facebook/pages?refresh=1&force=1"
+            )
+            assert r2.status_code == 200, r2.text
+            data2 = r2.json()
+            assert data2["stale"] is False
+            assert data2["pages"] == []
+        assert app_module.profile_manager.get_profile(profile.id).facebook_pages == []
+    finally:
+        app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_fanpage_cache_filters_unsafe_urls():
+    login()
+    profile = app_module.profile_manager.create_profile(name="Fanpage URL Test")
+    profile.facebook_pages = [
+        {"name": "Bad", "url": "javascript:alert(1)"},
+        {"name": "Good", "url": "https://www.facebook.com/goodpage"},
+    ]
+    app_module.profile_manager.update_profile(profile)
+    try:
+        r = client.get(f"/api/profiles/{profile.id}/facebook/pages")
+        assert r.status_code == 200, r.text
+        assert [p["url"] for p in r.json()["pages"]] == [
+            "https://www.facebook.com/goodpage"
+        ]
+    finally:
+        app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_import_profiles_strips_unsafe_fanpage_urls():
+    login()
+    r = client.post("/api/profiles/import", json={"profiles": [{
+        "name": "Imported Fanpage URLs",
+        "facebook_pages": [
+            {"name": "Bad", "url": "javascript:alert(1)"},
+            {
+                "name": "Good",
+                "url": "https://www.facebook.com/goodpage",
+                "id": "123",
+            },
+        ],
+    }]})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["imported_count"] == 1
+    pid = data["imported"][0]["id"]
+    try:
+        stored = app_module.profile_manager.get_profile(pid)
+        assert [p["url"] for p in stored.facebook_pages] == [
+            "https://www.facebook.com/goodpage"
+        ]
+    finally:
+        app_module.profile_manager.delete_profile(pid)
+
+
+def test_worker_pool_is_sized_for_parallel_launch():
+    pool = app_module._worker_pool()
+    try:
+        assert getattr(pool, "_max_workers") == 64
+    finally:
+        pool.shutdown(wait=False)
+
+
+def test_dashboard_csp_blocks_plugins_and_foreign_forms():
+    r = client.get("/")
+    assert r.status_code == 200
+    csp = r.headers["content-security-policy"]
+    assert "object-src 'none'" in csp
+    assert "base-uri 'self'" in csp
+    assert "form-action 'self'" in csp
 
 
 if __name__ == "__main__":

@@ -44,6 +44,47 @@ def _safe_run(coro):
         return ex.submit(asyncio.run, coro).result()
 
 
+# code/virtual-key cho ký tự ASCII theo bàn phím US — Chrome dùng các field
+# này để dựng event.key/code/keyCode nhất quán với thao tác người thật.
+_KEY_CODES = {
+    " ": ("Space", 32, False), "\t": ("Tab", 9, False),
+    "\n": ("Enter", 13, False), "\r": ("Enter", 13, False),
+    ".": ("Period", 190, False), ",": ("Comma", 188, False),
+    ";": ("Semicolon", 186, False), "'": ("Quote", 222, False),
+    "/": ("Slash", 191, False), "\\": ("Backslash", 220, False),
+    "-": ("Minus", 189, False), "=": ("Equal", 187, False),
+    "[": ("BracketLeft", 219, False), "]": ("BracketRight", 221, False),
+    "`": ("Backquote", 192, False),
+    "!": ("Digit1", 49, True), "@": ("Digit2", 50, True),
+    "#": ("Digit3", 51, True), "$": ("Digit4", 52, True),
+    "%": ("Digit5", 53, True), "^": ("Digit6", 54, True),
+    "&": ("Digit7", 55, True), "*": ("Digit8", 56, True),
+    "(": ("Digit9", 57, True), ")": ("Digit0", 48, True),
+    "_": ("Minus", 189, True), "+": ("Equal", 187, True),
+    "{": ("BracketLeft", 219, True), "}": ("BracketRight", 221, True),
+    "|": ("Backslash", 220, True), ":": ("Semicolon", 186, True),
+    '"': ("Quote", 222, True), "<": ("Comma", 188, True),
+    ">": ("Period", 190, True), "?": ("Slash", 191, True),
+    "~": ("Backquote", 192, True),
+}
+
+
+def _key_info(ch: str):
+    """→ (key, code, virtualKeyCode, cần Shift) cho một ký tự."""
+    if ch in _KEY_CODES:
+        code, vk, shifted = _KEY_CODES[ch]
+        key = {"\n": "Enter", "\r": "Enter", "\t": "Tab"}.get(ch, ch)
+        return key, code, vk, shifted
+    if len(ch) == 1 and ch.isascii() and ch.isalpha():
+        up = ch.upper()
+        return ch, f"Key{up}", ord(up), ch.isupper()
+    if len(ch) == 1 and "0" <= ch <= "9":
+        return ch, f"Digit{ch}", ord(ch), False
+    # Ký tự non-ASCII (tiếng Việt...): không có code cố định trên bàn phím US;
+    # Chrome chèn qua text/unmodifiedText, keyCode = 0 như sự kiện IME.
+    return ch, "", 0, False
+
+
 class HumanInput:
     """Gõ/phím/chuột giống người qua CDP Input domain của tab đang active."""
 
@@ -191,12 +232,14 @@ class HumanInput:
                                pointerType="mouse")
                     await asyncio.sleep(self.rng.uniform(0.008, 0.016))
                 clicks = 2 if double else 1
-                for _ in range(clicks):
+                for count in range(1, clicks + 1):
                     await send(type="mousePressed", x=x, y=y, button="left",
-                               buttons=1, clickCount=1, pointerType="mouse")
+                               buttons=1, clickCount=count, pointerType="mouse")
                     await asyncio.sleep(self.rng.uniform(0.06, 0.12))
+                    # Chuột đã nhả: buttons=0 (bitmask nút đang giữ) — gửi 1
+                    # ở release là dấu hiệu input giả rõ ràng.
                     await send(type="mouseReleased", x=x, y=y, button="left",
-                               buttons=1, clickCount=1, pointerType="mouse")
+                               buttons=0, clickCount=count, pointerType="mouse")
                     if double:
                         await asyncio.sleep(self.rng.uniform(0.05, 0.09))
 
@@ -213,17 +256,36 @@ class HumanInput:
                 if initial_delay:
                     await asyncio.sleep(self.rng.uniform(0.15, 0.4))
                 for ch in text:
+                    key, code, vk, shifted = _key_info(ch)
+                    # Enter gửi "\r" như bàn phím; Tab không chèn ký tự.
+                    typed = "" if ch == "\t" else ("\r" if ch in ("\n", "\r") else ch)
+                    down = {
+                        "type": "keyDown", "key": key,
+                        "text": typed, "unmodifiedText": typed,
+                        "code": code,
+                        "windowsVirtualKeyCode": vk,
+                        "nativeVirtualKeyCode": vk,
+                        "location": 0, "autoRepeat": False,
+                    }
+                    up = {
+                        "type": "keyUp", "key": key, "code": code,
+                        "windowsVirtualKeyCode": vk,
+                        "nativeVirtualKeyCode": vk,
+                        "location": 0,
+                    }
+                    if shifted:
+                        down["modifiers"] = 8
+                        up["modifiers"] = 8
                     msg_id += 1
                     await ws.send(json.dumps({
                         "id": msg_id, "method": "Input.dispatchKeyEvent",
-                        "params": {"type": "keyDown", "text": ch,
-                                   "unmodifiedText": ch},
+                        "params": down,
                     }))
                     await asyncio.sleep(self.rng.uniform(0.012, 0.03))
                     msg_id += 1
                     await ws.send(json.dumps({
                         "id": msg_id, "method": "Input.dispatchKeyEvent",
-                        "params": {"type": "keyUp", "key": ch},
+                        "params": up,
                     }))
                     await asyncio.sleep(self.key_delay_ms(ch) / 1000.0)
 
