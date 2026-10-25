@@ -12,15 +12,20 @@ Tool hoàn chỉnh ở mức production-ready có điều kiện: **114 pytest p
 E2E smoke 24/24 (`tools/e2e_smoke.py`), fingerprint đạt "không phân biệt được
 khỏi Chrome thật trên máy" (CreepJS/Pixelscan/Iphey đều bằng baseline clean),
 đã qua 4 vòng review + 4 giai đoạn nâng cấp chống phát hiện + dashboard
-quản lý A/B/C. **Mọi thay đổi CHƯA commit** — working tree = trạng thái bàn
-giao. `data/` (7 profile thật + secrets DPAPI) **không bị chạm** toàn bộ ngày.
+quản lý A/B/C. **Baseline đã chốt bằng 4 commit ngày 2026-10-25** — working
+tree sạch. `data/` (7 profile thật + secrets DPAPI) **không bị chạm** toàn bộ
+ngày.
 
 ## 2. Git & vị trí
 
 ```text
 Repo:  C:\Users\admin\Documents\antigravity\blissful-maxwell\antidetect_python
-HEAD:  7990546 (branch master)
-State: 25 files modified + 10 files mới — CHƯA commit (theo chủ ý, chờ user)
+HEAD:  2988636 (branch master)
+State: working tree sạch — baseline 2026-10-24 đã commit ngày 2026-10-25
+  1eba37a fix(core): harden profile storage, secrets and browser lifecycle
+  dec626d feat(stealth): anti-detection stages 1-4, browser pin and human input
+  e9b3c64 feat(web): dashboard A/B/C, scheduler and production API hardening
+  2988636 docs: handoff 2026-10-24 with verification evidence and runbook
 ```
 
 Files mới quan trọng: `antidetect/human.py` (HumanInput), `antidetect/scheduler.py`,
@@ -106,3 +111,17 @@ python run.py --port 8766                                  # dashboard :8766
 Mục 7 của `VERIFICATION_2026-10-23.md` (bàn giao cũ) vẫn đúng cho các lệnh
 nền tảng; mọi số liệu cũ trong đó về CreepJS 31%/noTaskbar đã stale — xem
 `VERIFICATION_2026-10-24.md` thay thế.
+
+## 8. Chốt baseline (2026-10-25)
+
+- 4 commit từ working tree ngày 2026-10-24 (xem mục 2); **không push**.
+- Vá 2 lỗi encoding cp1252 của tool mới: `tools/install_browser.py` và
+  `tools/e2e_smoke.py` (reconfigure UTF-8 như các CLI khác trong repo).
+- Xác minh cuối: `pytest -q` 114 passed; E2E smoke 24/24; `verify_live`
+  (profile tạm) PASS; SHA256 `data/profiles.json` không đổi
+  (`EF69A75A53BFBDD95B8142C5C5875A752D857C9A6AD77361331EDE60E919A06B`).
+- E2E từng fail 1 lần ở bước "stop browser" (23/24) rồi không tái hiện —
+  nếu lặp lại, in thêm status/body của response stop để điều tra.
+- Backup working tree trước khi commit:
+  `%TEMP%\antidetect-handoff-backup-20261025`.
+
