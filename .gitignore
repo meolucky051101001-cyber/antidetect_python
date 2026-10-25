@@ -24,3 +24,6 @@ app.log
 *.zip
 .DS_Store
 Thumbs.db
+
+# Pinned browsers (chrome-for-testing downloads, ~200MB each)
+browsers/

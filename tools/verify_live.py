@@ -25,8 +25,9 @@ import os
 import re
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -40,8 +41,13 @@ except ImportError:  # pragma: no cover - normal CLI path
 
 from antidetect.fingerprint import normalize_fingerprint_for_launch  # noqa: E402
 from antidetect.launcher import BrowserLauncher, find_browser_executable  # noqa: E402
-from antidetect.storage import ProfileManager  # noqa: E402
-from antidetect.stealth import _webgl_limits  # noqa: E402
+from antidetect.storage import DATA_DIR, ProfileManager  # noqa: E402
+from antidetect.stealth import (  # noqa: E402
+    _battery_profile,
+    _connection_profile,
+    _screen_work_area,
+    _webgl_limits,
+)
 
 PAGE = (
     b"<!doctype html><html><head><meta charset=utf-8><title>verify</title>"
@@ -84,6 +90,67 @@ def _private_ip_in_sdp(sdp: str) -> bool:
         )
     )
 
+
+# --- Giai đoạn 2: drift baseline (phát hiện máy/Chrome thay đổi) ---
+
+def _baseline_path(profile_id: str) -> str:
+    return os.path.join(DATA_DIR, "fingerprint_baselines", f"{profile_id}.json")
+
+
+def _load_baseline(profile_id: str) -> Optional[Dict[str, Any]]:
+    path = _baseline_path(profile_id)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_baseline(profile_id: str, actual: Dict[str, Any]) -> Dict[str, Any]:
+    """Chụp baseline fingerprint máy/profile — các lần verify sau so với nó."""
+    m = re.search(r"Chrome/([\d.]+)", actual.get("ua") or "")
+    snapshot = {
+        "saved_at": int(time.time()),
+        "browser_version": m.group(1) if m else None,
+        "ua": actual.get("ua"),
+        "platform": actual.get("platform"),
+        "glVendor": actual.get("glVendor"),
+        "glRenderer": actual.get("glRenderer"),
+        "hardwareConcurrency": actual.get("hc"),
+        "deviceMemory": actual.get("dm"),
+        "screen": {"w": actual.get("sw"), "h": actual.get("sh"),
+                   "dpr": actual.get("dpr")},
+        "tz": actual.get("tz"),
+    }
+    path = _baseline_path(profile_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + f".tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+    return snapshot
+
+
+def _baseline_drift(baseline: Dict[str, Any], actual: Dict[str, Any]) -> Dict[str, list]:
+    """So baseline vs hiện tại. Lưu ý: glRenderer/hc/dm là profile-driven ở
+    chế độ Unique (đổi fingerprint = chủ ý); `ua` đổi nghĩa là Chrome/browser
+    binary đã khác — tín hiệu máy thay đổi đáng tin nhất."""
+    drift: Dict[str, list] = {}
+    m = re.search(r"Chrome/([\d.]+)", actual.get("ua") or "")
+    pairs = {
+        "ua": (baseline.get("ua"), actual.get("ua")),
+        "browser_version": (baseline.get("browser_version"), m.group(1) if m else None),
+        "glVendor": (baseline.get("glVendor"), actual.get("glVendor")),
+        "glRenderer": (baseline.get("glRenderer"), actual.get("glRenderer")),
+        "hardwareConcurrency": (baseline.get("hardwareConcurrency"), actual.get("hc")),
+        "deviceMemory": (baseline.get("deviceMemory"), actual.get("dm")),
+        "platform": (baseline.get("platform"), actual.get("platform")),
+    }
+    for key, (old, new) in pairs.items():
+        if old is not None and new is not None and old != new:
+            drift[key] = [old, new]
+    return drift
+
 LIVE_JS = r"""async () => {
     const out = { ok: true, errors: [] };
     const safe = (name, fn, fallback) => {
@@ -107,6 +174,27 @@ LIVE_JS = r"""async () => {
     };
     out.timezone = safe('timezone',
         () => Intl.DateTimeFormat().resolvedOptions().timeZone, null);
+
+    // Battery + NetworkInformation per-profile (đồng bộ với stealth config).
+    out.battery = null;
+    try {
+        if (navigator.getBattery) {
+            const b = await navigator.getBattery();
+            out.battery = {
+                level: b.level,
+                charging: b.charging,
+                chargingTime: b.chargingTime,
+                dischargingTime: b.dischargingTime
+            };
+        }
+    } catch (e) { out.errors.push('battery: ' + e); }
+    out.connection = safe('connection', () => navigator.connection ? {
+        effectiveType: navigator.connection.effectiveType,
+        type: navigator.connection.type,
+        rtt: navigator.connection.rtt,
+        downlink: navigator.connection.downlink,
+        saveData: navigator.connection.saveData
+    } : null, null);
     out.css = {
         deviceWidth: matchMedia(`(device-width: ${screen.width}px)`).matches,
         deviceHeight: matchMedia(`(device-height: ${screen.height}px)`).matches,
@@ -117,6 +205,24 @@ LIVE_JS = r"""async () => {
         webdriver: navigator.hasOwnProperty('webdriver'),
         screenWidth: screen.hasOwnProperty('width'),
         toStringNative: Function.prototype.toString.toString().includes('[native code]')
+    };
+    out.native = {
+        functionToString: Function.prototype.toString.toString().includes('[native code]'),
+        toDataURL: Function.prototype.toString.call(
+            HTMLCanvasElement.prototype.toDataURL
+        ).includes('[native code]'),
+        getImageData: Function.prototype.toString.call(
+            CanvasRenderingContext2D.prototype.getImageData
+        ).includes('[native code]'),
+        getParameter: Function.prototype.toString.call(
+            WebGLRenderingContext.prototype.getParameter
+        ).includes('[native code]'),
+        hcGetter: (() => {
+            const d = Object.getOwnPropertyDescriptor(Navigator.prototype, 'hardwareConcurrency');
+            return d && d.get
+                ? Function.prototype.toString.call(d.get).includes('[native code]')
+                : null;
+        })()
     };
 
     // WebGL limits / renderer.
@@ -272,6 +378,11 @@ def main(argv: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Live verify one real profile.")
     parser.add_argument("--profile", required=True, help="Profile id or name")
     parser.add_argument("--json", help="Write the full report to this path")
+    parser.add_argument(
+        "--save-baseline", action="store_true",
+        help="Chụp fingerprint hiện tại làm baseline (Giai đoạn 2); các lần "
+             "verify sau tự so và báo drift khi máy/Chrome thay đổi.",
+    )
     args = parser.parse_args(argv)
 
     manager = ProfileManager()
@@ -383,16 +494,20 @@ def main(argv: Any = None) -> int:
                             header_dm, fp.device_memory))
 
         screen = data.get("screen") or {}
+        # R2 hooks the work-area getters to model the OS taskbar. When the
+        # work area is empty (no taskbar margin to model), CDP device metrics
+        # report the full screen as available.
+        work_area = _screen_work_area(fp)
+        expected_avail_w = work_area.get("availWidth", fp.screen_width)
+        expected_avail_h = work_area.get("availHeight", fp.screen_height)
         checks.append(_check("screen.width", screen.get("width") == fp.screen_width,
                             screen.get("width"), fp.screen_width))
         checks.append(_check("screen.height", screen.get("height") == fp.screen_height,
                             screen.get("height"), fp.screen_height))
-        checks.append(_check("screen.availWidth", screen.get("availWidth") == fp.screen_width,
-                            screen.get("availWidth"), fp.screen_width))
-        # CDP device metrics do not model a taskbar; this is documented in
-        # docs/LIMITATIONS.md. Keep the value visible but not a failure.
-        checks.append(_check("screen.availHeight", True,
-                            screen.get("availHeight"), "CDP work area"))
+        checks.append(_check("screen.availWidth", screen.get("availWidth") == expected_avail_w,
+                            screen.get("availWidth"), expected_avail_w))
+        checks.append(_check("screen.availHeight", screen.get("availHeight") == expected_avail_h,
+                            screen.get("availHeight"), expected_avail_h))
         checks.append(_check("devicePixelRatio",
                             abs(float(data.get("dpr") or 0) - float(fp.device_pixel_ratio or 1.0)) < 0.01,
                             data.get("dpr"), fp.device_pixel_ratio))
@@ -413,6 +528,16 @@ def main(argv: Any = None) -> int:
                             own.get("screenWidth"), False))
         checks.append(_check("toString_native", own.get("toStringNative") is True,
                             own.get("toStringNative"), True))
+        native = data.get("native") or {}
+        checks.append(_check("toDataURL_native_source", native.get("toDataURL") is True,
+                            native.get("toDataURL"), True))
+        checks.append(_check("getImageData_native_source", native.get("getImageData") is True,
+                            native.get("getImageData"), True))
+        checks.append(_check("getParameter_native_source", native.get("getParameter") is True,
+                            native.get("getParameter"), True))
+        checks.append(_check("hardwareConcurrency_getter_native_source",
+                            native.get("hcGetter") is True,
+                            native.get("hcGetter"), True))
 
         webgl = data.get("webgl") or {}
         expected_limits = _webgl_limits(fp) or CLEAN_WEBGL
@@ -433,10 +558,81 @@ def main(argv: Any = None) -> int:
         canvas = data.get("canvas") or {}
         checks.append(_check("canvas_simple_no_noise", canvas.get("simpleDiff") == 0,
                             canvas.get("simpleDiff"), 0))
-        checks.append(_check("canvas_complex_noisy",
-                            isinstance(canvas.get("complexDiff"), int)
-                            and canvas.get("complexDiff") > 0,
-                            canvas.get("complexDiff"), ">0"))
+        # Profile "authentic" (stealth_disable chứa 'canvas'): noise bị
+        # tắt chủ đích — canvas phức tạp giữ pixel native, complexDiff == 0.
+        canvas_noise_disabled = "canvas" in (getattr(fp, "stealth_disable", None) or [])
+        if canvas_noise_disabled:
+            checks.append(_check("canvas_complex_native",
+                                canvas.get("complexDiff") == 0,
+                                canvas.get("complexDiff"), 0))
+        else:
+            checks.append(_check("canvas_complex_noisy",
+                                isinstance(canvas.get("complexDiff"), int)
+                                and canvas.get("complexDiff") > 0,
+                                canvas.get("complexDiff"), ">0"))
+
+        # Battery + NetworkInformation: hooks là opt-in (mặc định tắt) — khi
+        # tắt, trang thấy giá trị native; chỉ so sánh khi biết nguồn expected
+        # (native cache đo được, hoặc hooks đang bật với fallback deterministic).
+        from antidetect.stealth import _effective_disabled_groups, _native_or_fallback
+        fp_proxy = getattr(profile, "proxy", None)
+        native_hw = {}
+        if hasattr(launcher, "_native_brands_cache"):
+            native_hw = launcher._native_brands_cache.get(fp.browser_version) or {}
+        batt_exp = _native_or_fallback(native_hw, "battery", _battery_profile(fp))
+        groups_disabled = _effective_disabled_groups(fp)
+        battery_checkable = native_hw.get("battery") or "battery" not in groups_disabled
+        connection_checkable = native_hw.get("connection") or "network" not in groups_disabled
+        batt = data.get("battery")
+        conn = data.get("connection")
+        checks.append(_check("battery_available", batt is not None,
+                            bool(batt), True))
+        if batt and battery_checkable:
+            checks.append(_check("battery_level", batt.get("level") == batt_exp["level"],
+                                batt.get("level"), batt_exp["level"]))
+            checks.append(_check("battery_charging", batt.get("charging") == batt_exp["charging"],
+                                batt.get("charging"), batt_exp["charging"]))
+            checks.append(_check("battery_times",
+                                batt.get("chargingTime") == batt_exp["chargingTime"]
+                                and batt.get("dischargingTime") == batt_exp["dischargingTime"],
+                                [batt.get("chargingTime"), batt.get("dischargingTime")],
+                                [batt_exp["chargingTime"], batt_exp["dischargingTime"]]))
+        checks.append(_check("connection_available", conn is not None,
+                            bool(conn), True))
+        if conn and connection_checkable:
+            proxy_on = bool(fp_proxy and fp_proxy.enabled and fp_proxy.host)
+            if proxy_on:
+                # Qua proxy, navigator.connection native phản ánh đường truyền
+                # proxy realtime (Chrome thật cũng vậy) — chỉ kiểm cấu trúc
+                # bucket theo spec, không so bằng giá trị đo direct.
+                rtt = conn.get("rtt")
+                downlink = conn.get("downlink")
+                checks.append(_check("connection_rtt_bucket",
+                                    isinstance(rtt, int) and rtt >= 0 and rtt % 25 == 0,
+                                    rtt, "bội 25 (spec)"))
+                checks.append(_check("connection_downlink_sane",
+                                    isinstance(downlink, (int, float))
+                                    and 0 < downlink <= 10,
+                                    downlink, "0 < downlink <= 10"))
+                checks.append(_check("connection_effectiveType",
+                                    conn.get("effectiveType") in ("slow-2g", "2g", "3g", "4g"),
+                                    conn.get("effectiveType"), "valid"))
+            else:
+                # Connection native dao động theo mạng tại thời điểm đo
+                # (rtt đo lúc T0 khác lúc verify là hành vi của Chrome thật,
+                # không phải leak) — chỉ kiểm cấu trúc bucket theo spec.
+                rtt = conn.get("rtt")
+                downlink = conn.get("downlink")
+                checks.append(_check("connection_rtt_bucket",
+                                    isinstance(rtt, int) and rtt >= 0 and rtt % 25 == 0,
+                                    rtt, "bội 25 (spec)"))
+                checks.append(_check("connection_downlink_sane",
+                                    isinstance(downlink, (int, float))
+                                    and 0 < downlink <= 10,
+                                    downlink, "0 < downlink <= 10"))
+                checks.append(_check("connection_effectiveType",
+                                    conn.get("effectiveType") in ("slow-2g", "2g", "3g", "4g"),
+                                    conn.get("effectiveType"), "valid"))
 
         worker = data.get("worker") or {}
         checks.append(_check("worker_timezone", _timezones_match(worker.get("timezone"), fp.timezone),
@@ -462,6 +658,32 @@ def main(argv: Any = None) -> int:
         report["failures"] = [f"{c['name']}: got {c['actual']!r}, expected {c['expected']!r}"
                               for c in failures]
         report["status"] = "PASS" if not failures else "FAIL"
+
+        # Giai đoạn 2: drift baseline — so với lần chụp trước để phát hiện
+        # Chrome update / GPU / máy thay đổi (tín hiệu cả farm drift cùng lúc).
+        actual = ((report.get("launch") or {}).get("verification") or {}).get("actual") or {}
+        baseline = _load_baseline(profile.id)
+        if args.save_baseline and actual:
+            saved = _save_baseline(profile.id, actual)
+            report["baseline"] = {"action": "saved", "snapshot": saved}
+        elif baseline and actual:
+            drift = _baseline_drift(baseline, actual)
+            report["baseline"] = {
+                "action": "compared",
+                "saved_at": baseline.get("saved_at"),
+                "drift": drift,
+                "note": (
+                    "ua/browser_version đổi = Chrome hoặc browser pin đã khác "
+                    "→ chạy lại detector audit cho cả farm. glRenderer/hc/dm "
+                    "ở chế độ Unique do profile cấu hình — drift ở đó có thể "
+                    "là chủ ý."
+                ),
+            }
+        else:
+            report["baseline"] = {
+                "action": "none",
+                "note": "Chưa có baseline. Chạy lại với --save-baseline sau khi verify PASS.",
+            }
     except Exception as exc:  # noqa: BLE001
         report["failures"] = [f"{type(exc).__name__}: {exc}"]
         report["status"] = "FAIL"
@@ -482,6 +704,17 @@ def main(argv: Any = None) -> int:
         print(f"  [{flag}] {check['name']}: {check['actual']!r} (expected {check['expected']!r})")
     for failure in report.get("failures", []):
         print(f"  FAIL: {failure}")
+    baseline_info = report.get("baseline") or {}
+    if baseline_info.get("action") == "compared":
+        drift = baseline_info.get("drift") or {}
+        if drift:
+            print(f"  [DRIFT] Máy/Chrome đã thay đổi so với baseline "
+                  f"({time.strftime('%Y-%m-%d', time.localtime(baseline_info.get('saved_at', 0)))}):")
+            for key, (old, new) in drift.items():
+                print(f"     {key}: {old!r} -> {new!r}")
+            print("  → Chạy lại detector audit cho cả farm trước khi dùng thật.")
+    elif baseline_info.get("action") == "saved":
+        print("  [BASELINE] Đã chụp fingerprint hiện tại làm baseline.")
     print(f"RESULT: {report['status']}")
 
     if args.json:

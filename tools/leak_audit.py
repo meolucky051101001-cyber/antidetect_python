@@ -307,12 +307,46 @@ def fetch_browser_ip(context: Any) -> Dict[str, Any]:
     }
 
 
+TLS_FINGERPRINT_URL = "https://tls.peet.ws/api/all"
+
+
+def fetch_tls_fingerprint(context: Any) -> Dict[str, Any]:
+    """Đo JA3/JA4 ClientHello TỪ TRONG browser của profile (GĐ3).
+
+    TLS stack của Chromium không đổi được bằng CDP/JS — mỗi binary phiên bản
+    có ClientHello riêng. Đo được JA3/JA4 giúp (1) chứng minh các profile pin
+    khác major có TLS khác nhau (TLS diversity), (2) phát hiện khi Chrome
+    update đổi JA3 của cả farm. Best-effort: endpoint chết thì trả None.
+    """
+    try:
+        page = context.new_page()
+        page.goto(TLS_FINGERPRINT_URL, wait_until="domcontentloaded", timeout=25_000)
+        body = page.locator("body").inner_text(timeout=5_000)
+        data = json.loads(body)
+        tls = data.get("tls") or {}
+        http2 = data.get("http2") or {}
+        result = {
+            "ja3_hash": tls.get("ja3_hash"),
+            "ja4": tls.get("ja4"),
+            "peetprint_hash": tls.get("peetprint_hash"),
+            "akamai_hash": tls.get("akamai_config_hash")
+            or tls.get("akamai_fingerprint_hash"),
+            "h2_settings_hash": http2.get("akamai_fingerprint_hash"),
+            "user_agent_seen": data.get("user_agent"),
+        }
+        page.close()
+        return result
+    except Exception as exc:  # noqa: BLE001 - endpoint/network failures
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def classify_dns_verdict(text: str, clicked: bool) -> str:
     """Classify bash.ws output without treating a landing page as evidence."""
     if not clicked:
         return "MANUAL"
     lower = (text or "").lower()
     if "completed in" not in lower:
+        return "MANUAL"
         return "MANUAL"
     if (
         "dns may be leaking" in lower
@@ -513,6 +547,8 @@ def audit_profile(
             profile_result["failures"].append("navigator.webdriver=true trên page audit")
 
         profile_result["browser_ip"] = fetch_browser_ip(context)
+        # GĐ3: JA3/JA4 từ trong browser — đo TLS diversity khi pin đa phiên bản.
+        profile_result["tls_fingerprint"] = fetch_tls_fingerprint(context)
         webrtc_raw = page.evaluate(WEBRTC_JS)
         profile_result["webrtc"] = summarize_webrtc(webrtc_raw if isinstance(webrtc_raw, dict) else {})
         webrtc = profile_result["webrtc"]
@@ -623,6 +659,11 @@ def print_profile_result(result: Dict[str, Any]) -> None:
         print(f"  DNS: {dns.get('verdict')} (clicked={dns.get('clicked')})")
         if dns.get("asns"):
             print("  DNS ASN: " + "; ".join(dns["asns"][:3]))
+    tls = result.get("tls_fingerprint") or {}
+    if tls.get("ja3_hash") or tls.get("ja4"):
+        print(f"  TLS JA3: {tls.get('ja3_hash')} | JA4: {tls.get('ja4')}")
+    elif tls.get("error"):
+        print(f"  TLS JA3/JA4: không đo được ({tls['error'][:60]})")
     for item in result.get("failures", []):
         print(f"  FAIL: {item}")
     for item in result.get("warnings", []):

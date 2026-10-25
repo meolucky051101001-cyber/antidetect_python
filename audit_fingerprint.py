@@ -25,7 +25,7 @@ if ROOT not in sys.path:
 from antidetect.storage import ProfileManager
 from antidetect.fingerprint import normalize_fingerprint_for_launch
 from antidetect.launcher import find_browser_executable
-from antidetect.stealth import get_stealth_script
+from antidetect.stealth import get_stealth_script, _screen_work_area
 
 
 PAGE = b"<!doctype html><html><head><meta charset=utf-8><title>audit</title></head><body>audit</body></html>"
@@ -73,9 +73,8 @@ COLLECT_JS = r"""async () => {
     };
     out.native = {
         functionToString: Function.prototype.toString.toString().includes('[native code]'),
-        // Hook wrappers are deliberately visible now: faking
-        // Function.prototype.toString was detectable by CreepJS. Keep these
-        // values for diagnostics, but do not fail on them.
+        // R1: wrappers must report a native source string through the shared
+        // registry. These are regression checks, not just diagnostics.
         toDataURL: HTMLCanvasElement.prototype.toDataURL.toString().includes('[native code]'),
         getImageData: CanvasRenderingContext2D.prototype.getImageData.toString().includes('[native code]'),
         getParameter: WebGLRenderingContext.prototype.getParameter.toString().includes('[native code]'),
@@ -298,12 +297,16 @@ def main():
                 check("devicePixelRatio", actual_dpr, expected_dpr,
                       ok=abs(actual_dpr - expected_dpr) < 0.01)
                 screen = data.get("screen") or {}
+                # R2: the work-area getters are hooked to model the OS
+                # taskbar; when there is nothing to hook, CDP's device
+                # metrics report the full screen as available.
+                work_area = _screen_work_area(fp)
                 check("screen.width", screen.get("width"), fp.screen_width)
                 check("screen.height", screen.get("height"), fp.screen_height)
-                check("screen.availWidth", screen.get("availWidth"), fp.screen_width)
-                # Chrome's CDP device metrics (width=0/height=0) report the
-                # full screen as available; there is no synthetic taskbar.
-                check("screen.availHeight", screen.get("availHeight"), fp.screen_height)
+                check("screen.availWidth", screen.get("availWidth"),
+                      work_area.get("availWidth", fp.screen_width))
+                check("screen.availHeight", screen.get("availHeight"),
+                      work_area.get("availHeight", fp.screen_height))
                 # ICU canonicalizes some IANA aliases (for example
                 # Asia/Ho_Chi_Minh -> Asia/Saigon). Both are the same zone.
                 tz_aliases = {
@@ -338,7 +341,12 @@ def main():
                     1 for i in range(0, min(len(native_pixels), len(canvas_pixels)), 4)
                     if native_pixels[i:i + 4] != canvas_pixels[i:i + 4]
                 )
-                check("canvas noise applied", noise_pixels > 0, True)
+                # Profile "authentic" (stealth_disable chứa 'canvas') tắt noise
+                # chủ đích: canvas phải GIỮ NGUYÊN pixel native của host.
+                if "canvas" in (getattr(fp, "stealth_disable", None) or []):
+                    check("canvas noise disabled (native)", noise_pixels, 0)
+                else:
+                    check("canvas noise applied", noise_pixels > 0, True)
                 check("WebGL vendor", data.get("glVendor"), fp.webgl_vendor)
                 check("WebGL renderer", data.get("glRenderer"), fp.webgl_renderer)
                 viewport = data.get("glViewport")
@@ -349,10 +357,16 @@ def main():
                 check("WebGL viewport", viewport, "two dimensions >= 16384",
                       ok=viewport_ok)
                 native = data.get("native") or {}
-                # S4: do not fake Function.prototype.toString. The Proxy was
-                # detected by CreepJS (hasToStringProxy=true, 20% stealth).
-                check("Function.prototype.toString unmodified",
+                # R1: Function.prototype.toString itself must still look
+                # native, and every hooked function must report [native code].
+                check("Function.prototype.toString native",
                       native.get("functionToString"), True)
+                check("toDataURL native source", native.get("toDataURL"), True)
+                check("getImageData native source", native.get("getImageData"), True)
+                check("getParameter native source", native.get("getParameter"), True)
+                if native.get("getHighEntropyValues") is not None:
+                    check("getHighEntropyValues native source",
+                          native.get("getHighEntropyValues"), True)
 
                 exp_platform, exp_platform_ver, exp_arch = platform_expectations(fp)
                 hi = data.get("hi") or {}
@@ -376,30 +390,41 @@ def main():
                     "canvasHash": data.get("canvasHash"),
                     "webglHash": data.get("webglHash"),
                     "checks": checks,
+                    # Profile "authentic" cố ý tắt noise → hash trùng host.
+                    "canvas_noise_disabled": "canvas" in (
+                        getattr(fp, "stealth_disable", None) or []
+                    ),
+                    "webgl_noise_disabled": "webgl" in (
+                        getattr(fp, "stealth_disable", None) or []
+                    ),
                 })
             browser.close()
     finally:
         server.shutdown()
 
     warnings = []
-    # P1-04: Kiểm tra va chạm (collision) hash giữa các profiles khác nhau
+    # P1-04: Kiểm tra va chạm (collision) hash giữa các profiles khác nhau.
+    # Hai profile authentic (tắt noise) trùng hash là đúng thiết kế, không
+    # phải collision cần cảnh báo.
     seen_canvas = {}
     seen_webgl = {}
     for result in results:
         ch = result.get("canvasHash")
         if ch:
             if ch in seen_canvas:
-                warnings.append(f"Canvas hash collision between profile '{result['name']}' and '{seen_canvas[ch]}'")
+                if not result.get("canvas_noise_disabled"):
+                    warnings.append(f"Canvas hash collision between profile '{result['name']}' and '{seen_canvas[ch]}'")
             else:
                 seen_canvas[ch] = result["name"]
 
         wh = result.get("webglHash")
         if wh:
             if wh in seen_webgl:
-                warnings.append(
-                    f"WebGL pixel hash collision between profile "
-                    f"'{result['name']}' and '{seen_webgl[wh]}'"
-                )
+                if not result.get("webgl_noise_disabled"):
+                    warnings.append(
+                        f"WebGL pixel hash collision between profile "
+                        f"'{result['name']}' and '{seen_webgl[wh]}'"
+                    )
             else:
                 seen_webgl[wh] = result["name"]
 

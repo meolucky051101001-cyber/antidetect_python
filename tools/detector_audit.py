@@ -48,6 +48,9 @@ DEFAULT_TARGETS: Tuple[Tuple[str, str], ...] = (
     ("browserleaks-webgl", "https://browserleaks.com/webgl"),
     ("browserleaks-client-hints", "https://browserleaks.com/client-hints"),
     ("pixelscan", "https://pixelscan.net/"),
+    # Giai đoạn 2: mở rộng ma trận detector (chạy tuần, so dọc theo thời gian).
+    ("iphey", "https://iphey.com/"),
+    ("fingerprint-demo", "https://fingerprint.com/demo/"),
 )
 
 SNAPSHOT_JS = r"""
@@ -216,6 +219,20 @@ def extract_detector_signals(text: str, url: str = "") -> Dict[str, Any]:
             match = re.search(pattern, text or "", re.IGNORECASE)
             if match:
                 signals[key] = match.group(1)
+    # Giai đoạn 2: Iphey — verdict tổng ("Trustworthy"/"Suspicious"/"Untrusted").
+    if "iphey.com" in url.lower():
+        match = re.search(
+            r"\b(trustworthy|suspicious|untrusted)\b", text or "", re.IGNORECASE
+        )
+        if match:
+            signals["iphey_verdict"] = match.group(1).capitalize()
+    # Fingerprint demo — kết quả bot detection best-effort từ text.
+    if "fingerprint.com" in url.lower():
+        lower = (text or "").lower()
+        if "not a bot" in lower:
+            signals["fpdemo_bot"] = "not detected"
+        elif "bot detected" in lower or "might be a bot" in lower:
+            signals["fpdemo_bot"] = "detected"
     return signals
 
 
@@ -425,6 +442,15 @@ def audit_profile(
             if signals.get("creepjs_lies_count") not in (None, "0"):
                 result["warnings"].append(
                     f"{name}: CreepJS báo {signals['creepjs_lies_count']} lies"
+                )
+            # Giai đoạn 2: verdict từ ma trận mở rộng.
+            if signals.get("iphey_verdict") in ("Suspicious", "Untrusted"):
+                result["warnings"].append(
+                    f"{name}: Iphey đánh giá {signals['iphey_verdict']}"
+                )
+            if signals.get("fpdemo_bot") == "detected":
+                result["warnings"].append(
+                    f"{name}: Fingerprint demo báo bot detected"
                 )
 
         if result["failures"]:

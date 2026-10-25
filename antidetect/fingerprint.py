@@ -159,6 +159,55 @@ def get_host_screen_info() -> Tuple[int, int, float]:
     return 1920, 1080, 1.0
 
 
+@lru_cache(maxsize=1)
+def get_host_work_area() -> Optional[Tuple[int, int, int, int, float]]:
+    """Return the primary display work area in physical pixels.
+
+    The tuple is ``(left, top, right, bottom, scale)``. ``scale`` is the host
+    DPI scale from :func:`get_host_screen_info`; callers can divide by it to
+    convert the margins to CSS pixels. On non-Windows hosts a small platform
+    default is used when the window manager does not expose a queryable work
+    area.
+    """
+    host_width, host_height, scale = get_host_screen_info()
+
+    if sys.platform == "win32":
+        try:
+            from ctypes import wintypes
+
+            class RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", wintypes.LONG),
+                    ("top", wintypes.LONG),
+                    ("right", wintypes.LONG),
+                    ("bottom", wintypes.LONG),
+                ]
+
+            # SPI_GETWORKAREA = 0x0030. get_host_screen_info() has already
+            # enabled per-monitor DPI awareness, so these rectangles are in
+            # physical pixels instead of DPI-virtualized coordinates.
+            rect = RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(
+                0x0030, 0, ctypes.byref(rect), 0
+            ):
+                left = max(0, int(rect.left))
+                top = max(0, int(rect.top))
+                right = min(host_width, int(rect.right))
+                bottom = min(host_height, int(rect.bottom))
+                if right > left and bottom > top:
+                    return left, top, right, bottom, scale
+        except Exception:
+            pass
+
+    if sys.platform == "darwin":
+        # Typical menu bar height; the Dock may autohide.
+        return 0, int(round(25 * scale)), host_width, host_height, scale
+    if sys.platform.startswith("linux"):
+        # Common GNOME/KDE top panel height.
+        return 0, int(round(32 * scale)), host_width, host_height, scale
+    return None
+
+
 def clamp_screen_to_host(
     screen_width: int, screen_height: int, dpr: float, target_os: str
 ) -> Tuple[int, int, bool]:

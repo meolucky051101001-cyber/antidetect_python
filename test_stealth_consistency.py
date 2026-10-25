@@ -31,6 +31,8 @@ from antidetect.fingerprint import (
 from antidetect.stealth import (
     STEALTH_GROUPS,
     _disabled_stealth_groups,
+    _host_os,
+    _screen_work_area,
     _webgl_limits,
     get_stealth_script,
     get_worker_stealth_script,
@@ -91,27 +93,44 @@ def test_device_memory_uses_host_bucket():
     assert "Math.min(8" not in js
 
 
-def test_screen_hooks_are_gone():
+def test_screen_work_area_hook_is_scoped():
+    fp = _windows_fp()
+    js = get_stealth_script(fp)
+    worker_js = get_worker_stealth_script(fp)
+
+    # R2: CDP still owns screen.*, matchMedia and DPR. Only the work-area
+    # getters that differ from full-screen emulation are replaced.
+    area = _screen_work_area(fp)
+    if area:
+        assert area["availWidth"] <= fp.screen_width
+        assert area["availHeight"] <= fp.screen_height
+        assert area["availWidth"] == fp.screen_width or area["availLeft"] > 0
+    assert "installScreenWorkArea" in js
+    assert "screenWorkArea" in js
+    assert "availHeight" in js
+    assert "matchMedia(" not in js
+    assert "Object.defineProperty(w, 'devicePixelRatio'" not in js
+
+    # Workers have no Screen object, so the page hook must not leak there.
+    assert "Screen.prototype" not in worker_js
+    assert "availWidth" not in worker_js
+    assert "availHeight" not in worker_js
+
+
+def test_function_to_string_registry_is_present():
     js = get_stealth_script(_windows_fp())
     worker_js = get_worker_stealth_script(_windows_fp())
 
-    # Screen/DPR/media are supplied by CDP device metrics in the launcher.
+    # R1: wrappers are registered in a WeakMap and Function.prototype.toString
+    # is a concise method, not a Proxy. It must not be assigned with a plain
+    # `Function.prototype.toString = ...` (which would expose a writable alias).
     for payload in (js, worker_js):
-        assert "Screen.prototype" not in payload
-        assert "matchMedia" not in payload
-        assert "availWidth" not in payload
-        assert "availHeight" not in payload
-        assert "Object.defineProperty(w, 'devicePixelRatio'" not in payload
-
-
-def test_function_to_string_is_not_hooked():
-    js = get_stealth_script(_windows_fp())
-    worker_js = get_worker_stealth_script(_windows_fp())
-
-    # CreepJS detects a Proxy on Function.prototype.toString. Leave the native
-    # implementation untouched; do not try to fake "[native code]".
-    for payload in (js, worker_js):
-        assert "Function.prototype.toString =" not in payload
+        assert "const nativeSources = new WeakMap();" in payload
+        assert "function makeNativeToString" in payload
+        assert "registerNativeSource(target, name)" in payload
+        assert "Function.prototype, 'toString'" in payload
+        assert "function toString() { [native code] }" in payload
+        assert "Function.prototype.toString = function" not in payload
         assert "proxyToString" not in payload
 
 
@@ -145,8 +164,10 @@ def test_disabled_groups_are_honoured(monkeypatch):
     assert _disabled_stealth_groups() == {"navigator"}
 
     monkeypatch.setenv("ANTIDETECT_STEALTH_DISABLE", "webgl, canvas")
+    monkeypatch.delenv("ANTIDETECT_STEALTH_ENABLE", raising=False)
     js = get_stealth_script(_windows_fp())
-    assert 'const DISABLED = new Set(["canvas", "webgl"])' in js
+    # battery/network là default-off nên DISABLED luôn chứa cả 4 nhóm này.
+    assert 'const DISABLED = new Set(["battery", "canvas", "network", "webgl"])' in js
     assert "if (!DISABLED.has('webgl'))" in js
     assert "if (!DISABLED.has('canvas')" in js
 
@@ -155,6 +176,84 @@ def test_disabled_groups_are_honoured(monkeypatch):
 
     monkeypatch.setenv("ANTIDETECT_STEALTH_DISABLE", "not-a-group")
     assert _disabled_stealth_groups() == set()
+
+
+def test_battery_and_connection_profiles_are_deterministic(monkeypatch):
+    """Battery/NetworkInformation: hooks opt-in (mặc định tắt) + giá trị đúng spec."""
+    from antidetect.stealth import (
+        _battery_profile,
+        _connection_profile,
+    )
+
+    # Mặc định: hai nhóm này tắt (Pixelyscan phát hiện wrapper dù giá trị
+    # native) — trang thấy battery/connection native của máy. Code hook vẫn
+    # nằm trong payload nhưng bị guard DISABLED chặn ở runtime.
+    monkeypatch.delenv("ANTIDETECT_STEALTH_DISABLE", raising=False)
+    monkeypatch.delenv("ANTIDETECT_STEALTH_ENABLE", raising=False)
+    from antidetect.stealth import _effective_disabled_groups
+    assert {"battery", "network"} <= _effective_disabled_groups(_windows_fp())
+
+    # Opt-in qua env: hooks hoạt động trở lại.
+    monkeypatch.setenv("ANTIDETECT_STEALTH_ENABLE", "battery,network")
+    enabled_groups = _effective_disabled_groups(_windows_fp())
+    assert "battery" not in enabled_groups and "network" not in enabled_groups
+    js = get_stealth_script(_windows_fp())
+    assert "getBattery" in js and "BatteryManager.prototype" in js
+    assert "get connection" in js and "effectiveType" in js
+    worker_js = get_worker_stealth_script(_windows_fp())
+    assert "getBattery" not in worker_js
+
+    fp = _windows_fp()
+    b = _battery_profile(fp)
+    c = _connection_profile(fp)
+    # spec NetworkInformation: rtt bội 25, downlink bội 0.25, 4g wifi.
+    assert c["rtt"] % 25 == 0
+    assert abs(c["downlink"] * 4 - round(c["downlink"] * 4)) < 1e-9
+    assert c["effectiveType"] == "4g" and c["saveData"] is False
+    # Battery: level hợp lệ; đang sạc ⇔ dischargingTime Infinity, và ngược lại.
+    assert 0.4 <= b["level"] <= 1.0
+    assert (b["charging"] and b["dischargingTime"] == float("inf")) or (
+        not b["charging"] and b["chargingTime"] == float("inf")
+    )
+    # Cùng seed → cùng giá trị giữa các phiên (detector so sánh theo thời gian).
+    fp2 = _windows_fp()
+    fp2.canvas_noise_seed = fp.canvas_noise_seed
+    assert _battery_profile(fp2) == b and _connection_profile(fp2) == c
+
+
+def test_cross_os_fonts_and_voices():
+    """Cross-OS: danh sách font/voice chuẩn của OS đích; same-OS để native."""
+    from antidetect.stealth import _cross_os_data
+
+    assert "battery" in STEALTH_GROUPS and "network" in STEALTH_GROUPS
+
+    fp = _windows_fp()
+    if _host_os() == "windows":
+        # Same-OS: không ship danh sách (font host đã đúng OS đích).
+        assert _cross_os_data(fp) is None
+        assert '"crossOs": null' in get_stealth_script(fp)
+
+    fp_mac = _windows_fp()
+    fp_mac.os = "macos"
+    data = _cross_os_data(fp_mac)
+    assert data is not None
+    assert "Segoe UI" in data["hostFonts"]  # font host phải bị che
+    assert any(f in data["targetFonts"] for f in ("PingFang SC", "Helvetica Neue"))
+    assert data["voices"] and data["voices"][0]["name"] == "Samantha"
+
+    fp_linux = _windows_fp()
+    fp_linux.os = "linux"
+    # Linux thật thường không có speech voice — rỗng là đúng thật.
+    assert _cross_os_data(fp_linux)["voices"] == []
+
+    js_mac = get_stealth_script(fp_mac)
+    # Cross-OS: fonts.check strict theo OS đích + measureText che font host.
+    assert "crossOs.targetFonts" in js_mac
+    assert "crossOs.hostFonts" in js_mac
+    # Voices chuẩn macOS được dựng Object.create(SpeechSynthesisVoice.prototype)
+    # để instanceof vẫn pass.
+    assert "Samantha" in js_mac
+    assert "Object.create(VoiceProto)" in js_mac
 
 
 def test_screen_clamp_fits_host_display():
@@ -171,3 +270,25 @@ def test_screen_clamp_fits_host_display():
     width, height, clamped = clamp_screen_to_host(2560, 1440, 1.0, "macos")
     assert clamped is False
     assert (width, height) == (2560, 1440)
+
+
+def test_stealth_payload_is_valid_javascript():
+    """Review-GD1 regression: một lỗi f-string brace từng làm cả payload vỡ
+    syntax (mọi hook câm lặng vì try/catch nuốt lỗi parse-time... thực tế
+    script không parse gì cả). node --check phải pass cho cả page + worker."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node không có mặt trên máy")
+    for name, build in (
+        ("page", lambda: get_stealth_script(_windows_fp())),
+        ("worker", lambda: get_worker_stealth_script(_windows_fp())),
+    ):
+        path = os.path.join(tempfile.gettempdir(), f"stealth-syntax-{name}.js")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(build())
+        result = subprocess.run([node, "--check", path], capture_output=True, text=True)
+        assert result.returncode == 0, f"{name} payload lỗi syntax: {result.stderr[:400]}"
