@@ -101,7 +101,7 @@ class FingerprintConfig(BaseModel):
     screen_color_depth: int = 24
     device_pixel_ratio: float = 1.0
     canvas_noise_seed: int = 12345
-    audio_noise_seed: float = 0.0001
+    audio_noise_seed: int = 12345
     webgl_vendor: str = "Google Inc. (NVIDIA)"
     webgl_renderer: str = "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"
     hardware_concurrency: int = 8
@@ -117,6 +117,31 @@ class FingerprintConfig(BaseModel):
     # cho chế độ "authentic" — không noise, hash trùng Chrome thật trên máy,
     # đổi lại không bị detector loại masking chấm "masking detected").
     stealth_disable: List[str] = Field(default_factory=list)
+
+    @field_validator("audio_noise_seed", mode="before")
+    @classmethod
+    def migrate_audio_noise_seed(cls, v: Any) -> int:
+        """Legacy float seeds (0..1) -> nonzero uint32.
+
+        JS dùng toán int32: seed float bị cắt thành 0 khiến mọi profile có
+        cùng nhiễu audio. Profile cũ phải đổi sang seed nguyên ổn định và
+        khác 0 để giữ tính duy nhất sau khi nâng cấp.
+        """
+        if isinstance(v, bool):
+            return 12345
+        if isinstance(v, int):
+            return v if 0 < v <= 0xFFFFFFFF else 12345
+        try:
+            value = float(v)
+        except (TypeError, ValueError):
+            return 12345
+        if 0 < value < 1:
+            return max(1, int(round(value * 1_000_000_000)) & 0xFFFFFFFF)
+        try:
+            converted = int(value)
+        except (OverflowError, ValueError):
+            return 12345
+        return converted if 0 < converted <= 0xFFFFFFFF else 12345
 
     @field_validator("stealth_disable")
     @classmethod

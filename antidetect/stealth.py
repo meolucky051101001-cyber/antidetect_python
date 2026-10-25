@@ -1838,7 +1838,7 @@ def get_stealth_script(
                     const channels = processedBuffers.get(this);
                     if (!channels.has(channel)) {{
                         channels.add(channel);
-                        const seed = CFG.audioSeed || 12345;
+                        const seed = (Number(CFG.audioSeed) >>> 0) || 12345;
                         // Noise MỖI sample (không phải mỗi 100th) với biên độ
                         // ±5e-5 — đủ đổi hash, không phá audio thật.
                         for (let i = 0; i < data.length; i++) {{
@@ -1863,7 +1863,7 @@ def get_stealth_script(
                     if (!orig) return;
                     w.AnalyserNode.prototype[methodName] = markNative(function(array) {{
                         orig.apply(this, arguments);
-                        const seed = CFG.audioSeed || 12345;
+                        const seed = (Number(CFG.audioSeed) >>> 0) || 12345;
                         const isByte = (methodName === 'getByteFrequencyData'
                             || methodName === 'getByteTimeDomainData');
                         // Byte data lượng tử hóa 1/255 — noise nhỏ hơn bị

@@ -511,12 +511,26 @@ def _version_dirs(parent: str) -> List[str]:
         return []
 
 
+def _version_from_layout_dir(path: str) -> Optional[str]:
+    """Return x.y.z.w from a Chrome-for-Testing directory name."""
+    import re
+    name = os.path.basename(os.path.normpath(path or ""))
+    match = re.match(
+        r"^(?:chrome|chromium|edge)[-_](\d+\.\d+\.\d+\.\d+)$", name, re.IGNORECASE
+    )
+    return match.group(1) if match else None
+
+
 def get_version_from_browser_path(browser_path: Optional[str]) -> Optional[Tuple[str, str]]:
     """Detect the real browser version from the executable's version folders.
 
     Chrome/Edge keep the actual build in a sibling version directory even though
     the executable itself is a small launcher (Application\\chrome.exe). Reading
     that folder avoids spawning a browser just to ask for --version.
+
+    Also handles the Chrome-for-Testing layout used by the pin feature:
+    ``browsers/chrome-<version>/chrome-win64/chrome.exe`` — the version lives
+    in the parent directory name, not in a sibling x.y.z.w folder.
     """
     if not browser_path:
         return None
@@ -524,6 +538,9 @@ def get_version_from_browser_path(browser_path: Optional[str]) -> Optional[Tuple
     candidates = [app_dir, os.path.dirname(app_dir)]
     versions: List[str] = []
     for parent in candidates:
+        layout_version = _version_from_layout_dir(parent)
+        if layout_version:
+            versions.append(layout_version)
         versions.extend(_version_dirs(parent))
     if not versions:
         return None
@@ -895,7 +912,7 @@ def generate_fingerprint(
         screen_color_depth=24,
         device_pixel_ratio=dpr,
         canvas_noise_seed=random.randint(1000, 999999),
-        audio_noise_seed=round(random.uniform(0.00005, 0.0003), 7),
+        audio_noise_seed=random.randint(1, 2_147_483_647),
         webgl_vendor=gpu_vendor,
         webgl_renderer=gpu_renderer,
         hardware_concurrency=cores,
