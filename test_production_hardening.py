@@ -314,6 +314,110 @@ def test_stop_retries_transient_unknown_identity(monkeypatch):
         launcher.unregister_cleanup()
 
 
+@pytest.mark.parametrize("recovered_state", ["owned", "unknown"])
+def test_recovered_runtime_requires_stop_before_reuse(monkeypatch, recovered_state):
+    m = ProfileManager()
+    launcher = BrowserLauncher(m)
+    p = m.create_profile(f"recover-to-stop-{recovered_state}")
+    user_data_dir = os.path.join(
+        storage_module.DATA_DIR, "profiles", p.id, "user_data"
+    )
+    launcher._runtime_store.upsert(
+        p.id, pid=424242, port=9444, requested_port=9333,
+        user_data_dir=user_data_dir, exe="chrome.exe", started_at=1,
+    )
+    identity = {"state": recovered_state}
+
+    def fake_identity(_pid, _user_data_dir):
+        state = identity["state"]
+        return {
+            "state": state,
+            "port": 9444 if state == "owned" else None,
+            "created": "creation" if state == "owned" else None,
+        }
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("recovered profile must not spawn Chrome or call CDP")
+
+    monkeypatch.setattr(launcher_module, "read_browser_identity", fake_identity)
+    monkeypatch.setattr(launcher, "_resolve_browser_path", lambda _profile: sys.executable)
+    monkeypatch.setattr(launcher_module.subprocess, "Popen", unexpected_call)
+    monkeypatch.setattr(launcher_module.urllib.request, "urlopen", unexpected_call)
+    try:
+        assert launcher.is_running(p.id) is True
+        assert p.id in launcher._recovery_required
+        if recovered_state == "owned":
+            assert launcher.active_ports[p.id] == 9444
+
+        result = launcher.launch(p.id, open_url="https://example.com")
+        assert result["success"] is False
+        assert result["recovery_required"] is True
+        launcher.active_ports.pop(p.id, None)
+        assert launcher.open_tab(p.id, "https://example.com") is False
+
+        identity["state"] = "absent"
+        stopped = launcher.stop(p.id)
+        assert stopped["success"] is True
+        assert p.id not in launcher._recovery_required
+        assert launcher._runtime_store.get(p.id) is None
+    finally:
+        launcher.unregister_cleanup()
+        launcher._runtime_store.remove(p.id)
+        m.delete_profile(p.id)
+
+
+def test_local_live_process_is_not_recovery_gated(monkeypatch):
+    m = ProfileManager()
+    launcher = BrowserLauncher(m)
+    p = m.create_profile("local-live-process")
+
+    class LiveProcess:
+        @staticmethod
+        def poll():
+            return None
+
+    launcher.active_processes[p.id] = LiveProcess()
+    launcher.active_ports[p.id] = 9555
+    launcher._recovery_required.add(p.id)
+    monkeypatch.setattr(launcher, "_resolve_browser_path", lambda _profile: sys.executable)
+    try:
+        result = launcher.launch(p.id)
+        assert result["success"] is True
+        assert result["port"] == 9555
+        assert p.id not in launcher._recovery_required
+    finally:
+        launcher.unregister_cleanup()
+        m.delete_profile(p.id)
+
+
+def test_start_api_recovery_required_returns_409(monkeypatch):
+    import web.app as app_module
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app_module.app, base_url="http://127.0.0.1:8000")
+    client.post(
+        "/auth/login",
+        headers={"Authorization": "Bearer " + app_module.app.state.access_key},
+    )
+    created = client.post("/api/profiles", json={"name": "Recovery API"})
+    profile_id = created.json()["id"]
+    monkeypatch.setattr(
+        app_module.launcher,
+        "launch",
+        lambda *_args, **_kwargs: {
+            "success": False,
+            "recovery_required": True,
+            "error": "Hãy dừng profile rồi khởi chạy lại.",
+        },
+    )
+    try:
+        response = client.post(f"/api/profiles/{profile_id}/start")
+        assert response.status_code == 409
+        assert "khởi chạy lại" in response.json()["detail"]
+    finally:
+        client.delete(f"/api/profiles/{profile_id}")
+
+
 # --- stealth_disable per-profile + native brands ---
 
 def test_stealth_disable_per_profile_disables_only_listed_groups(monkeypatch):
@@ -1427,6 +1531,167 @@ def test_batch_c_scheduler_store_and_due():
     r["enabled"] = False
     r["time"] = "11:00"
     assert sch._due(r, now) is None
+
+
+def test_schedule_store_cross_instance_reload_and_no_clobber(tmp_path):
+    from antidetect.scheduler import ScheduleStore
+
+    path = str(tmp_path / "schedules.json")
+    first = ScheduleStore(path)
+    second = ScheduleStore(path)
+    rule_a = first.add("A", "07:30", "start_all", profile_ids=["a"])
+    rule_b = second.add("B", "08:30", "stop_all", profile_ids=["b"])
+
+    assert {rule["id"] for rule in first.list()} == {rule_a["id"], rule_b["id"]}
+    first.update(rule_a["id"], enabled=False)
+    second_rules = {rule["id"]: rule for rule in second.list()}
+    assert second_rules[rule_a["id"]]["enabled"] is False
+    assert second_rules[rule_b["id"]]["profile_ids"] == ["b"]
+
+    assert second.delete(rule_b["id"]) is True
+    remaining = first.list()
+    assert [rule["id"] for rule in remaining] == [rule_a["id"]]
+    assert all("_run_claim" not in rule for rule in remaining)
+
+
+@pytest.mark.parametrize("corrupt", [
+    "{not-json",
+    '{"rules": {}}',
+    '[{"name": "missing-id"}]',
+])
+def test_schedule_store_corruption_is_fail_closed(tmp_path, corrupt):
+    from antidetect.scheduler import ScheduleStore, ScheduleStoreCorruption
+
+    path = tmp_path / "schedules.json"
+    store = ScheduleStore(str(path))
+    store.add("Keep me", "07:30", "start_all")
+    path.write_text(corrupt, encoding="utf-8")
+    corrupt_bytes = path.read_bytes()
+
+    with pytest.raises(ScheduleStoreCorruption):
+        store.list()
+    with pytest.raises(ScheduleStoreCorruption):
+        store.add("Must not overwrite", "08:00", "stop_all")
+    with pytest.raises(ScheduleStoreCorruption):
+        ScheduleStore(str(path))
+    assert path.read_bytes() == corrupt_bytes
+
+
+def test_schedule_claim_is_exclusive_and_completes_once(tmp_path):
+    from datetime import datetime, timedelta
+    from antidetect.scheduler import ScheduleStore
+
+    path = str(tmp_path / "schedules.json")
+    first = ScheduleStore(path)
+    now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    rule = first.add(
+        "Claim", (now - timedelta(minutes=1)).strftime("%H:%M"), "start_all"
+    )
+    second = ScheduleStore(path)
+
+    claimed = first.claim_due(rule["id"], now, 60, "first-token")
+    assert claimed is not None and claimed[1] == "due"
+    assert "_run_claim" not in claimed[0]
+    assert second.claim_due(rule["id"], now, 60, "second-token") is None
+    assert second.release_claim(rule["id"], "second-token") is False
+    assert second.complete_claim(rule["id"], "second-token", today) is False
+
+    assert first.release_claim(rule["id"], "first-token") is True
+    retry = second.claim_due(rule["id"], now, 60, "second-token")
+    assert retry is not None
+    assert first.complete_claim(rule["id"], "first-token", today) is False
+    assert second.complete_claim(rule["id"], "second-token", today) is True
+
+    stored = ScheduleStore(path).list()[0]
+    assert stored["last_run_date"] == today
+    assert "_run_claim" not in stored
+    assert first.claim_due(rule["id"], now, 60, "third-token") is None
+
+
+def test_schedule_claim_lease_can_be_taken_over(tmp_path):
+    from datetime import datetime, timedelta
+    from antidetect.scheduler import ScheduleStore
+
+    path = str(tmp_path / "schedules.json")
+    first = ScheduleStore(path)
+    now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    rule = first.add(
+        "Lease", (now - timedelta(minutes=1)).strftime("%H:%M"), "start_all"
+    )
+    second = ScheduleStore(path)
+    assert first.claim_due(rule["id"], now, 60, "crashed", lease_seconds=30)
+
+    taken_over = second.claim_due(
+        rule["id"], now + timedelta(seconds=31), 60, "replacement",
+        lease_seconds=30,
+    )
+    assert taken_over is not None
+    assert first.complete_claim(
+        rule["id"], "crashed", now.strftime("%Y-%m-%d")
+    ) is False
+
+
+def test_scheduler_callback_failure_releases_claim_for_retry(tmp_path):
+    from datetime import datetime
+    from antidetect.scheduler import ScheduleStore, Scheduler
+
+    store = ScheduleStore(str(tmp_path / "schedules.json"))
+    store.add("Retry", datetime.now().strftime("%H:%M"), "start_all",
+              profile_ids=["selected"])
+    attempts = []
+    succeeded = threading.Event()
+
+    def fail_once(ids):
+        attempts.append(ids)
+        if len(attempts) == 1:
+            raise RuntimeError("fail once")
+        succeeded.set()
+
+    scheduler = Scheduler(store, {"start_all": fail_once}, check_interval=0.02)
+    scheduler.start()
+    try:
+        assert succeeded.wait(3)
+    finally:
+        scheduler.stop()
+        scheduler.join(timeout=2)
+    assert not scheduler.is_alive()
+    assert attempts == [["selected"], ["selected"]]
+    stored = store.list()[0]
+    assert stored["last_run_date"] is not None
+    assert "_run_claim" not in stored
+
+
+def test_schedule_api_corruption_returns_503_without_overwrite(tmp_path):
+    import web.app as app_module
+    from fastapi.testclient import TestClient
+    from antidetect.scheduler import ScheduleStore
+
+    path = tmp_path / "schedules.json"
+    store = ScheduleStore(str(path))
+    previous = app_module._schedule_store
+    app_module._schedule_store = store
+    client = TestClient(app_module.app, base_url="http://127.0.0.1:8000")
+    client.post(
+        "/auth/login",
+        headers={"Authorization": "Bearer " + app_module.app.state.access_key},
+    )
+    try:
+        created = client.post("/api/schedules", json={
+            "name": "Keep", "time": "07:30", "action": "start_all",
+        })
+        assert created.status_code == 200
+        path.write_text("{broken", encoding="utf-8")
+        corrupt_bytes = path.read_bytes()
+
+        assert client.get("/api/schedules").status_code == 503
+        response = client.post("/api/schedules", json={
+            "name": "No overwrite", "time": "08:00", "action": "stop_all",
+        })
+        assert response.status_code == 503
+        assert path.read_bytes() == corrupt_bytes
+    finally:
+        app_module._schedule_store = previous
 
 
 class _FakeCDPWebSocket:

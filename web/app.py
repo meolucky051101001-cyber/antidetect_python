@@ -30,6 +30,7 @@ from antidetect.fingerprint import (
 )
 from antidetect.launcher import BrowserLauncher
 from antidetect.proxy import check_proxy
+from antidetect.scheduler import ScheduleStoreCorruption
 
 
 def _auto_max_concurrent() -> int:
@@ -1125,6 +1126,11 @@ async def revoke_api_token(request: Request):
 
 # --- Đợt C: Lịch tự động ---
 
+SCHEDULES_CORRUPT_DETAIL = (
+    "Dữ liệu lịch bị hỏng; hãy khôi phục file schedules.json hợp lệ."
+)
+
+
 class ScheduleCreateRequest(BaseModel):
     name: str = ""
     time: str  # HH:MM
@@ -1145,7 +1151,11 @@ class ScheduleUpdateRequest(BaseModel):
 async def list_schedules():
     if _schedule_store is None:
         raise HTTPException(status_code=503, detail="Scheduler chưa khởi động")
-    return {"success": True, "rules": _schedule_store.list(),
+    try:
+        rules = _schedule_store.list()
+    except ScheduleStoreCorruption as e:
+        raise HTTPException(status_code=503, detail=SCHEDULES_CORRUPT_DETAIL) from e
+    return {"success": True, "rules": rules,
             "last_tick": (_scheduler.last_run_info.get("last_tick") if _scheduler else None)}
 
 
@@ -1156,6 +1166,8 @@ async def create_schedule(req: ScheduleCreateRequest):
     try:
         rule = _schedule_store.add(req.name, req.time, req.action,
                                    req.profile_ids, req.enabled)
+    except ScheduleStoreCorruption as e:
+        raise HTTPException(status_code=503, detail=SCHEDULES_CORRUPT_DETAIL) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"success": True, "rule": rule}
@@ -1167,6 +1179,8 @@ async def update_schedule(rule_id: str, req: ScheduleUpdateRequest):
         raise HTTPException(status_code=503, detail="Scheduler chưa khởi động")
     try:
         rule = _schedule_store.update(rule_id, **req.model_dump(exclude_unset=True))
+    except ScheduleStoreCorruption as e:
+        raise HTTPException(status_code=503, detail=SCHEDULES_CORRUPT_DETAIL) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if rule is None:
@@ -1178,7 +1192,11 @@ async def update_schedule(rule_id: str, req: ScheduleUpdateRequest):
 async def delete_schedule(rule_id: str):
     if _schedule_store is None:
         raise HTTPException(status_code=503, detail="Scheduler chưa khởi động")
-    if not _schedule_store.delete(rule_id):
+    try:
+        deleted = _schedule_store.delete(rule_id)
+    except ScheduleStoreCorruption as e:
+        raise HTTPException(status_code=503, detail=SCHEDULES_CORRUPT_DETAIL) from e
+    if not deleted:
         raise HTTPException(status_code=404, detail="Không tìm thấy lịch")
     return {"success": True}
 
@@ -1566,7 +1584,8 @@ async def start_profile(profile_id: str, url: Optional[str] = None):
             raise HTTPException(status_code=400, detail="URL không hợp lệ: chỉ chấp nhận http:// hoặc https://")
     res = await asyncio.to_thread(launcher.launch, profile_id, open_url=url)
     if not res.get("success"):
-        raise HTTPException(status_code=500, detail=res.get("error", "Lỗi khởi chạy"))
+        status_code = 409 if res.get("recovery_required") else 500
+        raise HTTPException(status_code=status_code, detail=res.get("error", "Lỗi khởi chạy"))
     return res
 
 

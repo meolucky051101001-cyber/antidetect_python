@@ -11,7 +11,7 @@ import threading
 import subprocess
 import urllib.request
 import collections
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 
 from .models import Profile
 from .storage import ProfileManager, DATA_DIR, PROFILES_DATA_DIR
@@ -482,6 +482,7 @@ class BrowserLauncher:
         self.active_ports: Dict[str, int] = {}
         self._requested_ports: Dict[str, int] = {}
         self._proxy_credentials: Dict[str, tuple] = {}
+        self._recovery_required: Set[str] = set()
         self._runtime_store = BrowserRuntimeStore(
             os.path.join(DATA_DIR, "browser_runtime.json")
         )
@@ -565,6 +566,7 @@ class BrowserLauncher:
         requested = self._requested_ports.pop(profile_id, None) or record.get("requested_port")
         active = self.active_ports.pop(profile_id, None) or record.get("port")
         self.active_processes.pop(profile_id, None)
+        self._recovery_required.discard(profile_id)
         self._proxy_credentials.pop(profile_id, None)
         self._cdp_ready_events.pop(profile_id, None)
         self._core_verified_events.pop(profile_id, None)
@@ -600,6 +602,10 @@ class BrowserLauncher:
         record = self._runtime_store.get(profile_id)
         if not record:
             return None
+        if profile_id in self.active_processes:
+            self._recovery_required.discard(profile_id)
+        else:
+            self._recovery_required.add(profile_id)
         identity = read_browser_identity(
             record.get("pid"), record.get("user_data_dir") or ""
         )
@@ -624,6 +630,7 @@ class BrowserLauncher:
         proc = self.active_processes.get(profile_id)
         if proc:
             if proc.poll() is None:
+                self._recovery_required.discard(profile_id)
                 return True
             self._clear_process(profile_id)
             return False
@@ -636,6 +643,7 @@ class BrowserLauncher:
         # Legacy fallback for launches created before runtime persistence.
         identity = self._identity(profile)
         if identity["state"] == "owned":
+            self._recovery_required.add(profile_id)
             if identity.get("port"):
                 self.active_ports[profile_id] = identity["port"]
             return True
@@ -643,6 +651,7 @@ class BrowserLauncher:
             self._clear_process(profile_id)
             return False
         # Preserve persisted state on query failure; stop() will refuse to kill.
+        self._recovery_required.add(profile_id)
         return True
 
     async def _probe_page_ready(self, port):
@@ -1637,7 +1646,7 @@ class BrowserLauncher:
                 if pinned:
                     error = (
                         f"Browser pin '{pinned}' không tìm thấy trên máy. "
-                        "Hãy chạy: python tools\install_browser.py --version <ver>, "
+                        "Hãy chạy: python tools\\install_browser.py --version <ver>, "
                         "hoặc bỏ pin browser trong Edit profile."
                     )
                 else:
@@ -1645,6 +1654,15 @@ class BrowserLauncher:
                 return {"success": False, "error": error}
 
             if self.is_running(profile_id):
+                if profile_id in self._recovery_required:
+                    return {
+                        "success": False,
+                        "recovery_required": True,
+                        "error": (
+                            "Phiên Chrome được khôi phục chỉ an toàn để dừng. "
+                            "Hãy dừng profile rồi khởi chạy lại."
+                        ),
+                    }
                 # L2: Nếu profile đang chạy và có open_url, mở URL đó trong tab mới
                 if open_url:
                     if not self.open_tab(profile_id, open_url):
@@ -1804,6 +1822,7 @@ class BrowserLauncher:
                 )
                 self.active_processes[profile_id] = proc
                 self.active_ports[profile_id] = port
+                self._recovery_required.discard(profile_id)
                 if proxy_auth:
                     self._proxy_credentials[profile_id] = proxy_auth
 
@@ -2074,6 +2093,8 @@ class BrowserLauncher:
         if not port:
             self._recover_runtime(profile_id)
             port = self.active_ports.get(profile_id)
+        if profile_id in self._recovery_required:
+            return False
         if not port:
             return False
         try:
