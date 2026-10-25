@@ -4,6 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Antidetect Python — Trình Quản Lý Profile</title>
+    <!-- Theme init TRƯỚC khi render để tránh nháy flash -->
+    <script>
+        try {
+            document.documentElement.dataset.theme =
+                localStorage.getItem('antidetect-theme') || 'dark';
+        } catch (e) { document.documentElement.dataset.theme = 'dark'; }
+    </script>
     <!-- Tailwind CSS -->
     <script src="/static/vendor/tailwind.js"></script>
     <script>
@@ -12,9 +19,9 @@
             theme: {
                 extend: {
                     colors: {
-                        darkBg: '#0f172a',
-                        cardBg: '#1e293b',
-                        borderBg: '#334155',
+                        darkBg: 'var(--c-bg)',
+                        cardBg: 'var(--c-card)',
+                        borderBg: 'var(--c-border)',
                         accent: '#3b82f6',
                         accentHover: '#2563eb',
                         success: '#10b981',
@@ -27,10 +34,82 @@
     <!-- Lucide Icons -->
     <script src="/static/vendor/lucide.min.js"></script>
     <style>
+        :root {
+            --c-bg: #0f172a;
+            --c-card: #1e293b;
+            --c-border: #334155;
+            --c-input: #0f172a;
+            --c-surface: #0f172a;
+            --c-surface-2: #1e293b;
+        }
+        html[data-theme="light"] {
+            --c-bg: #f1f5f9;
+            --c-card: #ffffff;
+            --c-border: #e2e8f0;
+            --c-input: #f8fafc;
+            --c-surface: #f8fafc;
+            --c-surface-2: #e2e8f0;
+        }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-track { background: var(--c-bg); }
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        html[data-theme="light"] ::-webkit-scrollbar-thumb { background: #cbd5e1; }
+        html[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        /* ===== Light theme: remap các utility class dùng khắp template
+           (kể cả markup do JS render) — không phải sửa từng dòng. ===== */
+        html[data-theme="light"] body { background: var(--c-bg); color: #0f172a; }
+        html[data-theme="light"] .bg-darkBg { background-color: var(--c-bg) !important; }
+        html[data-theme="light"] .bg-cardBg { background-color: var(--c-card) !important; }
+        html[data-theme="light"] .bg-slate-900,
+        html[data-theme="light"] .bg-slate-900\/80,
+        html[data-theme="light"] .bg-slate-900\/60,
+        html[data-theme="light"] .bg-slate-900\/50,
+        html[data-theme="light"] .bg-slate-900\/90 { background-color: var(--c-surface) !important; }
+        html[data-theme="light"] .bg-slate-800,
+        html[data-theme="light"] .bg-slate-800\/40,
+        html[data-theme="light"] .bg-slate-800\/80,
+        html[data-theme="light"] .bg-slate-800\/90,
+        html[data-theme="light"] .bg-slate-700 { background-color: var(--c-surface-2) !important; }
+        html[data-theme="light"] .hover\:bg-slate-800:hover,
+        html[data-theme="light"] .hover\:bg-slate-700:hover { background-color: var(--c-surface-2) !important; }
+        html[data-theme="light"] .hover\:bg-slate-900:hover { background-color: var(--c-surface) !important; }
+        html[data-theme="light"] .border-borderBg,
+        html[data-theme="light"] .border-slate-700,
+        html[data-theme="light"] .border-slate-700\/60,
+        html[data-theme="light"] .border-slate-600\/50 { border-color: var(--c-border) !important; }
+        html[data-theme="light"] .divide-borderBg > :not([hidden]) ~ :not([hidden]),
+        html[data-theme="light"] .divide-slate-800 > :not([hidden]) ~ :not([hidden]) { border-color: var(--c-border) !important; }
+        html[data-theme="light"] .text-slate-100,
+        html[data-theme="light"] .text-slate-200 { color: #0f172a !important; }
+        html[data-theme="light"] .text-slate-300 { color: #334155 !important; }
+        html[data-theme="light"] .text-slate-400 { color: #64748b !important; }
+        html[data-theme="light"] .text-slate-500 { color: #94a3b8 !important; }
+        html[data-theme="light"] .placeholder-slate-500::placeholder { color: #94a3b8 !important; }
+        /* Badge/label màu trên nền sáng: dùng shade đậm hơn cho đủ tương phản */
+        html[data-theme="light"] .text-blue-400 { color: #2563eb !important; }
+        html[data-theme="light"] .text-blue-300 { color: #1d4ed8 !important; }
+        html[data-theme="light"] .text-emerald-400 { color: #059669 !important; }
+        html[data-theme="light"] .text-emerald-300 { color: #047857 !important; }
+        html[data-theme="light"] .text-amber-400 { color: #b45309 !important; }
+        html[data-theme="light"] .text-amber-300 { color: #92400e !important; }
+        html[data-theme="light"] .text-amber-500 { color: #b45309 !important; }
+        html[data-theme="light"] .text-rose-400 { color: #e11d48 !important; }
+        html[data-theme="light"] .text-red-400 { color: #dc2626 !important; }
+        html[data-theme="light"] .text-red-300 { color: #b91c1c !important; }
+        html[data-theme="light"] .text-purple-400 { color: #9333ea !important; }
+        html[data-theme="light"] .text-violet-300 { color: #7c3aed !important; }
+        html[data-theme="light"] .text-violet-400 { color: #7c3aed !important; }
+        html[data-theme="light"] .text-sky-400 { color: #0284c7 !important; }
+        html[data-theme="light"] .text-sky-500 { color: #0284c7 !important; }
+        html[data-theme="light"] .text-sky-300 { color: #0369a1 !important; }
+        html[data-theme="light"] .text-slate-300.font-mono,
+        html[data-theme="light"] .font-mono.text-slate-200 { color: #1e293b !important; }
+        /* Icon theme toggle: chỉ hiện icon của theme kia (mời bấm) */
+        html[data-theme="dark"] .theme-icon-sun { display: none; }
+        html[data-theme="light"] .theme-icon-moon { display: none; }
+        html[data-theme="light"] .theme-icon-sun { display: block; }
     </style>
 </head>
 <body class="bg-darkBg text-slate-100 min-h-screen font-sans flex flex-col antialiased selection:bg-blue-500 selection:text-white">
@@ -50,7 +129,7 @@
             </div>
         </div>
 
-        <div class="flex items-center space-x-3">
+        <div class="flex items-center space-x-2">
             <div class="hidden md:flex items-center space-x-2 px-3 py-1.5 bg-slate-800/80 border border-slate-700/60 rounded-xl text-xs" id="network-ip-pill" title="Bấm để kiểm tra lại địa chỉ IP mạng thật">
                 <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                 <span class="text-slate-400">IP Mạng:</span>
@@ -58,6 +137,19 @@
                 <span id="current-ip-location" class="text-[11px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 font-medium">📍 Hà Nội</span>
             </div>
 
+            <button onclick="toggleTheme()" class="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition" title="Chuyển Dark / Light mode">
+                <span class="theme-icon-moon inline-block"><i data-lucide="moon" class="w-4 h-4"></i></span>
+                <span class="theme-icon-sun inline-block"><i data-lucide="sun" class="w-4 h-4"></i></span>
+            </button>
+            <button onclick="openSchedulesModal()" class="p-2 text-slate-400 hover:text-violet-400 hover:bg-slate-800 rounded-lg transition" title="Lịch tự động (mở/đóng/sync vị trí theo giờ)">
+                <i data-lucide="calendar-clock" class="w-4 h-4"></i>
+            </button>
+            <button onclick="openTokenModal()" class="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition" title="API token dài hạn cho automation">
+                <i data-lucide="key-round" class="w-4 h-4"></i>
+            </button>
+            <button onclick="openLogsModal()" class="p-2 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition" title="Nhật ký hệ thống (app.log)">
+                <i data-lucide="scroll-text" class="w-4 h-4"></i>
+            </button>
             <button onclick="refreshProfiles()" class="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition" title="Làm mới danh sách">
                 <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             </button>
@@ -96,7 +188,7 @@
                 </div>
             </div>
 
-            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex items-center space-x-4">
+            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex items-center space-x-4 cursor-pointer hover:border-blue-500/40 transition" onclick="showFilter('proxy')" title="Bấm để lọc profile có proxy">
                 <div class="p-3 bg-purple-500/10 text-purple-400 rounded-lg">
                     <i data-lucide="globe" class="w-6 h-6"></i>
                 </div>
@@ -106,19 +198,19 @@
                 </div>
             </div>
 
-            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex items-center space-x-4">
+            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex items-center space-x-4 cursor-pointer hover:border-amber-500/40 transition" title="Tổng số fanpage Facebook đã đồng bộ qua các profile">
                 <div class="p-3 bg-amber-500/10 text-amber-400 rounded-lg">
-                    <i data-lucide="fingerprint" class="w-6 h-6"></i>
+                    <i data-lucide="flag" class="w-6 h-6"></i>
                 </div>
                 <div>
-                    <div class="text-2xl font-bold text-amber-400">100%</div>
-                    <div class="text-xs text-slate-400">Spoofing CDP Enabled</div>
+                    <div class="text-2xl font-bold text-amber-400" id="stat-pages">0</div>
+                    <div class="text-xs text-slate-400">Fanpage Đã Đồng Bộ</div>
                 </div>
             </div>
         </div>
 
         <!-- Profiles Table / Card -->
-        <div class="bg-cardBg border border-borderBg rounded-xl overflow-hidden shadow-xl">
+        <div id="profiles-card" class="bg-cardBg border border-borderBg rounded-xl overflow-hidden shadow-xl">
             <div class="p-4 border-b border-borderBg flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
                     <h2 class="text-base font-semibold">Danh Sách Profile Trình Duyệt</h2>
@@ -137,10 +229,41 @@
                         <i data-lucide="map-pin" class="w-4 h-4"></i>
                         <span>Chuyển Vị Trí</span>
                     </button>
+                    <button onclick="openWizardModal()" class="px-3 py-1.5 bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white border border-violet-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Tạo hàng loạt profile cùng cấu hình, fingerprint riêng từng profile">
+                        <i data-lucide="wand-2" class="w-4 h-4"></i>
+                        <span>Tạo Hàng Loạt</span>
+                    </button>
+                    <button onclick="exportProfiles()" class="p-2 text-slate-400 hover:text-emerald-400 hover:bg-slate-800 rounded-lg transition" title="Xuất toàn bộ profile ra JSON (không kèm mật khẩu)" id="btn-export">
+                        <i data-lucide="download" class="w-4 h-4"></i>
+                    </button>
+                    <button onclick="openImportModal()" class="p-2 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition" title="Nhập profiles từ JSON export">
+                        <i data-lucide="upload" class="w-4 h-4"></i>
+                    </button>
                     <div class="relative">
                         <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-                        <input type="text" id="searchInput" oninput="filterProfiles()" placeholder="Tìm kiếm profile..." class="bg-slate-900 border border-borderBg rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-52">
+                        <input type="text" id="searchInput" oninput="filterProfiles()" placeholder="Tìm kiếm profile..." class="bg-slate-900 border border-borderBg rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-56">
                     </div>
+                </div>
+                <!-- Bộ lọc nhanh -->
+                <div class="flex flex-wrap items-center gap-1.5" id="filter-chips">
+                    <button data-filter-chip="all" onclick="setFilter('all')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Tất cả</button>
+                    <button data-filter-chip="running" onclick="setFilter('running')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Đang chạy</button>
+                    <button data-filter-chip="stopped" onclick="setFilter('stopped')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Đã dừng</button>
+                    <button data-filter-chip="proxy" onclick="setFilter('proxy')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Có proxy</button>
+                    <button data-filter-chip="authentic" onclick="setFilter('authentic')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition" title="Chế độ Authentic: không noise, trùng Chrome thật">Authentic</button>
+                    <select id="tag-filter" onchange="filterProfiles()" class="bg-slate-900 border border-borderBg rounded-lg px-2 py-1 text-[11px] text-slate-300">
+                        <option value="">Tag: tất cả</option>
+                    </select>
+                    <span class="text-[11px] text-slate-500 ml-1" id="filter-count"></span>
+                </div>
+                <!-- Bulk action bar (Đợt B) -->
+                <div id="bulk-bar" class="hidden w-full flex flex-wrap items-center gap-2 px-3 py-2 bg-blue-500/10 border border-blue-500/30 rounded-lg text-xs">
+                    <span class="text-blue-400 font-semibold" id="bulk-count">0 đã chọn</span>
+                    <button onclick="bulkStart()" class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/30 rounded-lg font-medium transition">Bật đã chọn</button>
+                    <button onclick="bulkStop()" class="px-2.5 py-1 bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 rounded-lg font-medium transition">Đóng đã chọn</button>
+                    <button onclick="bulkResetFp()" class="px-2.5 py-1 bg-amber-600/20 hover:bg-amber-600 text-amber-400 hover:text-white border border-amber-500/30 rounded-lg font-medium transition">Reset FP</button>
+                    <button onclick="bulkDelete()" class="px-2.5 py-1 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 rounded-lg font-medium transition">Xóa</button>
+                    <button onclick="clearSelection()" class="ml-auto text-slate-400 hover:text-white px-2 py-1 transition">Bỏ chọn</button>
                 </div>
             </div>
 
@@ -166,6 +289,9 @@
                 <table class="w-full text-left text-xs">
                     <thead class="bg-slate-900/50 text-slate-400 uppercase font-semibold text-[11px] border-b border-borderBg">
                         <tr>
+                            <th class="py-3.5 px-3 w-8">
+                                <input type="checkbox" id="select-all-chk" onchange="toggleSelectAll(this.checked)" class="accent-blue-500 cursor-pointer" title="Chọn tất cả (trong bộ lọc)">
+                            </th>
                             <th class="py-3.5 px-4">Tên Profile</th>
                             <th class="py-3.5 px-4">Hệ Điều Hành & WebGL</th>
                             <th class="py-3.5 px-4">Màn Hình & Canvas</th>
@@ -497,6 +623,10 @@
                         <label class="block font-medium text-slate-300 mb-1">Ghi chú</label>
                         <input type="text" id="edit-notes" placeholder="Ghi chú..." class="w-full bg-cardBg border border-borderBg rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-blue-500">
                     </div>
+                    <div>
+                        <label class="block font-medium text-slate-300 mb-1">Tags (phân tách bằng dấu phẩy)</label>
+                        <input type="text" id="edit-tags" placeholder="vd: farm-a, quan-trong" class="w-full bg-cardBg border border-borderBg rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-blue-500">
+                    </div>
                 </div>
 
                 <!-- Custom Proxy Section -->
@@ -706,6 +836,29 @@
                                     <input type="number" step="0.0001" id="edit-fp-lon" value="105.8542" class="w-full bg-slate-800 border border-borderBg rounded-lg px-2 py-1.5 text-xs font-mono text-slate-200">
                                 </div>
                             </div>
+                            <button onclick="syncLocationFromProxy()" class="w-full px-3 py-1.5 bg-emerald-600/15 hover:bg-emerald-600 text-emerald-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center justify-center space-x-1.5 border border-emerald-500/30" title="Hỏi GeoIP qua proxy của profile và cập nhật timezone/tọa độ/ngôn ngữ cho khớp IP">
+                                <i data-lucide="satellite-dish" class="w-3.5 h-3.5"></i>
+                                <span>Đồng bộ vị trí theo IP proxy</span>
+                            </button>
+                        </div>
+
+                        <!-- Chế độ Stealth: tắt noise per-profile -->
+                        <div class="p-3 bg-slate-900/90 rounded-xl border border-borderBg space-y-2">
+                            <div class="flex items-center justify-between">
+                                <label class="block font-semibold text-emerald-400 flex items-center space-x-1.5">
+                                    <i data-lucide="shield" class="w-3.5 h-3.5"></i>
+                                    <span>Noise Fingerprint (Canvas / WebGL / Audio)</span>
+                                </label>
+                                <span class="text-[10px] text-slate-400">Khuyến nghị production: tắt cả 3</span>
+                            </div>
+                            <div class="grid grid-cols-5 gap-2">
+                                <label class="flex items-center space-x-1.5 text-xs text-slate-300"><input type="checkbox" id="edit-stealth-canvas" class="accent-emerald-500"> <span>Canvas</span></label>
+                                <label class="flex items-center space-x-1.5 text-xs text-slate-300"><input type="checkbox" id="edit-stealth-webgl" class="accent-emerald-500"> <span>WebGL</span></label>
+                                <label class="flex items-center space-x-1.5 text-xs text-slate-300"><input type="checkbox" id="edit-stealth-audio" class="accent-emerald-500"> <span>Audio</span></label>
+                                <label class="flex items-center space-x-1.5 text-xs text-slate-300"><input type="checkbox" id="edit-stealth-media" class="accent-emerald-500"> <span>Media</span></label>
+                                <label class="flex items-center space-x-1.5 text-xs text-slate-300"><input type="checkbox" id="edit-stealth-worker" class="accent-emerald-500"> <span>Worker</span></label>
+                            </div>
+                            <p class="text-[10px] text-slate-500">Tick = TẮT hook tương ứng. Bật đủ noise (mặc định): mỗi profile có hash riêng nhưng Pixelscan chấm "masking detected". Chế độ "authentic" (khuyến nghị tài khoản giá trị cao): tick cả 5 — fingerprint trùng Chrome thật trên máy, Pixelscan không còn masking; đổi lại các profile cùng máy chia sẻ hash canvas/WebGL/audio và cần khai báo GPU khớp máy thật.</p>
                         </div>
 
                         <div>
@@ -819,6 +972,216 @@
                     <i data-lucide="upload" class="w-3.5 h-3.5"></i>
                     <span>Nạp Cookies Vào Profile</span>
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="fanpagesModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="bg-cardBg border border-borderBg rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+            <div class="px-5 py-4 border-b border-borderBg flex items-center justify-between bg-slate-900/60">
+                <div class="flex items-center space-x-2">
+                    <i data-lucide="flag" class="w-5 h-5 text-blue-400"></i>
+                    <h3 class="text-sm font-semibold text-white">Fanpage Facebook của Profile</h3>
+                </div>
+                <button onclick="closeFanpagesModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+            </div>
+            <div class="p-5 overflow-y-auto space-y-3">
+                <input type="hidden" id="fanpages-profile-id" />
+                <div class="flex items-center justify-between bg-slate-900/50 p-3.5 rounded-xl border border-borderBg">
+                    <div>
+                        <div class="text-xs text-slate-400">Profile: <span id="fanpages-profile-name" class="font-semibold text-slate-200"></span></div>
+                        <div id="fanpages-meta" class="text-[11px] text-slate-500 mt-1">Chưa có dữ liệu</div>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button onclick="refreshFanpages(false)" class="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1" title="Đọc lại danh sách fanpage từ phiên đang chạy">
+                            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                            <span>Làm mới</span>
+                        </button>
+                        <button onclick="refreshFanpages(true)" class="px-3 py-1.5 bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1" title="Quét từng fanpage: ngày tạo + bài đăng gần nhất → trạng thái đang đăng/dừng, sẵn sàng (ngâm ≥1 tháng). Mỗi trang ~4-8s.">
+                            <i data-lucide="scan-search" class="w-3.5 h-3.5"></i>
+                            <span>Cập nhật chi tiết</span>
+                        </button>
+                    </div>
+                </div>
+                <div id="fanpages-list" class="space-y-2"></div>
+                <p class="text-[10px] text-slate-500">Danh sách đọc trực tiếp từ facebook.com/bookmarks/pages của phiên đang chạy (cần profile đã đăng nhập Facebook). Facebook có thể đổi giao diện — nếu danh sách thiếu, mở link để kiểm tra bằng mắt.</p>
+            </div>
+            <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
+                <button onclick="closeFanpagesModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="logsModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="bg-cardBg border border-borderBg rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+            <div class="px-5 py-4 border-b border-borderBg flex items-center justify-between bg-slate-900/60">
+                <div class="flex items-center space-x-2">
+                    <i data-lucide="scroll-text" class="w-5 h-5 text-blue-400"></i>
+                    <h3 class="text-sm font-semibold text-white">Nhật Ký Hệ Thống (app.log)</h3>
+                </div>
+                <button onclick="closeLogsModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+            </div>
+            <div class="p-4 overflow-y-auto flex-1">
+                <div class="flex items-center justify-between mb-3">
+                    <span id="logs-meta" class="text-[11px] text-slate-500"></span>
+                    <div class="flex items-center space-x-2">
+                        <select id="logs-lines" onchange="loadLogs()" class="bg-slate-900 border border-borderBg rounded-lg px-2 py-1 text-xs text-slate-200">
+                            <option value="200">200 dòng</option>
+                            <option value="500">500 dòng</option>
+                            <option value="1000">1000 dòng</option>
+                        </select>
+                        <button onclick="loadLogs()" class="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                            <span>Làm mới</span>
+                        </button>
+                    </div>
+                </div>
+                <pre id="logs-content" class="bg-slate-900 border border-borderBg rounded-xl p-3 text-[11px] font-mono text-slate-300 whitespace-pre-wrap break-all max-h-[55vh] overflow-y-auto">Đang tải...</pre>
+            </div>
+            <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
+                <button onclick="closeLogsModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="importModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="bg-cardBg border border-borderBg rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+            <div class="px-5 py-4 border-b border-borderBg flex items-center justify-between bg-slate-900/60">
+                <div class="flex items-center space-x-2">
+                    <i data-lucide="upload" class="w-5 h-5 text-blue-400"></i>
+                    <h3 class="text-sm font-semibold text-white">Nhập Profiles từ JSON</h3>
+                </div>
+                <button onclick="closeImportModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
+            </div>
+            <div class="p-5 overflow-y-auto space-y-3">
+                <p class="text-[11px] text-slate-500">Chấp nhận file/JSON từ Export. <span class="text-amber-400">Mật khẩu proxy không nằm trong export</span> — nhập lại qua Edit profile sau khi nhập. Id mới tự sinh.</p>
+                <input type="file" id="import-file" accept=".json" class="text-xs text-slate-300 file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-slate-800 file:text-slate-200 file:cursor-pointer">
+                <textarea id="import-text" rows="7" placeholder='Hoặc dán JSON: {"version": 1, "profiles": [...]}' class="w-full bg-slate-900 border border-borderBg rounded-xl p-3 text-xs font-mono text-slate-200"></textarea>
+                <div id="import-result"></div>
+            </div>
+            <div class="px-5 py-3 border-t border-borderBg flex justify-end space-x-2 bg-slate-900/40">
+                <button onclick="closeImportModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                <button onclick="doImport('file')" class="px-4 py-1.5 text-xs bg-blue-600/80 hover:bg-blue-500 text-white font-semibold rounded-lg transition">Nhập từ file</button>
+                <button onclick="doImport('text')" class="px-4 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition">Nhập từ JSON</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="wizardModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="bg-cardBg border border-borderBg rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+            <div class="px-5 py-4 border-b border-borderBg flex items-center justify-between bg-slate-900/60">
+                <div class="flex items-center space-x-2">
+                    <i data-lucide="wand-2" class="w-5 h-5 text-violet-400"></i>
+                    <h3 class="text-sm font-semibold text-white">Tạo Profile Hàng Loạt</h3>
+                </div>
+                <button onclick="closeWizardModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
+            </div>
+            <div class="p-5 overflow-y-auto space-y-3">
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Số lượng (1-50)</label>
+                        <input type="number" id="wizard-count" value="5" min="1" max="50" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Tên tiền tố</label>
+                        <input type="text" id="wizard-prefix" value="Farm" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Hệ điều hành</label>
+                        <select id="wizard-os" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                            <option value="windows">Windows</option>
+                            <option value="macos">macOS (experimental)</option>
+                            <option value="linux">Linux (experimental)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Thành phố</label>
+                        <select id="wizard-city" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                            <option value="hanoi">Hà Nội</option>
+                            <option value="hcm">TP. HCM</option>
+                            <option value="danang">Đà Nẵng</option>
+                            <option value="singapore">Singapore</option>
+                            <option value="tokyo">Tokyo</option>
+                            <option value="us_ny">New York</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Chế độ stealth</label>
+                        <select id="wizard-mode" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                            <option value="unique">Unique (noise riêng)</option>
+                            <option value="authentic">Authentic (khuyến nghị)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">CPU cores (trống = 8)</label>
+                        <input type="number" id="wizard-cpu" min="1" max="128" placeholder="8" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-[11px] text-slate-400 mb-1">Proxy list — mỗi dòng 1 proxy <span class="font-mono">protocol://user:pass@host:port</span> (gán theo thứ tự; thiếu = direct + cảnh báo)</label>
+                    <textarea id="wizard-proxies" rows="5" placeholder="http://user:pass@160.250.166.89:23951&#10;http://user:pass@113.160.166.27:46787" class="w-full bg-slate-900 border border-borderBg rounded-xl p-3 text-xs font-mono text-slate-200"></textarea>
+                </div>
+                <div id="wizard-result"></div>
+            </div>
+            <div class="px-5 py-3 border-t border-borderBg flex justify-end space-x-2 bg-slate-900/40">
+                <button onclick="closeWizardModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                <button onclick="doBulkCreate()" class="px-4 py-1.5 text-xs bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-lg transition flex items-center space-x-1.5">
+                    <i data-lucide="wand-2" class="w-3.5 h-3.5"></i><span>Tạo Ngay</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="schedulesModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="bg-cardBg border border-borderBg rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+            <div class="px-5 py-4 border-b border-borderBg flex items-center justify-between bg-slate-900/60">
+                <div class="flex items-center space-x-2">
+                    <i data-lucide="calendar-clock" class="w-5 h-5 text-violet-400"></i>
+                    <h3 class="text-sm font-semibold text-white">Lịch Tự Động</h3>
+                </div>
+                <button onclick="closeSchedulesModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
+            </div>
+            <div class="p-5 overflow-y-auto space-y-3">
+                <div class="flex items-center gap-2 bg-slate-900/50 p-3 rounded-xl border border-borderBg">
+                    <input type="time" id="sched-time" class="bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                    <select id="sched-action" class="bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs text-slate-200 flex-1">
+                        <option value="start_all">Mở tất cả profile</option>
+                        <option value="stop_all">Đóng tất cả profile</option>
+                        <option value="sync_location_proxy">Sync vị trí theo proxy</option>
+                    </select>
+                    <input type="text" id="sched-name" placeholder="Tên lịch (tuỳ chọn)" class="bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200 w-32">
+                    <button onclick="createSchedule()" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-semibold transition">Thêm</button>
+                </div>
+                <div id="schedules-meta" class="text-[11px] text-slate-500"></div>
+                <div id="schedules-list" class="space-y-2"></div>
+                <p class="text-[10px] text-slate-500">Lịch chạy khi server đang mở; lỡ giờ trong vòng 60 phút (do restart) vẫn tự chạy bù một lần. Profile scope: tất cả (chọn riêng qua API).</p>
+            </div>
+            <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
+                <button onclick="closeSchedulesModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="tokenModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="bg-cardBg border border-borderBg rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
+            <div class="px-5 py-4 border-b border-borderBg flex items-center justify-between bg-slate-900/60">
+                <div class="flex items-center space-x-2">
+                    <i data-lucide="key-round" class="w-5 h-5 text-amber-400"></i>
+                    <h3 class="text-sm font-semibold text-white">API Token cho Automation</h3>
+                </div>
+                <button onclick="closeTokenModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
+            </div>
+            <div class="p-5 space-y-3">
+                <p class="text-xs text-slate-400">Token dùng làm <span class="font-mono">Authorization: Bearer &lt;token&gt;</span> cho REST API — không đổi khi server khởi động lại (khác access key). Chỉ lưu hash trên máy; plaintext chỉ hiển thị lúc tạo.</p>
+                <div id="token-display" class="hidden"></div>
+            </div>
+            <div class="px-5 py-3 border-t border-borderBg flex justify-end space-x-2 bg-slate-900/40">
+                <button onclick="revokeToken()" class="px-3.5 py-1.5 text-xs bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 rounded-lg transition">Thu hồi</button>
+                <button onclick="rotateToken()" class="px-4 py-1.5 text-xs bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg transition">Tạo / Rotate Token</button>
             </div>
         </div>
     </div>
@@ -1252,7 +1615,7 @@
             try {
                 const res = await fetch('/api/profiles');
                 currentProfiles = await res.json();
-                renderProfiles(currentProfiles);
+                filterProfiles();
                 updateStats();
             } catch (err) {
                 console.error(err);
@@ -1334,6 +1697,19 @@
             document.getElementById('stat-running').innerText = runningCount;
             const proxyCount = currentProfiles.filter(p => p.proxy && p.proxy.enabled && p.proxy.host).length;
             document.getElementById('stat-proxies').innerText = proxyCount;
+            const pageCount = currentProfiles.reduce((s, p) => s + ((p.facebook_pages || []).length), 0);
+            const pagesEl = document.getElementById('stat-pages');
+            if (pagesEl) pagesEl.innerText = pageCount;
+            // Populate tag dropdown (giữ lựa chọn hiện tại)
+            const tagSel = document.getElementById('tag-filter');
+            if (tagSel) {
+                const current = tagSel.value;
+                const tags = new Set();
+                currentProfiles.forEach(p => (p.tags || []).forEach(t => t && tags.add(t)));
+                tagSel.innerHTML = '<option value="">Tag: tất cả</option>'
+                    + Array.from(tags).sort().map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+                tagSel.value = current;
+            }
         }
 
         function renderProfiles(profiles) {
@@ -1343,6 +1719,15 @@
 
             if (profiles.length === 0) {
                 emptyState.classList.remove('hidden');
+                const h3 = emptyState.querySelector('h3');
+                const pDesc = emptyState.querySelector('p');
+                if (currentProfiles.length > 0) {
+                    h3.innerText = 'Không có profile nào khớp bộ lọc';
+                    pDesc.innerText = 'Thử đổi bộ lọc phía trên hoặc từ khóa tìm kiếm.';
+                } else {
+                    h3.innerText = 'Chưa có profile nào';
+                    pDesc.innerText = 'Bấm nút "Tạo Profile Mới" ở trên để khởi tạo hồ sơ đầu tiên.';
+                }
                 return;
             } else {
                 emptyState.classList.add('hidden');
@@ -1352,6 +1737,8 @@
                 const isRunning = p.status === 'running';
                 const tr = document.createElement('tr');
                 tr.className = 'hover:bg-slate-800/40 transition group';
+                tr.dataset.profileId = p.id;
+                if (selectedIds.has(p.id)) tr.classList.add('bg-blue-500/5');
 
                 // OS Icon
                 let osIcon = '<i data-lucide="monitor" class="w-4 h-4 text-blue-400"></i>';
@@ -1383,16 +1770,55 @@
                 const latStr = p.fingerprint.latitude ? p.fingerprint.latitude.toFixed(2) : 0;
                 const lonStr = p.fingerprint.longitude ? p.fingerprint.longitude.toFixed(2) : 0;
 
+                // Fanpage đã đồng bộ — badge bấm được mở modal fanpages
+                const fbCount = (p.facebook_pages || []).length;
+                const fbBadge = fbCount
+                    ? `<button onclick="openFanpagesModal('${safeId}')" class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition" title="Đã đồng bộ ${fbCount} fanpage — bấm để xem">
+                         <i data-lucide="flag" class="w-3 h-3 mr-1"></i>${fbCount} page
+                       </button>`
+                    : '';
+                // Ghi chú + tags (Đợt A/C)
+                const noteBadge = (p.notes || '').trim()
+                    ? `<span class="inline-flex items-center text-slate-500 cursor-help" title="${escapeHtml(p.notes)}">
+                         <i data-lucide="sticky-note" class="w-3 h-3"></i>
+                       </span>`
+                    : '';
+                const tagsHtml = (p.tags || []).slice(0, 4).map(t =>
+                    `<span class="px-1.5 py-0.5 rounded text-[9px] bg-slate-700/40 text-slate-400 border border-slate-600/40">${escapeHtml(t)}</span>`
+                ).join(' ');
+                // Uptime + RAM (Đợt A)
+                const uptimeText = p.uptime_seconds != null ? formatUptime(p.uptime_seconds) : '';
+                const ramText = p.ram_mb != null ? `${Math.round(p.ram_mb)} MB` : '';
+                const runtimeLine = (p.status === 'running' && (uptimeText || ramText))
+                    ? `<div class="text-[10px] text-slate-500 font-mono mt-0.5">${[uptimeText && '⏱ ' + uptimeText, ramText && '💾 ' + ramText].filter(Boolean).join(' · ')}</div>`
+                    : '';
+
                 // P2-06: Nhãn phân định Target OS Assurance
                 const osBadge = p.fingerprint.os === 'windows'
                     ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30" title="Host-Native Windows: Độ tin cậy tối đa, đồng nhất phần cứng và driver">Native</span>'
                     : '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30" title="Cross-OS CDP Spoofing: Giả lập qua CDP. Lưu ý TLS/JA3 và driver gốc vẫn là Windows">Experimental</span>';
 
+                // Chế độ stealth: authentic = tắt noise canvas/webgl/audio/media/worker
+                const disabled = new Set(p.fingerprint.stealth_disable || []);
+                const authenticGroups = ['canvas', 'webgl', 'audio', 'media', 'worker'];
+                const authenticMode = authenticGroups.every(g => disabled.has(g));
+                const stealthBadge = authenticMode
+                    ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30" title="Authentic: không noise, fingerprint trùng Chrome thật trên máy (Pixelscan không còn masking)">Authentic</span>'
+                    : (disabled.size > 0
+                        ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-sky-500/10 text-slate-400 border border-slate-500/30" title="Tắt ' + disabled.size + ' nhóm hook (xem Edit profile)">Partial</span>'
+                        : '');
+
                 tr.innerHTML = `
+                    <td class="py-3 px-3">
+                        <input type="checkbox" ${selectedIds.has(p.id) ? 'checked' : ''} onchange="toggleSelect('${p.id}', this.checked)" class="accent-blue-500 cursor-pointer">
+                    </td>
                     <td class="py-3 px-4">
                         <div class="font-semibold text-slate-100 flex items-center space-x-2">
                             <span>${safeName}</span>
+                            ${fbBadge}
+                            ${noteBadge}
                         </div>
+                        ${tagsHtml ? `<div class="flex flex-wrap gap-1 mt-1">${tagsHtml}</div>` : ''}
                         <div class="text-[11px] text-slate-500 font-mono mt-0.5">ID: ${safeId.substring(0, 8)}...</div>
                     </td>
 
@@ -1402,6 +1828,7 @@
                             <span class="capitalize">${safeOs}</span>
                             <span class="text-slate-500">v${safeBrowserVer}</span>
                             ${osBadge}
+                            ${stealthBadge}
                         </div>
                         <div class="text-[11px] text-slate-400 mt-0.5 truncate max-w-[180px]" title="${safeGpuFull}">
                             ${safeGpuShort}
@@ -1442,6 +1869,7 @@
                                 <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse mr-1.5"></span>
                                 Port: ${escapeHtml(p.port || 'CDP')}
                             </span>
+                            ${runtimeLine}
                         ` : `
                             <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-700/30 text-slate-400 border border-slate-700">
                                 Đã dừng
@@ -1479,6 +1907,10 @@
                                 <i data-lucide="cookie" class="w-4 h-4"></i>
                             </button>
 
+                            <button onclick="openFanpagesModal('${safeId}')" title="Fanpage Facebook profile này đang sở hữu" class="p-1 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition">
+                                <i data-lucide="flag" class="w-4 h-4"></i>
+                            </button>
+
                             <button onclick="duplicateProfile('${safeId}')" title="Nhân bản" class="p-1 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition">
                                 <i data-lucide="copy" class="w-4 h-4"></i>
                             </button>
@@ -1496,9 +1928,38 @@
             safeCreateIcons();
         }
 
+        // --- Bộ lọc nhanh (chips) ---
+        let currentFilter = 'all';
+        function setFilter(f) {
+            currentFilter = f;
+            document.querySelectorAll('[data-filter-chip]').forEach(btn => {
+                const active = btn.dataset.filterChip === f;
+                btn.classList.toggle('bg-blue-600', active);
+                btn.classList.toggle('text-white', active);
+                btn.classList.toggle('border-blue-500', active);
+                btn.classList.toggle('bg-slate-800', !active);
+                btn.classList.toggle('text-slate-400', !active);
+                btn.classList.toggle('border-borderBg', !active);
+                btn.classList.toggle('hover:text-slate-200', !active);
+            });
+            filterProfiles();
+        }
+        function showFilter(f) { setFilter(f); document.getElementById('profiles-card').scrollIntoView({ behavior: 'smooth' }); }
+
         function filterProfiles() {
-            const query = document.getElementById('searchInput').value.toLowerCase();
-            const filtered = currentProfiles.filter(p => p.name.toLowerCase().includes(query) || p.fingerprint.os.toLowerCase().includes(query));
+            const query = (document.getElementById('searchInput').value || '').toLowerCase();
+            const tagSel = document.getElementById('tag-filter');
+            const tagFilter = tagSel ? tagSel.value : '';
+            const filtered = currentProfiles.filter(p =>
+                matchCurrentFilter(p)
+                && (!query || p.name.toLowerCase().includes(query)
+                    || p.fingerprint.os.toLowerCase().includes(query)
+                    || (p.tags || []).some(t => t.toLowerCase().includes(query)))
+                && (!tagFilter || (p.tags || []).includes(tagFilter))
+            );
+            const countEl = document.getElementById('filter-count');
+            if (countEl) countEl.innerText = filtered.length === currentProfiles.length
+                ? `${filtered.length} profile` : `${filtered.length}/${currentProfiles.length} profile`;
             renderProfiles(filtered);
         }
 
@@ -1601,6 +2062,40 @@
             }
         }
 
+        async function syncLocationFromProxy() {
+            const id = document.getElementById('edit-profile-id').value;
+            if (!id) return;
+            showToast('Đang hỏi GeoIP qua proxy...', 'info');
+            try {
+                const res = await fetch(`/api/profiles/${id}/sync-location-proxy`, { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    showToast(data.detail || 'Không đồng bộ được vị trí theo proxy.', 'warning');
+                    return;
+                }
+                // Cập nhật các ô trong modal theo giá trị mới.
+                const fp = editingProfile && editingProfile.fingerprint;
+                if (data.changes) {
+                    if (data.changes.latitude) document.getElementById('edit-fp-lat').value = data.changes.latitude[1];
+                    if (data.changes.longitude) document.getElementById('edit-fp-lon').value = data.changes.longitude[1];
+                    if (data.changes.timezone) {
+                        const sel = document.getElementById('edit-fp-tz-select');
+                        if (sel && [...sel.options].some(o => o.value === data.changes.timezone[1])) {
+                            sel.value = data.changes.timezone[1];
+                            sel.dispatchEvent(new Event('change'));
+                        }
+                    }
+                    if (data.changes.locale) document.getElementById('edit-fp-locale').value = data.changes.locale[1];
+                }
+                const changeText = data.changes && Object.keys(data.changes).length
+                    ? ' (' + Object.keys(data.changes).join(', ') + ')'
+                    : '';
+                showToast(data.message + changeText, 'success');
+            } catch (err) {
+                showToast('Lỗi kết nối: ' + err, 'error');
+            }
+        }
+
         async function startProfile(id) {
             showToast('Đang khởi chạy trình duyệt...', 'info');
             try {
@@ -1609,6 +2104,10 @@
                 if (res.ok && data.success) {
                     if (data.cdp_ready === false) {
                         showToast(data.warning || 'Chrome đã mở nhưng CDP chưa xác nhận khởi tạo.', 'warning');
+                    } else if (data.warnings && data.warnings.length) {
+                        showToast('Đã khởi chạy, nhưng có điều chỉnh: ' + data.warnings.join(' '), 'warning');
+                    } else if (data.warning) {
+                        showToast(data.warning, 'warning');
                     } else {
                         showToast('Khởi chạy trình duyệt thành công!', 'success');
                     }
@@ -1643,6 +2142,10 @@
                 if (res.ok && data.success) {
                     if (data.cdp_ready === false) {
                         showToast(data.warning || 'Chrome đã mở nhưng CDP chưa xác nhận khởi tạo.', 'warning');
+                    } else if (data.warnings && data.warnings.length) {
+                        showToast('Đang mở trang kiểm tra. Lưu ý: ' + data.warnings.join(' '), 'warning');
+                    } else if (data.warning) {
+                        showToast(data.warning, 'warning');
                     } else {
                         showToast('Đang mở trang kiểm tra Browserleaks...', 'success');
                     }
@@ -1737,6 +2240,475 @@
         function closeCookieModal() {
             document.getElementById('cookieModal').classList.add('hidden');
             currentProfileCookies = [];
+        }
+
+        // --- Theme dark/light ---
+        function toggleTheme() {
+            const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+            document.documentElement.dataset.theme = next;
+            try { localStorage.setItem('antidetect-theme', next); } catch (e) {}
+            showToast(next === 'light' ? 'Đã chuyển sang Light mode.' : 'Đã chuyển sang Dark mode.', 'info');
+        }
+
+        // --- Nhật ký hệ thống ---
+        async function openLogsModal() {
+            document.getElementById('logsModal').classList.remove('hidden');
+            await loadLogs();
+        }
+        function closeLogsModal() {
+            document.getElementById('logsModal').classList.add('hidden');
+        }
+        async function loadLogs() {
+            const contentEl = document.getElementById('logs-content');
+            const metaEl = document.getElementById('logs-meta');
+            const n = document.getElementById('logs-lines').value || 200;
+            contentEl.innerText = 'Đang tải...';
+            try {
+                const res = await fetch(`/api/system/logs?lines=${n}`);
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    contentEl.innerText = 'Không đọc được app.log: ' + (data.detail || res.status);
+                    metaEl.innerText = '';
+                    return;
+                }
+                contentEl.innerText = (data.lines || []).join('\n') || '(app.log trống)';
+                metaEl.innerText = `${data.count} dòng cuối của app.log`;
+                contentEl.scrollTop = contentEl.scrollHeight;
+            } catch (e) {
+                contentEl.innerText = 'Lỗi kết nối: ' + e;
+            }
+        }
+
+        // --- Đợt A/B/C: Multi-select + bulk + export/import + wizard + schedules + token ---
+
+        function formatUptime(sec) {
+            const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+            if (h > 0) return `${h}g ${m}p`;
+            return `${m}p`;
+        }
+
+        const selectedIds = new Set();
+        function toggleSelect(id, checked) {
+            if (checked) selectedIds.add(id); else selectedIds.delete(id);
+            updateBulkBar();
+        }
+        function toggleSelectAll(checked) {
+            // Chọn theo bộ lọc hiện tại (những row đang hiển thị)
+            const query = (document.getElementById('searchInput').value || '').toLowerCase();
+            currentProfiles.forEach(p => {
+                const inSearch = !query || p.name.toLowerCase().includes(query) || p.fingerprint.os.toLowerCase().includes(query);
+                const inFilter = matchCurrentFilter(p);
+                if (inSearch && inFilter) {
+                    if (checked) selectedIds.add(p.id); else selectedIds.delete(p.id);
+                }
+            });
+            filterProfiles();
+        }
+        function matchCurrentFilter(p) {
+            if (currentFilter === 'running') return p.status === 'running';
+            if (currentFilter === 'stopped') return p.status !== 'running';
+            if (currentFilter === 'proxy') return !!(p.proxy && p.proxy.enabled && p.proxy.host);
+            if (currentFilter === 'authentic') {
+                const d = new Set(p.fingerprint.stealth_disable || []);
+                return ['canvas', 'webgl', 'audio', 'media', 'worker'].every(g => d.has(g));
+            }
+            return true;
+        }
+        function updateBulkBar() {
+            const bar = document.getElementById('bulk-bar');
+            const countEl = document.getElementById('bulk-count');
+            if (selectedIds.size > 0) {
+                bar.classList.remove('hidden');
+                countEl.innerText = `${selectedIds.size} đã chọn`;
+            } else {
+                bar.classList.add('hidden');
+            }
+            const selectAll = document.getElementById('select-all-chk');
+            if (selectAll) selectAll.checked = selectedIds.size > 0;
+        }
+        function clearSelection() {
+            selectedIds.clear();
+            filterProfiles();
+            updateBulkBar();
+        }
+        function selectedArray() { return Array.from(selectedIds); }
+
+        async function bulkStart() {
+            const ids = selectedArray();
+            if (!ids.length) return;
+            showToast(`Đang mở ${ids.length} profile đã chọn...`, 'info');
+            try {
+                const res = await fetch('/api/profiles/start-all', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profile_ids: ids })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok && data.success) {
+                    showToast(data.message, 'success');
+                    pollStartAllQueue();
+                    setTimeout(refreshProfiles, 1500);
+                } else {
+                    const msg = typeof data.detail === 'object' ? (data.detail.message || JSON.stringify(data.detail)) : (data.detail || data.error || 'Lỗi');
+                    showToast(msg, 'error');
+                }
+            } catch (err) { showToast('Lỗi kết nối: ' + err, 'error'); }
+        }
+
+        async function bulkStop() {
+            const ids = selectedArray();
+            if (!ids.length) return;
+            if (!confirm(`Đóng ${ids.length} trình duyệt đã chọn?`)) return;
+            showToast(`Đang đóng ${ids.length} profile...`, 'info');
+            try {
+                const res = await fetch('/api/profiles/stop-all', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profile_ids: ids })
+                });
+                const data = await res.json().catch(() => ({}));
+                showToast(data.success ? 'Đã đóng các profile đã chọn.' : (data.message || 'Một số profile chưa đóng được.'), data.success ? 'success' : 'warning');
+                setTimeout(refreshProfiles, 1200);
+            } catch (err) { showToast('Lỗi kết nối: ' + err, 'error'); }
+        }
+
+        async function bulkResetFp() {
+            const ids = selectedArray();
+            if (!ids.length) return;
+            if (!confirm(`Reset dấu vân tay cho ${ids.length} profile?`)) return;
+            let done = 0;
+            for (const id of ids) {
+                try {
+                    const res = await fetch(`/api/profiles/${id}/reset-fingerprint`, { method: 'POST' });
+                    if (res.ok) done += 1;
+                } catch (e) {}
+            }
+            showToast(`Đã reset FP ${done}/${ids.length} profile.`, 'success');
+            refreshProfiles();
+        }
+
+        async function bulkDelete() {
+            const ids = selectedArray();
+            if (!ids.length) return;
+            if (!confirm(`XÓA VĨNH VIỄN ${ids.length} profile (kèm user_data)? Gõ xác nhận bằng cách bấm OK.`)) return;
+            let done = 0, failed = 0;
+            for (const id of ids) {
+                try {
+                    const res = await fetch(`/api/profiles/${id}`, { method: 'DELETE' });
+                    if (res.ok) { done += 1; selectedIds.delete(id); } else { failed += 1; }
+                } catch (e) { failed += 1; }
+            }
+            showToast(`Đã xóa ${done} profile${failed ? `, ${failed} lỗi (đóng browser trước khi xóa)` : ''}.`, failed ? 'warning' : 'success');
+            refreshProfiles();
+            updateBulkBar();
+        }
+
+        // --- Export / Import ---
+        async function exportProfiles() {
+            try {
+                const res = await fetch('/api/profiles/export', {
+                    headers: { 'x-confirm-export': 'yes' }
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    showToast(err.detail || 'Export thất bại.', 'error');
+                    return;
+                }
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `antidetect-profiles-${new Date().toISOString().slice(0, 10)}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+                showToast('Đã xuất profiles ra JSON (không kèm mật khẩu).', 'success');
+            } catch (err) { showToast('Lỗi export: ' + err, 'error'); }
+        }
+
+        function openImportModal() {
+            document.getElementById('import-text').value = '';
+            document.getElementById('import-result').innerHTML = '';
+            document.getElementById('importModal').classList.remove('hidden');
+            safeCreateIcons();
+        }
+        function closeImportModal() { document.getElementById('importModal').classList.add('hidden'); }
+        async function doImport(source) {
+            let entries = null;
+            if (source === 'file') {
+                const f = document.getElementById('import-file').files[0];
+                if (!f) { showToast('Chưa chọn file.', 'warning'); return; }
+                try { entries = (await f.text()); } catch (e) { showToast('Lỗi đọc file: ' + e, 'error'); return; }
+            } else {
+                entries = document.getElementById('import-text').value;
+            }
+            let payload;
+            try {
+                const parsed = JSON.parse(entries);
+                payload = Array.isArray(parsed) ? { profiles: parsed } : parsed;
+            } catch (e) {
+                showToast('JSON không hợp lệ: ' + e, 'error');
+                return;
+            }
+            if (!payload.profiles || !payload.profiles.length) {
+                showToast('Không có profile nào trong JSON.', 'warning');
+                return;
+            }
+            try {
+                const res = await fetch('/api/profiles/import', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json().catch(() => ({}));
+                const resultEl = document.getElementById('import-result');
+                if (!res.ok) { showToast(data.detail || 'Import thất bại.', 'error'); return; }
+                resultEl.innerHTML = `
+                    <div class="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs">
+                        <div class="text-emerald-400 font-semibold">Đã import ${data.imported_count} profile${data.failed_count ? `, ${data.failed_count} lỗi` : ''}</div>
+                        ${(data.failed || []).map(f => `<div class="text-red-400 mt-1">• ${escapeHtml(f.name || '#' + f.index)}: ${escapeHtml(f.reason || '')}</div>`).join('')}
+                    </div>`;
+                showToast(`Import: ${data.imported_count} thành công${data.failed_count ? ', ' + data.failed_count + ' lỗi' : ''}.`, data.failed_count ? 'warning' : 'success');
+                refreshProfiles();
+            } catch (err) { showToast('Lỗi import: ' + err, 'error'); }
+        }
+
+        // --- Wizard tạo hàng loạt ---
+        function openWizardModal() {
+            document.getElementById('wizard-count').value = 5;
+            document.getElementById('wizard-prefix').value = 'Farm';
+            document.getElementById('wizard-proxies').value = '';
+            document.getElementById('wizard-result').innerHTML = '';
+            document.getElementById('wizardModal').classList.remove('hidden');
+            safeCreateIcons();
+        }
+        function closeWizardModal() { document.getElementById('wizardModal').classList.add('hidden'); }
+        async function doBulkCreate() {
+            const count = parseInt(document.getElementById('wizard-count').value) || 1;
+            const body = {
+                count: Math.max(1, Math.min(50, count)),
+                os: document.getElementById('wizard-os').value,
+                city: document.getElementById('wizard-city').value,
+                stealth_mode: document.getElementById('wizard-mode').value,
+                name_prefix: document.getElementById('wizard-prefix').value || 'Profile',
+                cpu: parseInt(document.getElementById('wizard-cpu').value) || null,
+                proxies: document.getElementById('wizard-proxies').value.split('\n').map(s => s.trim()).filter(Boolean),
+            };
+            const proxyCount = body.proxies.length;
+            if (proxyCount && proxyCount < body.count && !confirm(`${proxyCount} proxy cho ${body.count} profile — ${body.count - proxyCount} profile sẽ direct. Tiếp tục?`)) return;
+            try {
+                const res = await fetch('/api/profiles/bulk-create', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.detail || 'Tạo hàng loạt thất bại.', 'error'); return; }
+                document.getElementById('wizard-result').innerHTML = `
+                    <div class="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs">
+                        <div class="text-emerald-400 font-semibold">Đã tạo ${data.created_count} profile</div>
+                        ${(data.warnings || []).slice(0, 6).map(w => `<div class="text-amber-400 mt-1">• ${escapeHtml(w)}</div>`).join('')}
+                    </div>`;
+                showToast(`Đã tạo ${data.created_count} profile hàng loạt.`, 'success');
+                refreshProfiles();
+            } catch (err) { showToast('Lỗi: ' + err, 'error'); }
+        }
+
+        // --- Lịch tự động ---
+        function openSchedulesModal() {
+            document.getElementById('schedulesModal').classList.remove('hidden');
+            loadSchedules();
+        }
+        function closeSchedulesModal() { document.getElementById('schedulesModal').classList.add('hidden'); }
+        async function loadSchedules() {
+            const listEl = document.getElementById('schedules-list');
+            try {
+                const res = await fetch('/api/schedules');
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { listEl.innerHTML = `<div class="text-xs text-red-400">${escapeHtml(data.detail || 'Lỗi')}</div>`; return; }
+                const rules = data.rules || [];
+                document.getElementById('schedules-meta').innerText = rules.length ? `${rules.length} lịch · tick cuối: ${data.last_tick || '—'}` : 'Chưa có lịch nào';
+                listEl.innerHTML = rules.map(r => `
+                    <div class="flex items-center justify-between bg-slate-900/50 border border-borderBg rounded-xl px-3.5 py-2.5">
+                        <div class="min-w-0">
+                            <div class="text-sm text-slate-200 font-medium">${escapeHtml(r.name)} <span class="text-[10px] text-slate-500 font-mono">${escapeHtml(r.time)}</span></div>
+                            <div class="text-[11px] text-slate-500">${escapeHtml(actionLabel(r.action))} · ${r.profile_ids && r.profile_ids.length ? r.profile_ids.length + ' profile' : 'tất cả'}${r.last_run_date ? ' · chạy: ' + escapeHtml(r.last_run_date) : ''}</div>
+                        </div>
+                        <div class="flex items-center gap-2 shrink-0">
+                            <label class="cursor-pointer"><input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="toggleSchedule('${r.id}', this.checked)" class="accent-emerald-500"></label>
+                            <button onclick="deleteSchedule('${r.id}')" class="p-1 text-slate-400 hover:text-red-400 transition"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+                        </div>
+                    </div>
+                `).join('');
+                safeCreateIcons();
+            } catch (e) {
+                listEl.innerHTML = `<div class="text-xs text-red-400">Lỗi: ${escapeHtml(String(e))}</div>`;
+            }
+        }
+        function actionLabel(a) {
+            return a === 'start_all' ? 'Mở tất cả' : a === 'stop_all' ? 'Đóng tất cả' : 'Sync vị trí theo proxy';
+        }
+        async function createSchedule() {
+            const body = {
+                name: document.getElementById('sched-name').value || '',
+                time: document.getElementById('sched-time').value,
+                action: document.getElementById('sched-action').value,
+                profile_ids: [], enabled: true,
+            };
+            if (!body.time) { showToast('Chọn giờ trước.', 'warning'); return; }
+            try {
+                const res = await fetch('/api/schedules', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.detail || 'Không tạo được lịch.', 'error'); return; }
+                showToast('Đã tạo lịch.', 'success');
+                document.getElementById('sched-time').value = '';
+                loadSchedules();
+            } catch (e) { showToast('Lỗi: ' + e, 'error'); }
+        }
+        async function toggleSchedule(id, enabled) {
+            try {
+                const res = await fetch(`/api/schedules/${id}`, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled })
+                });
+                if (!res.ok) { showToast('Không cập nhật được.', 'error'); loadSchedules(); }
+            } catch (e) { showToast('Lỗi: ' + e, 'error'); }
+        }
+        async function deleteSchedule(id) {
+            if (!confirm('Xóa lịch này?')) return;
+            try {
+                const res = await fetch(`/api/schedules/${id}`, { method: 'DELETE' });
+                if (!res.ok) { showToast('Không xóa được.', 'error'); return; }
+                loadSchedules();
+            } catch (e) { showToast('Lỗi: ' + e, 'error'); }
+        }
+
+        // --- API token dài hạn ---
+        function openTokenModal() {
+            document.getElementById('token-display').classList.add('hidden');
+            document.getElementById('tokenModal').classList.remove('hidden');
+            safeCreateIcons();
+        }
+        function closeTokenModal() { document.getElementById('tokenModal').classList.add('hidden'); }
+        async function rotateToken() {
+            if (!confirm('Tạo API token MỚI? Token cũ sẽ vô hiệu ngay lập tức.')) return;
+            try {
+                const res = await fetch('/api/auth/token/rotate', { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) { showToast(data.detail || 'Không tạo được token.', 'error'); return; }
+                const el = document.getElementById('token-display');
+                el.classList.remove('hidden');
+                el.innerHTML = `
+                    <div class="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                        <div class="text-amber-400 text-xs font-semibold mb-1">⚠ Token chỉ hiển thị MỘT lần — copy ngay:</div>
+                        <div class="font-mono text-xs text-slate-200 break-all select-all">${escapeHtml(data.token)}</div>
+                        <button onclick="navigator.clipboard.writeText('${escapeHtml(data.token)}'); showToast('Đã copy token.', 'success');" class="mt-2 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs transition">Copy</button>
+                    </div>`;
+            } catch (e) { showToast('Lỗi: ' + e, 'error'); }
+        }
+        async function revokeToken() {
+            if (!confirm('Thu hồi API token? Automation đang dùng sẽ mất quyền ngay.')) return;
+            try {
+                const res = await fetch('/api/auth/token', { method: 'DELETE' });
+                const data = await res.json().catch(() => ({}));
+                showToast(data.message || 'Đã thu hồi token.', res.ok ? 'success' : 'error');
+                document.getElementById('token-display').classList.add('hidden');
+            } catch (e) { showToast('Lỗi: ' + e, 'error'); }
+        }
+
+        // --- Fanpage Facebook của profile ---
+        async function openFanpagesModal(id) {
+            const p = currentProfiles.find(item => item.id === id);
+            const name = p ? p.name : id.substring(0, 8);
+            document.getElementById('fanpages-profile-id').value = id;
+            document.getElementById('fanpages-profile-name').innerText = name;
+            document.getElementById('fanpages-list').innerHTML = '';
+            document.getElementById('fanpages-meta').innerText = 'Đang tải...';
+            document.getElementById('fanpagesModal').classList.remove('hidden');
+            safeCreateIcons();
+            await loadFanpages(false);
+        }
+
+        function closeFanpagesModal() {
+            document.getElementById('fanpagesModal').classList.add('hidden');
+        }
+
+        async function refreshFanpages(deep) {
+            await loadFanpages(true, deep);
+        }
+
+        async function loadFanpages(refresh, deep) {
+            const id = document.getElementById('fanpages-profile-id').value;
+            if (!id) return;
+            const listEl = document.getElementById('fanpages-list');
+            const metaEl = document.getElementById('fanpages-meta');
+            if (refresh) metaEl.innerText = deep
+                ? 'Đang quét chi tiết từng fanpage (mỗi trang ~4-8s, vui lòng đợi)...'
+                : 'Đang đọc từ trình duyệt của profile...';
+            try {
+                const qs = refresh ? (deep ? '?refresh=1&deep=1' : '?refresh=1') : '';
+                const res = await fetch(`/api/profiles/${id}/facebook/pages${qs}`);
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    listEl.innerHTML = '';
+                    metaEl.innerText = 'Không tải được danh sách';
+                    showToast(data.detail || 'Không tải được danh sách fanpage.', 'warning');
+                    return;
+                }
+                if (!data.logged_in) {
+                    listEl.innerHTML = '';
+                    metaEl.innerText = 'Chưa đăng nhập Facebook';
+                    showToast(data.detail || 'Profile chưa đăng nhập Facebook.', 'warning');
+                    return;
+                }
+                const pages = data.pages || [];
+                const when = data.synced_at ? new Date(data.synced_at * 1000).toLocaleString('vi-VN') : '';
+                metaEl.innerText = pages.length
+                    ? `${pages.length} fanpage · ${data.source === 'live' ? 'đọc trực tiếp' : 'đã lưu'}${when ? ' · ' + when : ''}`
+                    : (data.detail || 'Chưa có fanpage nào được ghi nhận');
+
+                const ageText = (pg) => {
+                    if (pg.age_days == null) return pg.created_raw ? '—' : '—';
+                    if (pg.age_days >= 365) return `${Math.floor(pg.age_days / 365)} năm ${pg.age_days % 365 >= 30 ? Math.floor((pg.age_days % 365) / 30) + ' tháng' : ''}`.trim();
+                    if (pg.age_days >= 30) return `${Math.floor(pg.age_days / 30)} tháng ${pg.age_days % 30} ngày`;
+                    return `${pg.age_days} ngày`;
+                };
+                const badgeStatus = (pg) => {
+                    if (pg.status === 'active') return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">Đang đăng</span>';
+                    if (pg.status === 'stopped') return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-500/15 text-red-400 border border-red-500/30">Dừng</span>';
+                    if (pg.status === 'unknown') return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-500/15 text-slate-400 border border-slate-500/30">Không rõ</span>';
+                    return '<span class="px-1.5 py-0.5 rounded text-[10px] text-slate-500 border border-slate-600/50" title="Bấm Cập nhật chi tiết để biết trạng thái">Chưa quét</span>';
+                };
+                const badgeReady = (pg) => pg.ready
+                    ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30" title="Đã ngâm đủ 1 tháng tuổi">Sẵn sàng</span>'
+                    : (pg.age_days != null
+                        ? `<span class="px-1.5 py-0.5 rounded text-[10px] text-slate-400 border border-slate-600/50" title="Cần ngâm đủ 30 ngày">Chưa (${pg.age_days}/30 ngày)</span>`
+                        : '');
+
+                listEl.innerHTML = pages.map(pg => `
+                    <div class="bg-slate-900/50 border border-borderBg rounded-xl px-3.5 py-2.5 space-y-1.5">
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="min-w-0 flex items-center gap-2">
+                                <span class="text-sm text-slate-200 font-medium truncate">${escapeHtml(pg.name || '(không tên)')}</span>
+                                ${badgeStatus(pg)}
+                                ${badgeReady(pg)}
+                            </div>
+                            <a href="${escapeHtml(pg.url || '#')}" target="_blank" rel="noopener noreferrer"
+                               class="shrink-0 px-2.5 py-1 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white rounded-lg text-xs font-medium transition">Mở</a>
+                        </div>
+                        <div class="flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-slate-500">
+                            <span>ID: ${escapeHtml(pg.id || '—')}</span>
+                            <span title="${escapeHtml(pg.created_raw || '')}">Tuổi: ${pg.created_date ? escapeHtml(ageText(pg)) : '—'}</span>
+                            <span>Bài cuối: ${escapeHtml(pg.last_post_raw || (pg.last_post_days != null ? pg.last_post_days + ' ngày' : '—'))}</span>
+                        </div>
+                    </div>
+                `).join('');
+                safeCreateIcons();
+                if (refresh) {
+                    showToast(deep ? 'Đã cập nhật chi tiết fanpage.' : `Đã làm mới: ${pages.length} fanpage.`, 'success');
+                }
+            } catch (e) {
+                metaEl.innerText = 'Lỗi kết nối máy chủ';
+                showToast('Lỗi kết nối: ' + e, 'error');
+            }
         }
 
         async function exportCookiesJson() {
@@ -2035,6 +3007,7 @@
             document.getElementById('edit-profile-id').value = p.id;
             document.getElementById('edit-name').value = p.name;
             document.getElementById('edit-notes').value = p.notes || '';
+            document.getElementById('edit-tags').value = (p.tags || []).join(', ');
 
             // Proxy
             const proxy = p.proxy || {};
@@ -2082,6 +3055,12 @@
             document.getElementById('edit-fp-h').value = fp.screen_height || 1080;
 
             document.getElementById('edit-fp-canvas').value = fp.canvas_noise_seed || 12345;
+            const disabledGroups = new Set(fp.stealth_disable || []);
+            document.getElementById('edit-stealth-canvas').checked = disabledGroups.has('canvas');
+            document.getElementById('edit-stealth-webgl').checked = disabledGroups.has('webgl');
+            document.getElementById('edit-stealth-audio').checked = disabledGroups.has('audio');
+            document.getElementById('edit-stealth-media').checked = disabledGroups.has('media');
+            document.getElementById('edit-stealth-worker').checked = disabledGroups.has('worker');
             document.getElementById('edit-fp-cores').value = fp.hardware_concurrency || 8;
             document.getElementById('edit-fp-ram').value = hostDeviceMemory();
 
@@ -2219,14 +3198,26 @@
                 browser_version: (document.getElementById('edit-fp-ua').value.match(/Chrome\/([\d.]+)/) || [])[1] || origFp.browser_version || (systemOptions && systemOptions.browser_version ? systemOptions.browser_version : "155.0.8059.85"),
                 latitude: parseFloat(document.getElementById('edit-fp-lat').value) || origFp.latitude || 21.0285,
                 longitude: parseFloat(document.getElementById('edit-fp-lon').value) || origFp.longitude || 105.8542,
-                webrtc_mode: origFp.webrtc_mode || "disable_non_proxied"
+                webrtc_mode: origFp.webrtc_mode || "disable_non_proxied",
+                stealth_disable: [
+                    document.getElementById('edit-stealth-canvas').checked ? 'canvas' : null,
+                    document.getElementById('edit-stealth-webgl').checked ? 'webgl' : null,
+                    document.getElementById('edit-stealth-audio').checked ? 'audio' : null,
+                    document.getElementById('edit-stealth-media').checked ? 'media' : null,
+                    document.getElementById('edit-stealth-worker').checked ? 'worker' : null
+                ].filter(Boolean)
             };
+
+            const tags = document.getElementById('edit-tags').value
+                .split(',').map(t => t.trim()).filter(Boolean);
 
             const payload = {
                 name: name,
                 notes: notes,
+                tags: tags,
                 proxy: proxy,
-                fingerprint: fp
+                fingerprint: fp,
+                browser_path: (editingProfile && editingProfile.browser_path) || null
             };
 
             try {
@@ -2247,6 +3238,9 @@
                 showToast('Lỗi kết nối: ' + err, 'error');
             }
         }
+
+        // Khởi tạo: filter chip mặc định + render lần đầu
+        setFilter('all');
     </script>
 </body>
 </html>

@@ -25,6 +25,7 @@ if sys.platform == "win32":
         pass
 
 import web.app as app_module
+from antidetect.fingerprint import get_host_device_memory
 
 app = app_module.app
 
@@ -59,6 +60,8 @@ def test_api_routes():
     assert r.status_code == 200
     profiles = r.json()
     assert isinstance(profiles, list)
+    # Field điều khiển chế độ stealth phải được expose cho UI/automation.
+    assert all("stealth_disable" in p["fingerprint"] for p in profiles)
 
     # 4. Create profile
     r = client.post(
@@ -172,13 +175,33 @@ def test_start_all_api_defaults_to_eight_and_reports_queue():
             assert data["success"] is True
             assert data["total"] == 10
             assert data["starting_count"] == 10
-            assert data["max_concurrent"] == 8
+            # Mặc định giờ là auto theo RAM máy (4/6/8), không cố định 8.
+            expected = app_module._auto_max_concurrent()
+            assert data["max_concurrent"] == expected
             assert called.wait(3), "start-all background thread did not call launch_all"
-            assert captured["max_concurrent"] == 8
+            assert captured["max_concurrent"] == expected
             assert captured["open_url"] is None
+
+            # Client vẫn override được bằng query param.
+            captured.clear()
+            called.clear()
+            r2 = client.post("/api/profiles/start-all?max_concurrent=3")
+            if r2.status_code == 200:
+                # job trước có thể còn "running" — nếu 409 thì bỏ qua phần này.
+                assert called.wait(3)
+                assert captured["max_concurrent"] == 3
     finally:
         for profile in profiles:
             app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_auto_max_concurrent_follows_host_ram():
+    """Bucket độsong song theo RAM: 8GB→4, 16GB→6, ≥32GB→8."""
+    assert app_module._auto_max_concurrent() in (4, 6, 8)
+    # Sinh theo đúng bucket của RAM host.
+    ram = get_host_device_memory()
+    expected = 4 if ram <= 8 else (6 if ram <= 16 else 8)
+    assert app_module._auto_max_concurrent() == expected
 
 
 def test_proxy_password_is_redacted_by_api():
@@ -369,6 +392,138 @@ def test_p2_features():
         assert "webrtcMode" in script
     finally:
         app_module.profile_manager.delete_profile(p.id)
+
+
+def test_update_profile_expected_revision():
+    """Opt-in strict concurrency: stale revision phải bị từ chối 409."""
+    login()
+    r = client.post("/api/profiles", json={"name": "Revision Test", "os": "windows"})
+    assert r.status_code == 200
+    p = r.json()
+    try:
+        # Revision đúng → 200.
+        r = client.put(
+            f"/api/profiles/{p['id']}",
+            json={"name": "Rev OK", "expected_revision": p["revision"]},
+        )
+        assert r.status_code == 200
+        assert r.json()["name"] == "Rev OK"
+        new_rev = r.json()["revision"]
+
+        # Revision cũ (stale) → 409, không ghi đè.
+        r = client.put(
+            f"/api/profiles/{p['id']}",
+            json={"name": "Rev Stale", "expected_revision": p["revision"]},
+        )
+        assert r.status_code == 409
+
+        # Không truyền expected_revision (mặc định) → vẫn ghi bình thường.
+        r = client.put(
+            f"/api/profiles/{p['id']}",
+            json={"name": "Rev NoCheck"},
+        )
+        assert r.status_code == 200
+        assert r.json()["revision"] == new_rev + 1
+    finally:
+        client.delete(f"/api/profiles/{p['id']}")
+
+
+def test_delete_missing_profile_returns_404():
+    login()
+    r = client.delete("/api/profiles/does-not-exist-404")
+    assert r.status_code == 404
+
+
+def test_facebook_pages_endpoint(monkeypatch):
+    """Fanpage listing: cache khi idle, live qua launcher khi refresh."""
+    login()
+    r = client.post("/api/profiles", json={"name": "FB Pages Test", "os": "windows"})
+    assert r.status_code == 200
+    p = r.json()
+    try:
+        # 1. Idle + không cache → trả cache rỗng kèm gợi ý, không lỗi.
+        r = client.get(f"/api/profiles/{p['id']}/facebook/pages")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["source"] == "cache" and body["pages"] == []
+        assert body["detail"]
+
+        # 2. Idle + refresh → 409 (cần profile đang chạy).
+        r = client.get(f"/api/profiles/{p['id']}/facebook/pages?refresh=1")
+        assert r.status_code == 409
+
+        # 3. Running + refresh → live qua launcher, kết quả lưu vào profile.
+        monkeypatch.setattr(
+            app_module.launcher, "is_running", lambda pid: True, raising=False
+        )
+        fake_pages = [
+            {"name": "Cửa Hàng ABC", "url": "https://www.facebook.com/cuahangabc", "id": "1234567890"},
+            {"name": "Nhà Sách XYZ", "url": "https://www.facebook.com/pages/Nha-Sach-XYZ/9876543210", "id": "9876543210"},
+        ]
+        monkeypatch.setattr(
+            app_module.launcher,
+            "fetch_facebook_pages",
+            lambda pid, timeout=40.0, deep=False: {"logged_in": True, "pages": fake_pages},
+            raising=False,
+        )
+        r = client.get(f"/api/profiles/{p['id']}/facebook/pages?refresh=1")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] and body["source"] == "live"
+        # Endpoint enrich thêm status/ready/age_days cho từng page.
+        for orig, got in zip(fake_pages, body["pages"]):
+            assert all(got.get(k) == v for k, v in orig.items())
+            assert {"status", "ready", "age_days"} <= set(got)
+        assert body["synced_at"] > 0
+
+        # 4. Lần gọi sau không refresh → cache đã lưu trong profile.
+        monkeypatch.setattr(
+            app_module.launcher, "is_running", lambda pid: False, raising=False
+        )
+        r = client.get(f"/api/profiles/{p['id']}/facebook/pages")
+        body = r.json()
+        assert body["source"] == "cache"
+        for orig, got in zip(fake_pages, body["pages"]):
+            assert all(got.get(k) == v for k, v in orig.items())
+
+        # 5. Chưa đăng nhập FB → logged_in=false + hướng dẫn, không coi là lỗi server.
+        monkeypatch.setattr(
+            app_module.launcher, "is_running", lambda pid: True, raising=False
+        )
+        monkeypatch.setattr(
+            app_module.launcher,
+            "fetch_facebook_pages",
+            lambda pid, timeout=40.0, deep=False: {"logged_in": False, "pages": []},
+            raising=False,
+        )
+        r = client.get(f"/api/profiles/{p['id']}/facebook/pages?refresh=1")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["logged_in"] is False and body["pages"] == []
+        assert "đăng nhập" in body["detail"]
+    finally:
+        client.delete(f"/api/profiles/{p['id']}")
+
+
+def test_facebook_pages_ui_and_scraper_present():
+    html = open(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "templates", "index.html"),
+        encoding="utf-8",
+    ).read()
+    assert "fanpagesModal" in html
+    assert "openFanpagesModal" in html
+    assert "refreshFanpages" in html
+
+    src = open(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "antidetect", "launcher.py"),
+        encoding="utf-8",
+    ).read()
+    # Scrape đọc DOM bookmarks/pages; tab tool mở phải được đóng trong finally.
+    assert "_FB_SCRAPE_JS" in src
+    assert "bookmarks/pages" in src
+    assert "/json/close/" in src
+    # Tab được mở bằng session của chính profile (qua CDP của nó).
+    assert "def fetch_facebook_pages" in src
 
 
 if __name__ == "__main__":
