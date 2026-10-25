@@ -23,14 +23,23 @@ class BrowserRuntimeStore:
         # process kia vừa ghi. File lock riêng + re-load trước khi mutate.
         self._ipc_lock = InterProcessLock(path + ".lock", timeout=5.0)
         self._states: Dict[str, Dict[str, Any]] = {}
+        self._disk_signature: Optional[tuple] = None
         self._load()
+
+    def _stat_signature(self) -> Optional[tuple]:
+        try:
+            stat = os.stat(self.path)
+            return (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return None
 
     def _load(self) -> None:
         with self._lock:
+            self._disk_signature = self._stat_signature()
+            if self._disk_signature is None:
+                self._states = {}
+                return
             try:
-                if not os.path.exists(self.path):
-                    self._states = {}
-                    return
                 with open(self.path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if not isinstance(data, dict):
@@ -52,6 +61,17 @@ class BrowserRuntimeStore:
                 # starting. It only loses recovery metadata, not profile data.
                 self._states = {}
 
+    def _refresh(self) -> None:
+        """Pick up records written by another process (server <-> CLI).
+
+        Long-lived processes previously kept the snapshot from startup, so a
+        browser launched by the CLI stayed invisible to the dashboard and
+        stop_all skipped it.
+        """
+        with self._lock:
+            if self._stat_signature() != self._disk_signature:
+                self._load()
+
     def _write(self) -> None:
         directory = os.path.dirname(os.path.abspath(self.path))
         os.makedirs(directory, exist_ok=True)
@@ -62,6 +82,7 @@ class BrowserRuntimeStore:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(temp, self.path)
+            self._disk_signature = self._stat_signature()
         finally:
             if os.path.exists(temp):
                 try:
@@ -71,10 +92,12 @@ class BrowserRuntimeStore:
 
     def all(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
+            self._refresh()
             return {k: dict(v) for k, v in self._states.items()}
 
     def get(self, profile_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
+            self._refresh()
             record = self._states.get(str(profile_id))
             return dict(record) if record else None
 

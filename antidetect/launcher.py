@@ -543,6 +543,23 @@ class BrowserLauncher:
             return {"state": "absent", "port": None, "created": None}
         return read_browser_identity(pid, user_data_dir or "")
 
+    def _identity_for_stop(self, pid, user_data_dir, attempts: int = 3):
+        """Retry transient unknown identity before refusing to send a kill.
+
+        CIM/PowerShell can time out while many browsers are starting; treating
+        one failed query as a permanent conflict made stop/stop_all return 409
+        for a perfectly healthy process. Ownership is still required — this
+        only retries the query, it never kills blind.
+        """
+        identity = {"state": "unknown", "port": None, "created": None}
+        for attempt in range(max(1, attempts)):
+            identity = self._identity_for(pid, user_data_dir)
+            if identity["state"] != "unknown":
+                return identity
+            if attempt + 1 < attempts:
+                time.sleep(0.2)
+        return identity
+
     def _clear_process(self, profile_id):
         record = self._runtime_store.get(profile_id) or {}
         requested = self._requested_ports.pop(profile_id, None) or record.get("requested_port")
@@ -1962,7 +1979,7 @@ class BrowserLauncher:
             )
             identity = None
             if not proc:
-                identity = self._identity_for(pid, user_data_dir)
+                identity = self._identity_for_stop(pid, user_data_dir)
                 if identity["state"] in ("absent", "mismatch"):
                     self._clear_process(profile_id)
                     return {"success": True, "message": "Phiên cũ đã kết thúc"}
@@ -1977,9 +1994,11 @@ class BrowserLauncher:
                     last_error = ""
                     for force in (False, True):
                         if not proc:
-                            current = self._identity_for(pid, user_data_dir)
+                            current = self._identity_for_stop(pid, user_data_dir)
                             if current["state"] in ("absent", "mismatch"):
                                 break
+                            if current["state"] == "unknown":
+                                return {"success": False, "error": "Chưa xác minh lại được tiến trình; giữ nguyên trạng thái để kiểm tra."}
                             if current["state"] != "owned" or current.get("created") != identity.get("created"):
                                 return {"success": False, "error": "Tiến trình đã thay đổi; giữ nguyên trạng thái để kiểm tra."}
                         args = ["taskkill", "/PID", str(pid), "/T"]
@@ -2033,10 +2052,15 @@ class BrowserLauncher:
             return {"success": True, "message": "Đã xác nhận trình duyệt dừng"}
 
     def stop_all(self, profile_ids: Optional[List[str]] = None):
+        """Dừng profile đang chạy. ``None`` = toàn bộ; ``[]`` = không dừng ai.
+
+        Phân biệt danh sách rỗng với None để API consumer gửi nhầm selection
+        rỗng không vô tình đóng cả farm.
+        """
         ids = set(self.active_processes)
         ids.update(self._runtime_store.all().keys())
         ids.update(p.id for p in self.manager.list_profiles() if p.pid or p.status == "running")
-        if profile_ids:
+        if profile_ids is not None:
             wanted = set(profile_ids)
             ids &= wanted
         results = {pid: self.stop(pid) for pid in ids}
@@ -2178,7 +2202,11 @@ class BrowserLauncher:
                 info = details.get(page.get("url")) or {}
                 page["created_raw"] = info.get("created_raw")
                 page["last_post_raw"] = info.get("last_post_raw")
-                page["detail_synced"] = True
+                # Entry rỗng vẫn có key "times"/"created_raw" nên bool(info)
+                # luôn true; chỉ đánh dấu đã quét khi thực sự đọc được dữ liệu.
+                page["detail_synced"] = bool(
+                    info.get("times") or info.get("created_raw")
+                )
                 created = _parse_fb_created_date(page.get("created_raw"))
                 if created:
                     page["created_date"] = created.isoformat()
@@ -2464,6 +2492,7 @@ class BrowserLauncher:
         max_concurrent: int = 8,
         cancel_event: Optional[threading.Event] = None,
         progress_callback: Optional[Any] = None,
+        profile_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Start every stopped profile, running launches in parallel batches.
 
@@ -2471,10 +2500,17 @@ class BrowserLauncher:
         mở xong vẫn được giữ mở. Phiên bản cũ chờ "slot trống" theo số browser
         đang sống nên bị kẹt vô hạn khi số profile lớn hơn limit (start-all
         không đóng browser nào).
+
+        ``profile_ids`` giới hạn phạm vi launch (multi-select trên dashboard,
+        lịch tự động). ``None`` = mọi profile; danh sách rỗng = không launch
+        profile nào (khác hành vi cũ để tránh selection rỗng mở cả farm).
         """
         import concurrent.futures
 
         profiles = self.manager.list_profiles()
+        if profile_ids is not None:
+            wanted = set(profile_ids)
+            profiles = [p for p in profiles if p.id in wanted]
         if max_concurrent and int(max_concurrent) > 0:
             limit = max(1, int(max_concurrent))
         else:

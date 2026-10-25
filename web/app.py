@@ -124,14 +124,27 @@ def _profiles_with_status():
     return runtime_profiles
 
 
+def _worker_pool(max_workers: int = 64):
+    """Default executor thật cho asyncio.to_thread.
+
+    anyio.to_thread limiter không điều khiển asyncio.to_thread; muốn batch
+    start-all (~20 lệnh handshake CDP 10-15s) không chiếm hết thread mặc định
+    của loop thì phải set_default_executor.
+    """
+    import concurrent.futures
+
+    return concurrent.futures.ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="ad-worker"
+    )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # Quy mô ~20 profile: mỗi lệnh start giữ một worker thread suốt handshake
-    # CDP (~10-15s). Pool mặc định 40 thread của anyio khiến 20 start song song
-    # làm các lệnh stop/list xếp hàng ngay sau đó — nâng lên 64.
+    # CDP (~10-15s). Pool mặc định của loop chỉ có min(32, cpu+4) thread, nên
+    # stop/list gửi ngay sau batch start sẽ xếp hàng — nâng lên 64.
     try:
-        import anyio.to_thread
-        anyio.to_thread.current_default_thread_limiter().total_tokens = 64
+        asyncio.get_running_loop().set_default_executor(_worker_pool())
     except Exception:
         pass
     # run.py needs the per-start key to open the UI with /#key. The record is
@@ -155,7 +168,7 @@ async def lifespan(_app: FastAPI):
 
         _schedule_store = ScheduleStore(os.path.join(DATA_DIR, "schedules.json"))
         _scheduler = Scheduler(_schedule_store, callbacks={
-            "start_all": launcher.launch_all,
+            "start_all": _scheduler_start_all,
             "stop_all": launcher.stop_all,
             "sync_location_proxy": _scheduler_sync_all_locations,
         })
@@ -247,34 +260,14 @@ def authorized(request):
     return False
 
 
-def _profiles_with_status():
-    """List profiles và sync trạng thái running; chạy trong thread.
-
-    is_running có thể spawn PowerShell (block tới 5s/lần) — gọi trực tiếp trên
-    event loop sau khi restart server với nhiều browser đang mở sẽ đóng băng
-    toàn bộ API (kể cả /health, /stop).
-    """
-    profiles = profile_manager.list_profiles()
-    for p in profiles:
-        if launcher.is_running(p.id):
-            p.status = "running"
-            p.port = launcher.active_ports.get(p.id)
-        else:
-            p.status = "stopped"
-            p.port = None
-    return profiles
-
-
 # Dashboard và API dùng cùng origin; không bật CORS cho các cổng localhost khác.
 @app.middleware("http")
 async def local_origin_check_middleware(request: Request, call_next):
     if request.url.hostname not in ("localhost", "127.0.0.1"):
         return JSONResponse(status_code=403, content={"error": "Host không hợp lệ."})
-    if request.url.path.startswith(("/api/", "/auth/")):
+    path = request.url.path
+    if path.startswith(("/api/", "/auth/")):
         from urllib.parse import urlparse
-
-        if request.url.hostname not in ("localhost", "127.0.0.1"):
-            return JSONResponse(status_code=403, content={"error": "API chỉ nhận kết nối loopback."})
 
         origin = request.headers.get("origin")
         referer = request.headers.get("referer")
@@ -296,23 +289,51 @@ async def local_origin_check_middleware(request: Request, call_next):
                 return JSONResponse(status_code=403, content={"error": "Referer không khớp dashboard."})
         elif sec_fetch_site in ("cross-site", "same-site"):
             return JSONResponse(status_code=403, content={"error": "Request trình duyệt không có origin hợp lệ."})
-        if request.url.path.startswith('/api/') and not authorized(request):
-            return JSONResponse(status_code=401, content={"detail": "Phiên truy cập hết hạn. Hãy mở lại ứng dụng từ shortcut."})
+    # /docs, /redoc và /openapi.json phơi toàn bộ API surface; yêu cầu cùng
+    # phiên hợp lệ như /api/ thay vì để mở trên localhost.
+    needs_auth = path.startswith('/api/') or path in (
+        '/docs', '/redoc', '/openapi.json'
+    ) or path.startswith(('/docs/', '/redoc/'))
+    if needs_auth and not authorized(request):
+        return JSONResponse(status_code=401, content={"detail": "Phiên truy cập hết hạn. Hãy mở lại ứng dụng từ shortcut."})
     response = await call_next(request)
     response.headers['Cache-Control'] = 'no-store'
     response.headers['Referrer-Policy'] = 'no-referrer'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
-    # P2-04: Content Security Policy chống XSS và script injection
-    response.headers['Content-Security-Policy'] = (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "font-src 'self' data:; "
-        "img-src 'self' data: https:; "
-        "connect-src 'self' https:; "
-        "frame-ancestors 'none';"
-    )
+    # P2-04: Content Security Policy chống XSS và script injection.
+    # 'unsafe-inline' còn cần vì dashboard dùng inline handler/script; các
+    # directive dưới đây chặn plugin, base tag và form gửi ra ngoài.
+    # Swagger UI/ReDoc mặc định tải bundle từ jsdelivr và font từ Google
+    # Fonts; chỉ nới CSP trên đúng trang docs (đã yêu cầu phiên), dashboard
+    # vẫn giữ CSP siết.
+    if path in ('/docs', '/redoc') or path.startswith(('/docs/', '/redoc/')):
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net "
+            "https://fonts.googleapis.com; "
+            "font-src 'self' data: https://fonts.gstatic.com; "
+            "img-src 'self' data: https:; "
+            "connect-src 'self' https:; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none';"
+        )
+    else:
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "font-src 'self' data:; "
+            "img-src 'self' data: https:; "
+            "connect-src 'self' https:; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none';"
+        )
     return response
 
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
@@ -408,8 +429,12 @@ async def login(request: Request):
         if token.startswith("otc_"):
             # P0-06: Xác thực mã dùng một lần và tiêu hủy ngay
             is_valid = consume_unlock_code(token)
-        elif secrets.compare_digest(token, app.state.access_key):
-            # Cho phép access_key cố định qua API trực tiếp hoặc test suite
+        elif secrets.compare_digest(
+            token.encode('utf-8', 'replace'),
+            app.state.access_key.encode('utf-8', 'replace'),
+        ):
+            # Cho phép access_key cố định qua API trực tiếp hoặc test suite.
+            # So sánh trên bytes để input non-ASCII trả 401 thay vì TypeError 500.
             is_valid = True
 
     if not is_valid:
@@ -510,45 +535,57 @@ async def start_all_profiles(
     max_concurrent = max(0, int(max_concurrent or 0))
 
     global _active_start_all_job, _start_all_cancel_event
+    body_ids = body.profile_ids if body is not None else None
+    if body_ids is not None and not body_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Danh sách profile được chọn trống. Bỏ profile_ids để chạy toàn bộ.",
+        )
     profiles = await asyncio.to_thread(_profiles_with_status)
-    selected_ids = set(body.profile_ids) if body and body.profile_ids else None
-    if selected_ids:
+    selected_ids = set(body_ids) if body_ids is not None else None
+    if selected_ids is not None:
         profiles = [p for p in profiles if p.id in selected_ids]
         if not profiles:
             raise HTTPException(status_code=404, detail="Không profile nào trong danh sách chọn tồn tại.")
-    with _start_all_lock:
-        if _active_start_all_job is not None and _active_start_all_job.get("status") == "running":
-            raise HTTPException(
-                status_code=409,
-                detail=f"Đang có tác vụ Start-All ({_active_start_all_job.get('job_id')}) đang xử lý. Hãy đợi hoặc hủy tác vụ hiện tại."
-            )
-        to_start = [p for p in profiles if p.status != "running"]
-        job_id = str(uuid.uuid4())
-        cancel_event = threading.Event()
-        _start_all_cancel_event = cancel_event
-        _active_start_all_job = {
-            "job_id": job_id,
-            "status": "running",
-            "total": len(profiles),
-            "starting_count": len(to_start),
-            "completed_count": 0,
-            "failed_count": 0,
-            "max_concurrent": max_concurrent,
-            "results": [],
-            "start_time": time.time(),
-        }
+
+    # Lock order: _bulk_launch_lock -> _start_all_lock. The bulk thread already
+    # holds the bulk lock for its whole lifetime before touching job state, so
+    # acquiring in this order cannot deadlock. Failing to acquire it means
+    # another bulk launch is alive, not merely a stale job record.
+    if not _bulk_launch_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="Một tác vụ Start-All khác đang chạy. Hãy đợi hoặc hủy tác vụ hiện tại."
+        )
+    try:
+        with _start_all_lock:
+            if _active_start_all_job is not None and _active_start_all_job.get("status") in ("running", "cancelling"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Đang có tác vụ Start-All ({_active_start_all_job.get('job_id')}) đang xử lý. Hãy đợi hoặc hủy tác vụ hiện tại."
+                )
+            to_start = [p for p in profiles if p.status != "running"]
+            job_id = str(uuid.uuid4())
+            cancel_event = threading.Event()
+            _start_all_cancel_event = cancel_event
+            _active_start_all_job = {
+                "job_id": job_id,
+                "status": "running",
+                "total": len(profiles),
+                "starting_count": len(to_start),
+                "completed_count": 0,
+                "failed_count": 0,
+                "max_concurrent": max_concurrent,
+                "results": [],
+                "start_time": time.time(),
+            }
+    except BaseException:
+        _bulk_launch_lock.release()
+        raise
 
     def run_bulk():
-        if not _bulk_launch_lock.acquire(blocking=False):
-            return  # Đã có luồng khác đang chạy, bỏ qua
-        def on_progress(p_id, res):
-            with _start_all_lock:
-                if _active_start_all_job and _active_start_all_job.get("job_id") == job_id:
-                    if res.get("success"):
-                        _active_start_all_job["completed_count"] += 1
-                    else:
-                        _active_start_all_job["failed_count"] += 1
-                    _active_start_all_job["results"].append({"profile_id": p_id, "result": res})
+        status = "completed"
+        error = None
         try:
             launcher.launch_all(
                 delay=0.8,
@@ -556,15 +593,41 @@ async def start_all_profiles(
                 max_concurrent=max_concurrent,
                 cancel_event=cancel_event,
                 progress_callback=on_progress,
+                profile_ids=list(selected_ids) if selected_ids is not None else None,
             )
+            if cancel_event.is_set():
+                status = "cancelled"
+        except Exception as exc:
+            status = "failed"
+            error = str(exc)[:500]
         finally:
             with _start_all_lock:
                 if _active_start_all_job and _active_start_all_job.get("job_id") == job_id:
-                    _active_start_all_job["status"] = "cancelled" if cancel_event.is_set() else "completed"
+                    _active_start_all_job["status"] = status
                     _active_start_all_job["end_time"] = time.time()
+                    if error:
+                        _active_start_all_job["error"] = error
             _bulk_launch_lock.release()
 
-    threading.Thread(target=run_bulk, daemon=True).start()
+    def on_progress(p_id, res):
+        with _start_all_lock:
+            if _active_start_all_job and _active_start_all_job.get("job_id") == job_id:
+                if res.get("success"):
+                    _active_start_all_job["completed_count"] += 1
+                else:
+                    _active_start_all_job["failed_count"] += 1
+                _active_start_all_job["results"].append({"profile_id": p_id, "result": res})
+
+    try:
+        threading.Thread(target=run_bulk, daemon=True).start()
+    except Exception as exc:
+        with _start_all_lock:
+            if _active_start_all_job and _active_start_all_job.get("job_id") == job_id:
+                _active_start_all_job["status"] = "failed"
+                _active_start_all_job["error"] = str(exc)[:500]
+                _active_start_all_job["end_time"] = time.time()
+        _bulk_launch_lock.release()
+        raise HTTPException(status_code=500, detail="Không khởi động được luồng Start-All.") from exc
 
     limit_label = (
         "không giới hạn" if max_concurrent <= 0 else f"tối đa {max_concurrent}"
@@ -586,7 +649,7 @@ async def get_start_all_status():
         if not _active_start_all_job:
             return {"active": False, "job": None}
         return {
-            "active": _active_start_all_job.get("status") == "running",
+            "active": _active_start_all_job.get("status") in ("running", "cancelling"),
             "job": dict(_active_start_all_job)
         }
 
@@ -610,6 +673,11 @@ class StopAllBody(BaseModel):
 @app.post("/api/profiles/stop-all")
 async def stop_all_profiles(body: Optional[StopAllBody] = None):
     ids = body.profile_ids if body else None
+    if ids is not None and not ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Danh sách profile được chọn trống. Bỏ profile_ids để dừng toàn bộ.",
+        )
     return await asyncio.to_thread(launcher.stop_all, ids)
 
 
@@ -857,6 +925,15 @@ def _apply_geo_to_profile(p, geo: dict) -> dict:
     return changes
 
 
+def _scheduler_start_all(profile_ids=None):
+    """Callback scheduler: Scheduler.run gọi cb(ids) positionally.
+
+    Không truyền thẳng launcher.launch_all vì tham số đầu của nó là ``delay``
+    (list ID sẽ bị hiểu thành delay) và sẽ raise TypeError.
+    """
+    return launcher.launch_all(delay=0.8, profile_ids=profile_ids)
+
+
 def _scheduler_sync_all_locations(profile_ids=None):
     """Callback scheduler (sync, chạy trong thread scheduler)."""
     profiles = profile_manager.list_profiles()
@@ -1056,6 +1133,14 @@ class ScheduleCreateRequest(BaseModel):
     enabled: bool = True
 
 
+class ScheduleUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    time: Optional[str] = None
+    action: Optional[str] = None
+    profile_ids: Optional[List[str]] = None
+    enabled: Optional[bool] = None
+
+
 @app.get("/api/schedules")
 async def list_schedules():
     if _schedule_store is None:
@@ -1077,13 +1162,11 @@ async def create_schedule(req: ScheduleCreateRequest):
 
 
 @app.put("/api/schedules/{rule_id}")
-async def update_schedule(rule_id: str, req: ScheduleCreateRequest):
+async def update_schedule(rule_id: str, req: ScheduleUpdateRequest):
     if _schedule_store is None:
         raise HTTPException(status_code=503, detail="Scheduler chưa khởi động")
     try:
-        rule = _schedule_store.update(
-            rule_id, name=req.name, time=req.time, action=req.action,
-            profile_ids=req.profile_ids, enabled=req.enabled)
+        rule = _schedule_store.update(rule_id, **req.model_dump(exclude_unset=True))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if rule is None:
@@ -1212,9 +1295,46 @@ async def import_profile_cookies(profile_id: str, req: ImportCookiesRequest):
     }
 
 
+def _sanitize_facebook_pages(raw: Any) -> List[Dict[str, Any]]:
+    """Chỉ giữ fanpage có URL http(s) tuyệt đối.
+
+    URL này được render thẳng thành href trên dashboard, nên loại bỏ
+    javascript:/data:/file: từ cache hoặc file import (chống stored XSS cục bộ).
+    Entry sai kiểu hoặc URL không hợp lệ bị bỏ qua thay vì làm hỏng cả danh sách.
+    """
+    from urllib.parse import urlparse
+
+    pages: List[Dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return pages
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            continue
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            continue
+        item = dict(entry)
+        item["url"] = url
+        pages.append(item)
+    return pages
+
+
+def _enrich_facebook_pages(raw: Any) -> List[Dict[str, Any]]:
+    from antidetect.launcher import classify_facebook_page
+
+    pages = _sanitize_facebook_pages(raw)
+    return [{**entry, **classify_facebook_page(entry)} for entry in pages]
+
+
 @app.get("/api/profiles/{profile_id}/facebook/pages")
 async def get_facebook_pages(
-    profile_id: str, refresh: bool = False, deep: bool = False
+    profile_id: str, refresh: bool = False, deep: bool = False, force: bool = False
 ):
     """Liệt kê fanpage Facebook profile này sở hữu/quản lý.
 
@@ -1223,6 +1343,10 @@ async def get_facebook_pages(
     ngày tạo (trang about), bài đăng gần nhất (feed) → trạng thái
     đang đăng/dừng (ngưỡng 7 ngày) và "sẵn sàng" (tuổi ≥ 30 ngày).
     Mỗi page tốn ~4-8s khi deep — với 20 page mất ~2-3 phút.
+
+    Kết quả live rỗng không ghi đè cache đang có (Facebook đổi DOM có thể
+    trả 0 page dù tài khoản vẫn có fanpage); truyền ``force=1`` để chấp nhận
+    danh sách rỗng và xóa cache.
     """
     p = profile_manager.get_profile(profile_id)
     if not p:
@@ -1252,14 +1376,23 @@ async def get_facebook_pages(
                 "source": "live",
                 "detail": "Profile chưa đăng nhập Facebook. Hãy mở profile, đăng nhập rồi thử lại.",
             }
-        pages = data.get("pages") or []
-        # Enrich nhất quán: kể cả khi fetch không gắn (dữ liệu cũ/mock),
-        # trạng thái vẫn được tính theo quy tắc hiện tại trước khi lưu/hiển thị.
-        from antidetect.launcher import classify_facebook_page
-
-        pages = [
-            {**entry, **classify_facebook_page(entry)} for entry in pages
-        ]
+        pages = _enrich_facebook_pages(data.get("pages") or [])
+        cached = _enrich_facebook_pages(p.facebook_pages)
+        if not pages and cached and not force:
+            # Giữ cache cũ: 0 page từ một tab vừa mở thường là dấu hiệu
+            # layout Facebook đổi/trang chưa render xong, không phải mất hết page.
+            return {
+                "success": True,
+                "logged_in": True,
+                "pages": cached,
+                "source": "cache",
+                "stale": True,
+                "synced_at": p.facebook_pages_synced_at,
+                "detail": (
+                    "Facebook trả về 0 fanpage nên đã giữ dữ liệu cũ. "
+                    "Nếu tài khoản thực sự không còn fanpage, gọi lại với force=1."
+                ),
+            }
         p.facebook_pages = pages
         p.facebook_pages_synced_at = int(time.time())
         updated = profile_manager.update_profile(p)
@@ -1270,24 +1403,20 @@ async def get_facebook_pages(
             "logged_in": True,
             "pages": pages,
             "source": "live",
+            "stale": False,
             "synced_at": p.facebook_pages_synced_at,
         }
 
     # Cache: tính lại trạng thái runtime (không lưu) để phản ánh quy tắc mới.
-    from antidetect.launcher import classify_facebook_page
-
-    enriched = []
-    for entry in p.facebook_pages:
-        item = dict(entry)
-        item.update(classify_facebook_page(item))
-        enriched.append(item)
+    enriched = _enrich_facebook_pages(p.facebook_pages)
     return {
         "success": True,
         "logged_in": True,
         "pages": enriched,
         "source": "cache",
+        "stale": False,
         "synced_at": p.facebook_pages_synced_at,
-        "detail": None if p.facebook_pages else "Chưa có dữ liệu fanpage. Mở profile và bấm Làm mới.",
+        "detail": None if enriched else "Chưa có dữ liệu fanpage. Mở profile và bấm Làm mới.",
     }
 
 
@@ -1324,7 +1453,7 @@ async def import_profiles(req: ImportProfilesRequest):
                 tags=list(entry.get("tags") or []),
             )
             new_p.browser_path = entry.get("browser_path") or None
-            new_p.facebook_pages = list(entry.get("facebook_pages") or [])
+            new_p.facebook_pages = _sanitize_facebook_pages(entry.get("facebook_pages"))
             new_p.facebook_pages_synced_at = int(entry.get("facebook_pages_synced_at") or 0)
             profile_manager.update_profile(new_p)
             imported.append({"id": new_p.id, "name": new_p.name})

@@ -128,11 +128,11 @@ class Scheduler(threading.Thread):
         self.callbacks = callbacks  # action -> callable(profile_ids: Optional[list])
         self.check_interval = check_interval
         self.catchup_minutes = catchup_minutes
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self.last_run_info: Dict[str, Any] = {"last_tick": None, "ran": []}
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def _due(self, rule: Dict[str, Any], now: datetime) -> Optional[str]:
         """Trả lý do chạy ('due' | 'catchup') hoặc None."""
@@ -165,7 +165,7 @@ class Scheduler(threading.Thread):
                     break
 
     def run(self) -> None:
-        while not self._stop.wait(self.check_interval):
+        while not self._stop_event.wait(self.check_interval):
             now = datetime.now()
             self.last_run_info["last_tick"] = now.isoformat(timespec="seconds")
             for rule in self.store.list():

@@ -48,14 +48,20 @@ def read_browser_identity(pid, user_data_dir):
         if cached and (now - cached[0]) < 1.5:
             return cached[1]
 
+        def remember(res):
+            # "unknown" = truy vấn lỗi/timeout, không phải kết luận. Cache nó
+            # khiến stop() vừa trả 409 lại tiếp tục thấy unknown dù process
+            # đã sẵn sàng trả lời.
+            if res.get("state") != "unknown":
+                _identity_cache[pid] = (now, res)
+            return res
+
         # 1. Native API check: Kiểm tra tiến trình có tồn tại không
         kernel32 = ctypes.windll.kernel32
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
-            res = {'state': 'absent'}
-            _identity_cache[pid] = (now, res)
-            return res
+            return remember({'state': 'absent'})
 
         # 2. Native API check: Kiểm tra tên file thực thi có phải Chrome/Edge không
         try:
@@ -64,53 +70,38 @@ def read_browser_identity(pid, user_data_dir):
             if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
                 exe_name = os.path.basename(buf.value).lower()
                 if exe_name not in {'chrome.exe', 'msedge.exe', 'chromium.exe'}:
-                    res = {'state': 'mismatch'}
-                    _identity_cache[pid] = (now, res)
-                    return res
+                    return remember({'state': 'mismatch'})
             else:
-                res = {'state': 'mismatch'}
-                _identity_cache[pid] = (now, res)
-                return res
+                return remember({'state': 'mismatch'})
         finally:
             kernel32.CloseHandle(handle)
 
         # 3. Chỉ khi PID thực sự là tiến trình Chrome, mới truy vấn CommandLine để kiểm tra user-data-dir
-        command = (f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' -ErrorAction Stop; "
+        command = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+                   f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' -ErrorAction Stop; "
                    "if($p){$p | Select-Object Name,CommandLine,CreationDate | ConvertTo-Json -Compress}else{'null'}")
         result = subprocess.run(
             ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if result.returncode:
-            res = {'state': 'unknown'}
-            _identity_cache[pid] = (now, res)
-            return res
+            return remember({'state': 'unknown'})
         record = json.loads(result.stdout)
         if record is None:
-            res = {'state': 'absent'}
-            _identity_cache[pid] = (now, res)
-            return res
+            return remember({'state': 'absent'})
         if record.get('Name', '').lower() not in {'chrome.exe', 'msedge.exe', 'chromium.exe'}:
-            res = {'state': 'mismatch'}
-            _identity_cache[pid] = (now, res)
-            return res
+            return remember({'state': 'mismatch'})
         if not record.get('CommandLine'):
-            res = {'state': 'unknown'}
-            _identity_cache[pid] = (now, res)
-            return res
+            return remember({'state': 'unknown'})
         args = windows_argv(record['CommandLine'])
         options = dict(a[2:].split('=', 1) for a in args if a.startswith('--') and '=' in a)
         actual = options.get('user-data-dir', '')
         expected = os.path.normcase(os.path.realpath(user_data_dir))
         if not actual or os.path.normcase(os.path.realpath(actual)) != expected:
-            res = {'state': 'mismatch'}
-            _identity_cache[pid] = (now, res)
-            return res
+            return remember({'state': 'mismatch'})
         port = int(options.get('remote-debugging-port', '0'))
-        res = {'state': 'owned', 'port': port if 0 < port < 65536 else None,
-               'created': str(record.get('CreationDate', ''))}
-        _identity_cache[pid] = (now, res)
-        return res
+        return remember({'state': 'owned', 'port': port if 0 < port < 65536 else None,
+                         'created': str(record.get('CreationDate', ''))})
     except Exception:
         return {'state': 'unknown'}
