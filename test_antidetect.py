@@ -3,6 +3,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -33,7 +34,12 @@ class _FakeProcess:
 
 
 class _QueueLauncher(BrowserLauncher):
-    """Deterministic launcher used only to test launch_all's slot queue."""
+    """Deterministic launcher dùng để test launch_all song song đúng limit.
+
+    launch_all mới chạy các launch trong ThreadPoolExecutor; max_concurrent
+    giới hạn số launch thực hiện đồng thời (browser mở xong vẫn giữ mở),
+    nên concurrency đo bằng counter thread chứ không phải số process sống.
+    """
 
     def __init__(self, manager):
         super().__init__(manager)
@@ -42,12 +48,16 @@ class _QueueLauncher(BrowserLauncher):
         atexit.unregister(self._cleanup_on_exit)
         self.started = []
         self.max_live = 0
+        self._live = 0
+        self._live_lock = threading.Lock()
 
     def launch(self, profile_id, open_url=None):
-        live = sum(
-            1 for proc in self.active_processes.values() if proc.poll() is None
-        ) + 1
-        self.max_live = max(self.max_live, live)
+        with self._live_lock:
+            self._live += 1
+            self.max_live = max(self.max_live, self._live)
+        time.sleep(0.05)  # để các worker chồng nhau thật sự
+        with self._live_lock:
+            self._live -= 1
         self.started.append(profile_id)
         self.active_processes[profile_id] = _FakeProcess()
         return {"success": True, "profile_id": profile_id}
@@ -107,17 +117,25 @@ class TestAntidetectCore(unittest.TestCase):
         self.assertIsNone(self.manager.get_profile(p.id))
 
     def test_launcher_reports_missing_browser_without_crashing_app(self):
+        # GĐ2: browsers/ có thể chứa browser pin thật trên đĩa — phải patch
+        # CẢ BROWSERS_DIR để mô phỏng đúng "không có browser nào", nếu không
+        # launch sẽ thành công bằng pin (và leak Chrome thật làm hỏng các
+        # test sau trong cùng data dir).
         profile = self.manager.create_profile(name="Missing Browser Test")
-        with patch(
-            "antidetect.launcher.find_browser_executable",
-            side_effect=FileNotFoundError("browser not installed"),
-        ):
-            launcher = BrowserLauncher(self.manager)
-
-        result = launcher.launch(profile.id)
-        self.assertFalse(result["success"])
-        self.assertIn("Chrome hoặc Microsoft Edge", result["error"])
-        self.manager.delete_profile(profile.id)
+        try:
+            with patch(
+                "antidetect.launcher.find_browser_executable",
+                side_effect=FileNotFoundError("browser not installed"),
+            ), patch(
+                "antidetect.launcher.BROWSERS_DIR",
+                os.path.join(tempfile.gettempdir(), "no-browsers-here"),
+            ):
+                launcher = BrowserLauncher(self.manager)
+                result = launcher.launch(profile.id)
+            self.assertFalse(result["success"])
+            self.assertIn("Chrome hoặc Microsoft Edge", result["error"])
+        finally:
+            self.manager.delete_profile(profile.id)
 
     def test_start_all_queues_instead_of_rejecting_excess_profiles(self):
         profiles = [

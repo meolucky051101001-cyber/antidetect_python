@@ -6,6 +6,7 @@ import shutil
 import sys
 import time
 import threading
+import uuid
 from pathlib import Path
 from ctypes import wintypes
 from typing import Optional, Dict, Any, List
@@ -130,6 +131,39 @@ def _backup_corrupt_store(target: Path) -> Optional[Path]:
         return None
 
 
+def _backup_secret_store(target: Path) -> None:
+    """H2: backup timestamped trước mỗi lần ghi đè secrets.dpapi (giữ 5 bản).
+
+    Nội dung đã được DPAPI encrypt nên bản backup an toàn như file gốc. Nếu
+    một lần ghi bị đứt giữa chừng (mất điện/BSOD), bản backup gần nhất vẫn
+    giải mã được — secrets.dpapi trước đó không có cơ chế backup nào.
+    """
+    try:
+        if not target.exists() or target.stat().st_size == 0:
+            return
+        backup_dir = target.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        backup = backup_dir / f"secrets_{ts}_{uuid.uuid4().hex[:6]}.dpapi"
+        shutil.copy2(target, backup)
+        backups = sorted(
+            (
+                p for p in backup_dir.iterdir()
+                if p.name.startswith("secrets_") and p.name.endswith(".dpapi")
+            ),
+            key=lambda p: p.stat().st_mtime,
+        )
+        while len(backups) > 5:
+            oldest = backups.pop(0)
+            try:
+                oldest.unlink()
+            except OSError:
+                pass
+    except Exception as e:
+        # Backup fail không được chặn ghi: file gốc vẫn còn tới os.replace.
+        _safe_log(f"[Secrets] Cảnh báo backup kho secret: {type(e).__name__}: {e}")
+
+
 def _read_all_secrets() -> Dict[str, Any]:
     """Read and decrypt the store.
 
@@ -154,7 +188,11 @@ def _read_all_secrets() -> Dict[str, Any]:
             _store_corrupted = False
             return data
         except Exception as e:
-            backup = _backup_corrupt_store(target)
+            # Chỉ backup một lần cho mỗi đợt hỏng; các lần đọc fail kế tiếp
+            # không tạo thêm bản sao .corrupt. trùng lặp.
+            backup = None
+            if not _store_corrupted:
+                backup = _backup_corrupt_store(target)
             _store_corrupted = True
             hint = f" Bản sao: {backup}." if backup else ""
             raise SecretStoreCorruption(
@@ -178,7 +216,13 @@ def _write_all_secrets(store: Dict[str, Any]):
         try:
             payload = json.dumps(store, ensure_ascii=False).encode("utf-8")
             encrypted = _crypt(payload, True)
-            pending.write_bytes(encrypted)
+            # H2: fsync trước replace — mất điện giữa chừng không để lại
+            # file rỗng/cụt ciphertext cho kho mật khẩu duy nhất.
+            with open(pending, "wb") as f:
+                f.write(encrypted)
+                f.flush()
+                os.fsync(f.fileno())
+            _backup_secret_store(target)
             os.replace(pending, target)
         except Exception as e:
             if pending.exists():

@@ -174,3 +174,34 @@ try {{
         f.write(background_js)
 
     return ext_dir
+
+
+def parse_proxy_line(line: str) -> ProxyConfig:
+    """Parse chuỗi 'protocol://user:pass@host:port' (hoặc 'host:port') thành ProxyConfig.
+
+    Dùng chung cho bulk-create wizard và CLI set-proxy. Raises ValueError khi
+    thiếu host/port.
+    """
+    from urllib.parse import urlparse
+
+    text = (line or "").strip()
+    if not text:
+        raise ValueError("Proxy rỗng")
+    if "://" not in text:
+        text = f"http://{text}"
+    parsed = urlparse(text)
+    host = parsed.hostname or ""
+    port = parsed.port or 0
+    if not host or not port:
+        raise ValueError(f"Proxy thiếu host/port: {line!r}")
+    protocol = (parsed.scheme or "http").lower()
+    if protocol not in ("http", "https", "socks5", "socks4"):
+        raise ValueError(f"Protocol proxy không hỗ trợ: {protocol}")
+    return ProxyConfig(
+        enabled=True,
+        protocol=protocol,
+        host=host,
+        port=port,
+        username=parsed.username,
+        password=parsed.password,
+    )

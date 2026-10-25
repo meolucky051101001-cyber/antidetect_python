@@ -1,6 +1,6 @@
 import uuid
 import time
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from pydantic import BaseModel, Field, field_validator, field_serializer, SerializationInfo
 
 REDACTED_SECRET = "********"
@@ -113,6 +113,22 @@ class FingerprintConfig(BaseModel):
     longitude: Optional[float] = 105.8542
     accuracy: int = 100
     webrtc_mode: str = "disable_non_proxied"  # disable_non_proxied, block, auto
+    # Các nhóm stealth hook tắt riêng cho profile này (vd. ["canvas","webgl","audio"]
+    # cho chế độ "authentic" — không noise, hash trùng Chrome thật trên máy,
+    # đổi lại không bị detector loại masking chấm "masking detected").
+    stealth_disable: List[str] = Field(default_factory=list)
+
+    @field_validator("stealth_disable")
+    @classmethod
+    def validate_stealth_disable(cls, v: List[str]) -> List[str]:
+        from .stealth import STEALTH_GROUPS
+        groups = {g.lower() for g in STEALTH_GROUPS}
+        cleaned = []
+        for item in v or []:
+            name = str(item or "").strip().lower()
+            if name in groups and name not in cleaned:
+                cleaned.append(name)
+        return cleaned
 
     @field_validator("os")
     @classmethod
@@ -190,3 +206,12 @@ class Profile(BaseModel):
     port: Optional[int] = None
     pid: Optional[int] = None
     revision: int = 1
+    # Fanpages Facebook profile này sở hữu/quản lý, đồng bộ từ phiên đang
+    # chạy qua CDP. Cache để xem lại cả khi profile đã đóng.
+    facebook_pages: List[Dict[str, Any]] = Field(default_factory=list)
+    facebook_pages_synced_at: int = 0
+    # Browser pin riêng cho profile (Giai đoạn 2): tên trong browsers/
+    # (vd "chrome-155.0.8059.85") hoặc đường dẫn tuyệt đối. None = dùng
+    # browser mặc định của tool. Cho phép đa dạng phiên bản Chrome giữa
+    # các profile + fingerprint ổn định khi Chrome máy tự cập nhật.
+    browser_path: Optional[str] = None

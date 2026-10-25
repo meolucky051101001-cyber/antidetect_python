@@ -11,11 +11,17 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
+from .storage import InterProcessLock
+
 
 class BrowserRuntimeStore:
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.RLock()
+        # M1: server và cli cùng giữ một BrowserRuntimeStore; upsert/remove
+        # từng process ghi nguyên snapshot in-memory của mình sẽ xóa record
+        # process kia vừa ghi. File lock riêng + re-load trước khi mutate.
+        self._ipc_lock = InterProcessLock(path + ".lock", timeout=5.0)
         self._states: Dict[str, Dict[str, Any]] = {}
         self._load()
 
@@ -73,7 +79,8 @@ class BrowserRuntimeStore:
             return dict(record) if record else None
 
     def upsert(self, profile_id: str, **fields: Any) -> Dict[str, Any]:
-        with self._lock:
+        with self._lock, self._ipc_lock:
+            self._load()  # Merge với record process khác vừa ghi xuống đĩa.
             record = dict(self._states.get(str(profile_id)) or {})
             record.update(fields)
             record["profile_id"] = str(profile_id)
@@ -83,7 +90,8 @@ class BrowserRuntimeStore:
             return dict(record)
 
     def remove(self, profile_id: str) -> None:
-        with self._lock:
+        with self._lock, self._ipc_lock:
+            self._load()  # Không xóa record process khác đã ghi thêm.
             if str(profile_id) in self._states:
                 self._states.pop(str(profile_id), None)
                 self._write()

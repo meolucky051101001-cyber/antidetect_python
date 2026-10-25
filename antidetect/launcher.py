@@ -1,7 +1,9 @@
 import os
+import re
 import sys
 import json
 import time
+import datetime
 import socket
 import shutil
 import asyncio
@@ -22,6 +24,11 @@ from .fingerprint import (
     get_version_from_browser_path,
     get_host_screen_info,
     host_os,
+)
+
+# Browser pin (Giai đoạn 2): chrome-for-testing tải về nằm ở đây, ngoài data/.
+BROWSERS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "browsers"
 )
 
 
@@ -133,6 +140,309 @@ def _safe_run_async(coro):
     return asyncio.run(coro)
 
 
+# P2 (review 2026-10-24): đo brands/fullVersionList thật của Chrome host ngay
+# trước khi áp bất kỳ override nào. Chromium xoay grease brand theo major
+# version ("Not(A:Brand" trên Chrome 155, khác bảng hardcode cũ) và sắp brand
+# chính trước "Chromium", nên bảng tĩnh làm sai header sec-ch-ua.
+# Đồng thời đo battery/connection THẬT của host: giả pin (vd 72%) trên desktop
+# thật (100% + đang sạc) từng làm Pixelscan chấm "masking detected".
+_NATIVE_BRANDS_JS = r"""
+(async () => {
+    try {
+        if (!navigator.userAgentData) return null;
+        const out = {
+            brands: Array.from(navigator.userAgentData.brands || []).map(
+                b => ({ brand: b.brand, version: b.version })
+            )
+        };
+        try {
+            const hev = await navigator.userAgentData.getHighEntropyValues(['fullVersionList']);
+            if (hev && Array.isArray(hev.fullVersionList)) {
+                out.fullVersionList = hev.fullVersionList.map(
+                    b => ({ brand: b.brand, version: b.version })
+                );
+            }
+        } catch (e) {}
+        try {
+            if (navigator.getBattery) {
+                const b = await navigator.getBattery();
+                // returnByValue serialize kiểu JSON: Infinity phải thành chuỗi.
+                out.battery = {
+                    level: b.level,
+                    charging: b.charging,
+                    chargingTime: b.chargingTime === Infinity ? 'Infinity' : b.chargingTime,
+                    dischargingTime: b.dischargingTime === Infinity ? 'Infinity' : b.dischargingTime
+                };
+            }
+        } catch (e) {}
+        try {
+            if (navigator.connection) {
+                const c = navigator.connection;
+                out.connection = {
+                    effectiveType: c.effectiveType,
+                    type: c.type || '',
+                    rtt: c.rtt,
+                    downlink: c.downlink,
+                    saveData: !!c.saveData
+                };
+            }
+        } catch (e) {}
+        return out;
+    } catch (e) { return null; }
+})()
+"""
+
+
+# Fanpage listing: mở tab facebook.com/bookmarks/pages TRONG phiên profile
+# (session đã đăng nhập), đọc danh sách page từ DOM rồi đóng tab. Facebook
+# thay đổi DOM thường xuyên nên scraper chỉ dùng heuristic link + aria-label
+# và trả về kèm URL để người dùng kiểm tra bằng mắt khi cần.
+_FB_SCRAPE_JS = r"""
+(async () => {
+    const SCRAPE = () => {
+        const out = {
+            url: location.href,
+            readyState: document.readyState,
+            loggedOut: false,
+            pages: []
+        };
+        try {
+            out.loggedOut = location.pathname.startsWith('/login')
+                || location.pathname === '/login.php'
+                || location.search.indexOf('login') >= 0
+                || !!document.querySelector('form[action*="login"]');
+        } catch (e) {}
+        if (out.loggedOut) return out;
+
+        const BLOCKED = new Set([
+            'feed', 'friends', 'watch', 'marketplace', 'groups', 'gaming',
+            'events', 'messages', 'notifications', 'search', 'bookmarks',
+            'pages', 'settings', 'help', 'privacy', 'policies', 'legal',
+            'about', 'ads', 'adpreferences', 'business', 'careers',
+            'developer', 'login', 'signup', 'recover', 'reg', 'save',
+            'stories', 'reels', 'photo', 'video', 'videos', 'notes',
+            'ondevice', 'portal', 'oculus', 'shop', 'pay', 'wallet', 'games',
+            'ajax', 'api', 'graphql', 'dialog', 'share', 'sharer', 'hashtag',
+            'people', 'watchparty', 'mcnut', 'metaverse', 'terms'
+        ]);
+        const anchors = Array.from(document.querySelectorAll('a[href]'));
+        for (const a of anchors) {
+            let text = (a.getAttribute('aria-label') || a.textContent || '')
+                .trim().replace(/\s+/g, ' ');
+            if (!text || text.length < 2 || text.length > 100) continue;
+            const href = a.href || '';
+            if (!href) continue;
+            let u;
+            try { u = new URL(href, location.origin); } catch (e) { continue; }
+            const host = (u.hostname || '').replace(/^www\./, '');
+            if (host !== 'facebook.com' && host !== 'm.facebook.com'
+                && host !== 'web.facebook.com') continue;
+            const path = u.pathname.replace(/\/+$/, '');
+            if (!path || path === '/') continue;
+            let id = null;
+            let score = 0;
+            const mPages = path.match(/^\/pages\/[^/]+\/(\d{5,})/);
+            if (mPages) { id = mPages[1]; score = 2; }
+            if (path === '/profile.php') {
+                const qid = u.searchParams.get('id');
+                if (qid && /^\d{5,}$/.test(qid)) { id = qid; score = 2; }
+                else continue;
+            }
+            if (!id) {
+                const segs = path.split('/').filter(Boolean);
+                if (segs.length === 1) {
+                    const seg = segs[0].toLowerCase();
+                    if (BLOCKED.has(seg)) continue;
+                    if (segs[0].length < 2 || segs[0].length > 60) continue;
+                    if (u.search && !u.search.startsWith('?sk=')
+                        && !u.search.startsWith('?ref=')
+                        && !u.search.startsWith('?id=')) continue;
+                    score = 1;
+                } else {
+                    continue;
+                }
+            }
+            out.pages.push({
+                name: text,
+                url: u.origin + path + (id ? '' : (u.search || '')),
+                id: id,
+                _score: score
+            });
+        }
+        const seen = new Map();
+        for (const p of out.pages) {
+            const key = p.id || p.url;
+            const prev = seen.get(key);
+            if (!prev || p._score > prev._score
+                || (p._score === prev._score && p.name.length > prev.name.length)) {
+                seen.set(key, p);
+            }
+        }
+        out.pages = Array.from(seen.values())
+            .sort((a, b) => b._score - a._score)
+            .slice(0, 100)
+            .map(p => ({ name: p.name, url: p.url, id: p.id }));
+        return out;
+    };
+
+    const t0 = Date.now();
+    while (Date.now() - t0 < 12000) {
+        const r = SCRAPE();
+        if (r.loggedOut || r.pages.length > 0) return r;
+        await new Promise(res => setTimeout(res, 500));
+    }
+    return SCRAPE();
+})()
+"""
+
+
+# Đồng bộ chi tiết từng fanpage (tuổi + hoạt động): chạy trên chính trang
+# page/about, thu (1) các mốc thời gian "X ngày trước" của bài đăng để suy ra
+# bài gần nhất, và (2) đoạn text quanh nhãn "Ngày tạo trang"/"Page created"
+# để suy ra ngày tạo. Facebook đổi DOM thường xuyên — mọi giá trị đều giữ
+# raw text để hiển thị lại khi parse thất bại.
+_FB_PAGE_METRICS_JS = r"""
+(async () => {
+    const RXS = [
+        [/(\d+)\s+giây\s+trước/i, 's'], [/(\d+)\s+phút\s+trước/i, 'm'],
+        [/(\d+)\s+giờ\s+trước/i, 'h'], [/(\d+)\s+ngày\s+trước/i, 'd'],
+        [/(\d+)\s+tuần\s+trước/i, 'w'], [/(\d+)\s+tháng\s+trước/i, 'mo'],
+        [/(\d+)\s+năm\s+trước/i, 'y'],
+        [/(\d+)\s+seconds?\s+ago/i, 's'], [/(\d+)\s+minutes?\s+ago/i, 'm'],
+        [/(\d+)\s+hours?\s+ago/i, 'h'], [/(\d+)\s+days?\s+ago/i, 'd'],
+        [/(\d+)\s+weeks?\s+ago/i, 'w'], [/(\d+)\s+months?\s+ago/i, 'mo'],
+        [/(\d+)\s+years?\s+ago/i, 'y'],
+    ];
+    const CREATED_LABEL = /(ngày\s+tạo(?:\s+trang)?|page\s+created|created\s+on|date\s+created|được\s+tạo|phát\s+hành)/i;
+
+    const scrape = () => {
+        const out = {
+            url: location.href,
+            readyState: document.readyState,
+            title: (document.title || '').slice(0, 120),
+            times: [],
+            createdRaw: null
+        };
+        const push = (n, u) => {
+            if (out.times.length < 50) out.times.push({ n: parseInt(n, 10), u: u });
+        };
+        const seen = new Set();
+        try {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            let node, count = 0;
+            while ((node = walker.nextNode()) && count < 4000) {
+                const t = (node.textContent || '').trim();
+                if (!t || t.length > 48 || seen.has(t)) continue;
+                count += 1; seen.add(t);
+                let matched = false;
+                for (const [rx, u] of RXS) {
+                    const m = t.match(rx);
+                    if (m) { push(m[1], u); matched = true; break; }
+                }
+                if (!matched) {
+                    const ms = t.match(/^(\d+)([smhdw])$/i);
+                    if (ms) push(ms[1], ms[2].toLowerCase());
+                }
+            }
+        } catch (e) {}
+        try {
+            const txt = document.body ? (document.body.innerText || '') : '';
+            const m = txt.match(new RegExp(CREATED_LABEL.source + '[^\\n]{0,100}', 'i'));
+            if (m) out.createdRaw = m[0].slice(0, 140);
+        } catch (e) {}
+        return out;
+    };
+
+    const t0 = Date.now();
+    while (Date.now() - t0 < 6000) {
+        const r = scrape();
+        if ((r.times.length > 0 && r.readyState === 'complete') || r.createdRaw) {
+            return r;
+        }
+        await new Promise(res => setTimeout(res, 500));
+    }
+    return scrape();
+})()
+"""
+
+_FB_UNIT_DAYS = {"s": 0, "m": 0, "h": 0, "d": 1, "w": 7, "mo": 30, "y": 365}
+
+_FB_MONTHS_EN = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5,
+    "june": 6, "july": 7, "august": 8, "september": 9, "october": 10,
+    "november": 11, "december": 12,
+}
+
+
+def _fb_unit_to_days(num: int, unit: str) -> int:
+    return int(num) * _FB_UNIT_DAYS.get(str(unit).lower(), 0)
+
+
+def _parse_fb_created_date(raw: Optional[str]) -> Optional[datetime.date]:
+    """Best-effort parse ngày tạo trang từ đoạn text quanh nhãn của Facebook.
+
+    Hỗ trợ các format thường gặp: dd/mm/yyyy (và mm/dd/yyyy khi rõ ràng),
+    "ngày D tháng M, YYYY", "March 5, 2020", ISO YYYY-MM-DD. Trả None khi
+    không khớp — caller hiển thị raw text thay vì đoán.
+    """
+    if not raw:
+        return None
+    text = raw.lower()
+    try:
+        m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+        if m:
+            return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        m = re.search(r"(\d{1,2})\s+tháng\s+(\d{1,2}),?\s*(\d{4})", text)
+        if m:
+            return datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        m = re.search(
+            r"(" + "|".join(_FB_MONTHS_EN) + r")\s+(\d{1,2}),?\s+(\d{4})", text
+        )
+        if m:
+            return datetime.date(int(m.group(3)), _FB_MONTHS_EN[m.group(1)], int(m.group(2)))
+        m = re.search(r"(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})", text)
+        if m:
+            a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if a > 12 >= b:
+                return datetime.date(y, b, a)  # chắc chắn dd/mm
+            if b > 12 >= a:
+                return datetime.date(y, a, b)  # chắc chắn mm/dd
+            # Ambiguous: locale VN ưu tiên dd/mm.
+            return datetime.date(y, b, a)
+    except ValueError:
+        return None
+    return None
+
+
+def classify_facebook_page(entry: Dict[str, Any], today: Optional[datetime.date] = None) -> Dict[str, Any]:
+    """Quy tắc quản lý farm fanpage.
+
+    - Trạng thái đăng bài: bài gần nhất trong 7 ngày → "active" (đang đăng),
+      lâu hơn hoặc không có bài → "stopped"; chưa từng quét chi tiết → None.
+    - "Sẵn sàng": page đã ngâm đủ 30 ngày tuổi (tính từ ngày tạo).
+    """
+    today = today or datetime.date.today()
+    age_days = None
+    created = entry.get("created_date")
+    if created:
+        try:
+            age_days = (today - datetime.date.fromisoformat(str(created))).days
+        except ValueError:
+            age_days = None
+
+    last_days = entry.get("last_post_days")
+    if last_days is None:
+        status = "unknown" if entry.get("detail_synced") else None
+    else:
+        status = "active" if last_days <= 7 else "stopped"
+
+    return {
+        "age_days": age_days,
+        "status": status,
+        "ready": age_days is not None and age_days >= 30,
+    }
+
+
 def _normalize_cookie(c: Any) -> Optional[Dict[str, Any]]:
     """Chuẩn hóa cấu trúc cookie từ nhiều nguồn (CDP, EditThisCookie, J2TEAM, v.v.)."""
     if not isinstance(c, dict):
@@ -185,6 +495,18 @@ class BrowserLauncher:
         self._launch_locks = collections.defaultdict(threading.RLock)
         # H5: Event để CDP thread báo hiệu đã inject stealth thành công
         self._cdp_ready_events: Dict[str, threading.Event] = {}
+        # R4: page configuration is split into two phases. The CDP thread
+        # pauses on about:blank until the main thread verifies core values,
+        # then navigates and reports when the new document has loaded.
+        self._core_verified_events: Dict[str, threading.Event] = {}
+        self._navigation_events: Dict[str, threading.Event] = {}
+        self._page_load_events: Dict[str, Any] = {}
+        # P2: brands/fullVersionList đo được từ Chrome host, cache theo
+        # browser_version để không đo lại mỗi launch.
+        self._native_brands_cache: Dict[str, dict] = {}
+        # Batch start-all: nhiều launch đồng thời cùng thấy cache miss — khóa
+        # để chỉ MỘT Chrome probe chạy, phần còn lại dùng kết quả sau.
+        self._native_brands_probe_lock = threading.Lock()
         # Đăng ký dọn dẹp khi Python thoát để tránh tiến trình Chrome mồ côi
         self._cleanup_registered = True
         import atexit
@@ -202,10 +524,14 @@ class BrowserLauncher:
         self.active_ports.clear()
 
     def _cleanup_on_exit(self):
-        """Dọn dẹp các tiến trình Chrome do phiên làm việc này khởi chạy khi ứng dụng thoát."""
-        ids = set(self.active_processes)
-        ids.update(self._runtime_store.all().keys())
-        for profile_id in list(ids):
+        """Dừng các tiến trình Chrome do chính process này khởi chạy khi thoát.
+
+        H1: KHÔNG quét runtime store — các browser do process khác (server
+        hoặc phiên trước đó) mở phải sống sót; chúng được xác minh ownership
+        qua _recover_runtime ở lần stop kế tiếp. Quét runtime store ở đây
+        từng khiến `cli.py list` đóng toàn bộ browser của server.
+        """
+        for profile_id in list(self.active_processes):
             try:
                 self.stop(profile_id)
             except Exception:
@@ -223,6 +549,9 @@ class BrowserLauncher:
         active = self.active_ports.pop(profile_id, None) or record.get("port")
         self.active_processes.pop(profile_id, None)
         self._proxy_credentials.pop(profile_id, None)
+        self._cdp_ready_events.pop(profile_id, None)
+        self._core_verified_events.pop(profile_id, None)
+        self._navigation_events.pop(profile_id, None)
         release_port(requested)
         if active and active != requested:
             release_port(active)
@@ -238,9 +567,6 @@ class BrowserLauncher:
                 shutil.rmtree(ext_dir, ignore_errors=True)
         except Exception:
             pass
-        profile = self.manager.get_profile(profile_id)
-        if profile:
-            profile.status, profile.port, profile.pid = "stopped", None, None
 
     def _identity(self, profile):
         from .storage import PROFILES_DATA_DIR
@@ -324,14 +650,137 @@ class BrowserLauncher:
                 await asyncio.sleep(.15)
         return False
 
-    async def _verify_emulation(self, port, fp):
+    def _measure_native_brands_standalone(self, browser_path: Optional[str] = None) -> Optional[dict]:
+        """Launch một Chrome phụ (user-data-dir tạm) và đọc UA-CH brands thật.
+
+        P2: `Network.setUserAgentOverride(userAgentMetadata)` điều khiển cả JS
+        API `navigator.userAgentData`, nên không thể đo trên phiên đã override.
+        Chromium xoay grease brand theo major version (Chrome 155 thật dùng
+        "Not(A:Brand";v="24" và đặt brand chính trước "Chromium") — bảng
+        hardcode lệch khác đó và làm sai header sec-ch-ua. Chrome phụ dùng
+        user-data-dir temp riêng (không chạm data/ của tool), không headless,
+        và bị đóng ngay sau khi đo. Trả None nếu bất kỳ bước nào lỗi.
+        """
+        browser_path = browser_path or self.browser_path
+        if not browser_path:
+            return None
+        import tempfile
+        import websockets
+
+        user_data = tempfile.mkdtemp(prefix="antidetect-brand-probe-")
+        port = get_free_port()
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                [
+                    browser_path,
+                    f"--user-data-dir={user_data}",
+                    "--remote-debugging-address=127.0.0.1",
+                    f"--remote-debugging-port={port}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "about:blank",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            page_ws = None
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                try:
+                    def list_pages():
+                        with urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/json/list", timeout=1
+                        ) as r:
+                            return json.loads(r.read())
+
+                    targets = list_pages()
+                    page = next(
+                        (
+                            t for t in targets
+                            if t.get("type") == "page"
+                            and t.get("webSocketDebuggerUrl")
+                        ),
+                        None,
+                    )
+                    if page:
+                        page_ws = page["webSocketDebuggerUrl"]
+                        break
+                except Exception:
+                    time.sleep(0.2)
+            if not page_ws:
+                return None
+
+            async def _probe():
+                async with websockets.connect(page_ws, open_timeout=2) as ws:
+                    await ws.send(json.dumps({
+                        "id": 70001,
+                        "method": "Page.navigate",
+                        "params": {"url": f"http://127.0.0.1:{port}/json/version"},
+                    }))
+                    # 127.0.0.1 là secure context: userAgentData xuất hiện ở đó
+                    # (about:blank thì không).
+                    probe_deadline = time.monotonic() + 6.0
+                    while time.monotonic() < probe_deadline:
+                        await ws.send(json.dumps({
+                            "id": 70002,
+                            "method": "Runtime.evaluate",
+                            "params": {
+                                "expression": _NATIVE_BRANDS_JS,
+                                "awaitPromise": True,
+                                "returnByValue": True,
+                            },
+                        }))
+                        end = min(probe_deadline, time.monotonic() + 2.0)
+                        while time.monotonic() < end:
+                            msg = json.loads(
+                                await asyncio.wait_for(
+                                    ws.recv(), timeout=max(0.05, end - time.monotonic())
+                                )
+                            )
+                            if msg.get("id") != 70002:
+                                continue
+                            value = (
+                                (msg.get("result") or {}).get("result") or {}
+                            ).get("value")
+                            if (
+                                isinstance(value, dict)
+                                and isinstance(value.get("brands"), list)
+                                and value["brands"]
+                            ):
+                                return value
+                            break
+                        await asyncio.sleep(0.15)
+                    return None
+
+            return _safe_run_async(_probe())
+        except Exception:
+            return None
+        finally:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            release_port(port)
+            shutil.rmtree(user_data, ignore_errors=True)
+
+    async def _verify_emulation(
+        self, port, fp, require_client_hints=False, deadline_seconds=7.0
+    ):
         """Check the values a page actually sees after CDP injection.
 
-        Returns a dict with per-check details. Verification only passes when
-        all core checks pass, including timezone, WebGL and Client Hints.
+        Returns a dict with per-check details. The first call runs against the
+        initial about:blank document and checks everything that does not require
+        a secure context. A second call after navigation can require Client
+        Hints, which are absent on about:blank.
         """
         import websockets
-        deadline = time.monotonic() + 7
+        deadline = time.monotonic() + max(0.5, float(deadline_seconds))
         expr = r"""
 (async () => {
     const out = {
@@ -485,9 +934,9 @@ class BrowserLauncher:
                                     == expected_viewport
                                 )
                             # navigator.userAgentData is undefined on some
-                            # non-secure contexts (notably about:blank). Do not
-                            # fail verification for an API the page cannot see;
-                            # on https pages the hook is still checked.
+                            # non-secure contexts (notably about:blank). The
+                            # first pass therefore treats it as optional; the
+                            # post-navigation pass requires it for HTTPS pages.
                             if value.get("chBrands") is not None:
                                 checks["client_hints_brand"] = (
                                     expected_brand in (value.get("chBrands") or "")
@@ -495,6 +944,8 @@ class BrowserLauncher:
                                 checks["client_hints_platform"] = (
                                     value.get("chPlatform") == expected_ch_platform
                                 )
+                            elif require_client_hints:
+                                checks["client_hints_available"] = False
                         except (TypeError, ValueError):
                             checks["parse"] = False
                         return {
@@ -523,8 +974,9 @@ class BrowserLauncher:
         # stored model may still contain legacy RAM/screen values; the injected
         # JS and the verification probe must see the same values.
         fp = fp_override or profile.fingerprint
-        stealth_js = get_stealth_script(fp)
-        worker_js = get_worker_stealth_script(fp)
+        native_brands = self._native_brands_cache.get(fp.browser_version)
+        stealth_js = get_stealth_script(fp, native_brands=native_brands)
+        worker_js = get_worker_stealth_script(fp, native_brands=native_brands)
 
         # Wait for Chrome's DevTools endpoint. DevToolsActivePort is more
         # reliable than the requested port because Chrome may choose another.
@@ -604,6 +1056,11 @@ class BrowserLauncher:
         # Chrome adds q-values itself. Supplying them here produces
         # "vi;q=0.9;q=0.9" on the wire.
         accept_lang_str = ",".join(fp.languages or [fp.locale])
+
+        if native_brands:
+            ua_metadata["brands"] = native_brands["brands"]
+            if native_brands.get("fullVersionList"):
+                ua_metadata["fullVersionList"] = native_brands["fullVersionList"]
 
         try:
             async with websockets.connect(
@@ -713,6 +1170,9 @@ class BrowserLauncher:
 
                 async def configure_page(session_id, target_info):
                     nonlocal is_first_tab
+                    first_tab = is_first_tab
+                    if first_tab:
+                        is_first_tab = False
                     await send("Page.enable", session_id=session_id)
                     await apply_screen_emulation(session_id)
                     # Browser-level auto-attach discovers pages, but workers and
@@ -733,9 +1193,17 @@ class BrowserLauncher:
                         {"source": stealth_js},
                         session_id=session_id,
                     )
-                    # P0-04: Báo hiệu stealth đã được nạp thành công vào document
-                    if profile.id in self._cdp_ready_events:
-                        self._cdp_ready_events[profile.id].set()
+                    # Page.addScript only covers future documents. The initial
+                    # about:blank document already exists, so apply the same
+                    # payload now before the R4 core verification pass.
+                    try:
+                        await send(
+                            "Runtime.evaluate",
+                            {"expression": stealth_js, "silent": True},
+                            session_id=session_id,
+                        )
+                    except Exception:
+                        pass
                     await send(
                         "Emulation.setTimezoneOverride",
                         {"timezoneId": fp.timezone},
@@ -770,13 +1238,38 @@ class BrowserLauncher:
                     await send(
                         "Runtime.runIfWaitingForDebugger", session_id=session_id
                     )
-                    if is_first_tab and target_url:
-                        is_first_tab = False
-                        await send(
-                            "Page.navigate",
-                            {"url": target_url},
-                            session_id=session_id,
-                        )
+                    # R4: signal readiness only after the document is unpaused.
+                    # The main thread can now verify core values on the initial
+                    # about:blank page. Navigation waits for that handshake so
+                    # a slow page cannot invalidate verification halfway through.
+                    if profile.id in self._cdp_ready_events:
+                        self._cdp_ready_events[profile.id].set()
+                    if first_tab:
+                        core_event = self._core_verified_events.get(profile.id)
+                        if core_event is not None:
+                            await asyncio.to_thread(core_event.wait, 8.0)
+                        if target_url == "about:blank":
+                            nav_event = self._navigation_events.get(profile.id)
+                            if nav_event is not None:
+                                nav_event.set()
+                        elif target_url:
+                            load_event = asyncio.Event()
+                            self._page_load_events[session_id] = load_event
+                            try:
+                                await send(
+                                    "Page.navigate",
+                                    {"url": target_url},
+                                    session_id=session_id,
+                                )
+                                try:
+                                    await asyncio.wait_for(load_event.wait(), timeout=10.0)
+                                except asyncio.TimeoutError:
+                                    pass
+                            finally:
+                                self._page_load_events.pop(session_id, None)
+                                nav_event = self._navigation_events.get(profile.id)
+                                if nav_event is not None:
+                                    nav_event.set()
 
                 async def configure_iframe(session_id, target_info):
                     # OOPIF: Page.addScriptToEvaluateOnNewDocument handles the
@@ -885,6 +1378,12 @@ class BrowserLauncher:
                     params = event.get("params", {})
                     session_id = event.get("sessionId")
 
+                    if method == "Page.loadEventFired":
+                        load_event = self._page_load_events.get(session_id)
+                        if load_event is not None:
+                            load_event.set()
+                        return
+
                     if method == "Target.attachedToTarget":
                         target_info = params.get("targetInfo", {})
                         target_type = target_info.get("type", "")
@@ -960,16 +1459,17 @@ class BrowserLauncher:
                                 )
                             )
 
+                # P0: reader_loop must never await send(). send() blocks on a
+                # future in pending_responses that only reader_loop resolves,
+                # so a send() from inside the reader deadlocks it, the 5s
+                # response timeout breaks the loop, and closing the socket
+                # makes Chrome reset deviceMetrics/timezone/UA overrides.
                 async def reader_loop():
                     while True:
                         try:
                             msg = await asyncio.wait_for(ws.recv(), timeout=30.0)
                         except asyncio.TimeoutError:
                             if not self.is_running(profile.id):
-                                break
-                            try:
-                                await send("Browser.getVersion")
-                            except Exception:
                                 break
                             continue
                         except Exception:
@@ -989,16 +1489,34 @@ class BrowserLauncher:
 
                         await dispatch_event(event)
 
+                async def keepalive_loop():
+                    while True:
+                        await asyncio.sleep(20.0)
+                        if not self.is_running(profile.id):
+                            return
+                        try:
+                            await send("Browser.getVersion")
+                        except Exception:
+                            return
+
                 reader_task = asyncio.create_task(reader_loop())
-                await send(
-                    "Target.setAutoAttach",
-                    {
-                        "autoAttach": True,
-                        "waitForDebuggerOnStart": True,
-                        "flatten": True,
-                    },
-                )
-                await reader_task
+                keepalive_task = asyncio.create_task(keepalive_loop())
+                try:
+                    await send(
+                        "Target.setAutoAttach",
+                        {
+                            "autoAttach": True,
+                            "waitForDebuggerOnStart": True,
+                            "flatten": True,
+                        },
+                    )
+                    await reader_task
+                finally:
+                    keepalive_task.cancel()
+                    try:
+                        await keepalive_task
+                    except asyncio.CancelledError:
+                        pass
 
         except Exception as e:
             print(f"[Launcher] Lỗi kết nối CDP: {e}")
@@ -1022,6 +1540,68 @@ class BrowserLauncher:
         t = threading.Thread(target=run_loop, daemon=True)
         t.start()
 
+    def _resolve_browser_path(self, profile: Optional[Profile]) -> Optional[str]:
+        """Chọn browser binary cho lần launch này (Giai đoạn 2).
+
+        Thứ tự: browser per-profile (tên trong browsers/ hoặc đường dẫn tuyệt
+        đối) → env ANTIDETECT_BROWSER_PATH → browser pin mới nhất trong
+        browsers/ → Chrome/Edge đã cài (self.browser_path). Per-profile và env
+        là STRICT: chỉ định mà không resolve được sẽ trả None (launch báo lỗi
+        rõ) — không bao giờ âm thầm launch nhầm browser khác. Cho phép đa dạng
+        phiên bản Chrome giữa các profile và fingerprint ổn định khi Chrome
+        máy tự cập nhật.
+        """
+        pinned_name = (getattr(profile, "browser_path", None) or "").strip() if profile else ""
+        env_path = (os.environ.get("ANTIDETECT_BROWSER_PATH") or "").strip()
+
+        def resolve_pinned(name: str) -> Optional[str]:
+            def find_exe(directory: str) -> Optional[str]:
+                exe = os.path.join(directory, "chrome-win64", "chrome.exe")
+                if os.path.isfile(exe):
+                    return exe
+                for root, _dirs, files in os.walk(directory):
+                    if "chrome.exe" in files:
+                        return os.path.join(root, "chrome.exe")
+                return None
+
+            if os.path.isabs(name):
+                # Đường dẫn tuyệt đối: file exe trực tiếp, hoặc thư mục
+                # browser (env có thể trỏ vào chrome-<version>/).
+                if os.path.isfile(name):
+                    return name
+                if os.path.isdir(name):
+                    return find_exe(name)
+                return None
+            # Tên trong browsers/: chrome-<version> → chrome-win64/chrome.exe
+            return find_exe(os.path.join(BROWSERS_DIR, name))
+
+        if pinned_name:
+            # STRICT: user chỉ định rõ cho profile này.
+            return resolve_pinned(pinned_name)
+        if env_path:
+            # STRICT: admin chọn browser cho toàn tool.
+            return resolve_pinned(env_path)
+
+        # Browser pin mới nhất trong browsers/ (mặc định, lenient).
+        if os.path.isdir(BROWSERS_DIR):
+            versions = sorted(
+                (
+                    d for d in os.listdir(BROWSERS_DIR)
+                    if d.startswith("chrome-")
+                    and os.path.isfile(
+                        os.path.join(BROWSERS_DIR, d, "chrome-win64", "chrome.exe")
+                    )
+                ),
+                key=lambda d: [
+                    int(x) if x.isdigit() else 0 for x in d[len("chrome-"):].split(".")
+                ],
+            )
+            if versions:
+                return os.path.join(
+                    BROWSERS_DIR, versions[-1], "chrome-win64", "chrome.exe"
+                )
+        return self.browser_path
+
     def launch(
         self, profile_id: str, open_url: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -1032,11 +1612,20 @@ class BrowserLauncher:
             if not profile:
                 return {"success": False, "error": "Profile không tồn tại"}
 
-            if not self.browser_path or not os.path.isfile(self.browser_path):
-                return {
-                    "success": False,
-                    "error": "Không tìm thấy Google Chrome hoặc Microsoft Edge. Hãy cài một trình duyệt Chromium được hỗ trợ rồi thử lại.",
-                }
+            # Giai đoạn 2: browser per-profile / pin — resolve TRƯỚC mọi use
+            # (UA/Client Hints + brands probe phải theo đúng binary này).
+            browser_path = self._resolve_browser_path(profile)
+            if not browser_path or not os.path.isfile(browser_path):
+                pinned = (getattr(profile, "browser_path", None) or "").strip()
+                if pinned:
+                    error = (
+                        f"Browser pin '{pinned}' không tìm thấy trên máy. "
+                        "Hãy chạy: python tools\install_browser.py --version <ver>, "
+                        "hoặc bỏ pin browser trong Edit profile."
+                    )
+                else:
+                    error = "Không tìm thấy Google Chrome hoặc Microsoft Edge. Hãy cài một trình duyệt Chromium được hỗ trợ rồi thử lại."
+                return {"success": False, "error": error}
 
             if self.is_running(profile_id):
                 # L2: Nếu profile đang chạy và có open_url, mở URL đó trong tab mới
@@ -1074,7 +1663,7 @@ class BrowserLauncher:
             # P0-01: Chỉ chuẩn hóa fp tạm thời trong bộ nhớ RAM cho phiên chạy Chrome này.
             # TUYỆT ĐỐI KHÔNG tự ý gọi update_profile(profile) đè vào profiles.json.
             original_fp = profile.fingerprint
-            fp = normalize_fingerprint_for_launch(profile.fingerprint, self.browser_path)
+            fp = normalize_fingerprint_for_launch(profile.fingerprint, browser_path)
             launch_warnings: List[str] = []
             if int(original_fp.device_memory or 0) != int(fp.device_memory or 0):
                 launch_warnings.append(
@@ -1107,7 +1696,7 @@ class BrowserLauncher:
 
             # Cấu hình danh sách flags dòng lệnh
             args = [
-                self.browser_path,
+                browser_path,
                 f"--user-data-dir={user_data_dir}",
                 "--remote-debugging-address=127.0.0.1",
                 f"--remote-debugging-port={port}",
@@ -1157,7 +1746,7 @@ class BrowserLauncher:
                     # Chrome 137+ removed --load-extension for branded builds.
                     # Use CDP Fetch.authRequired instead. Older builds keep the
                     # extension path because their Fetch domain is less reliable.
-                    browser_ver = get_version_from_browser_path(self.browser_path)
+                    browser_ver = get_version_from_browser_path(browser_path)
                     major = 0
                     if browser_ver:
                         try:
@@ -1210,7 +1799,7 @@ class BrowserLauncher:
                         port=port,
                         requested_port=port,
                         user_data_dir=user_data_dir,
-                        exe=self.browser_path,
+                        exe=browser_path,
                         started_at=int(time.time()),
                     )
                 except Exception as e:
@@ -1221,9 +1810,24 @@ class BrowserLauncher:
                 profile.port = port
                 profile.pid = proc.pid
 
-                # P0-04: Tạo event để CDP thread báo hiệu stealth script đã được nạp
+                # P0-04: Tạo event để CDP thread báo hiệu stealth script đã được nạp.
+                # R4: add the core-verification and navigation handshake events.
                 cdp_ready = threading.Event()
+                core_verified = threading.Event()
+                navigation_done = threading.Event()
                 self._cdp_ready_events[profile_id] = cdp_ready
+                self._core_verified_events[profile_id] = core_verified
+                self._navigation_events[profile_id] = navigation_done
+
+                # P2: đo brands/fullVersionList thật của Chrome host MỘT lần
+                # mỗi browser_version (cache theo phiên launcher) trước khi
+                # CDP thread build payload — sec-ch-ua khớp Chrome thật.
+                if not self._native_brands_cache.get(fp.browser_version):
+                    with self._native_brands_probe_lock:
+                        if not self._native_brands_cache.get(fp.browser_version):
+                            measured = self._measure_native_brands_standalone(browser_path)
+                            if measured:
+                                self._native_brands_cache[fp.browser_version] = measured
 
                 # Khởi chạy luồng gắn kết CDP để tiêm script và điều hướng
                 self._start_cdp_thread(
@@ -1238,13 +1842,42 @@ class BrowserLauncher:
                 actual_port = self.active_ports.get(profile_id, port)
                 page_ready = _safe_run_async(self._probe_page_ready(actual_port))
                 verification = {"ok": False, "checks": {}, "actual": None}
+                core_verification = verification
                 if page_ready and stealth_ok:
-                    verification = _safe_run_async(
+                    # Phase 1: verify the initial about:blank document before
+                    # the CDP thread is allowed to navigate.
+                    core_verification = _safe_run_async(
                         self._verify_emulation(actual_port, fp)
                     )
+                    verification = core_verification
+                core_verified.set()
+
+                # Phase 2: after navigation, verify Client Hints on HTTPS
+                # documents. about:blank has no secure-context Client Hints,
+                # so that check belongs only to this second pass.
+                if stealth_ok and page_ready and target_url and target_url != "about:blank":
+                    navigation_done.wait(timeout=12.0)
+                    if target_url.startswith("https://"):
+                        post_verification = _safe_run_async(
+                            self._verify_emulation(
+                                actual_port,
+                                fp,
+                                require_client_hints=True,
+                                deadline_seconds=5.0,
+                            )
+                        )
+                        if post_verification.get("ok"):
+                            verification = post_verification
+                        else:
+                            # Keep the core result visible for diagnostics but
+                            # do not claim the post-navigation check passed.
+                            post_verification["core"] = core_verification
+                            verification = post_verification
                 configuration_verified = bool(verification.get("ok"))
 
                 self._cdp_ready_events.pop(profile_id, None)
+                self._core_verified_events.pop(profile_id, None)
+                self._navigation_events.pop(profile_id, None)
 
                 if not stealth_ok:
                     print(f"[Launcher] CDP stealth injection failed or timed out for {profile_id}")
@@ -1276,6 +1909,10 @@ class BrowserLauncher:
                     "stealth_injected": stealth_ok,
                     "emulation_verified": configuration_verified,
                     "configuration_verified": configuration_verified,
+                    # MED-3: client automation phải check trường này, không chỉ
+                    # "success" — browser đã mở nhưng fingerprint có thể chưa
+                    # được che khi stealth/verify thất bại.
+                    "degraded": not cdp_ready_final,
                     "verification": verification,
                     "warnings": launch_warnings,
                     "warning": "; ".join(warning_parts) if warning_parts else None,
@@ -1289,6 +1926,8 @@ class BrowserLauncher:
                         pass
                 self._clear_process(profile_id)
                 self._cdp_ready_events.pop(profile_id, None)
+                self._core_verified_events.pop(profile_id, None)
+                self._navigation_events.pop(profile_id, None)
                 print(f"[Launcher] Lỗi khởi chạy: {type(e).__name__}: {e}")
                 return {
                     "success": False,
@@ -1300,19 +1939,26 @@ class BrowserLauncher:
         with self._launch_locks[profile_id]:
             profile = self.manager.get_profile(profile_id)
             if not profile:
-                return {"success": False, "error": "Profile không tồn tại"}
+                # Metadata đã bị xóa nhưng runtime record có thể còn giữ một
+                # browser mồ côi. Trả lỗi ở đây từng chặn stop_all/shutdown
+                # vĩnh viễn trên data dir có record stale của profile đã xóa.
+                stale_record = self._runtime_store.get(profile_id) or {}
+                if not stale_record.get("pid"):
+                    return {"success": False, "error": "Profile không tồn tại"}
             proc = self.active_processes.get(profile_id)
             if proc and proc.poll() is not None:
                 self._clear_process(profile_id)
                 return {"success": True, "message": "Trình duyệt đã đóng"}
 
             record = self._runtime_store.get(profile_id) or {}
-            pid = proc.pid if proc else (record.get("pid") or profile.pid)
+            pid = proc.pid if proc else (
+                record.get("pid") or (profile.pid if profile else None)
+            )
             if not pid:
                 self._clear_process(profile_id)
                 return {"success": True, "message": "Profile đã dừng"}
             user_data_dir = record.get("user_data_dir") or os.path.join(
-                PROFILES_DATA_DIR, profile.id, "user_data"
+                PROFILES_DATA_DIR, profile_id, "user_data"
             )
             identity = None
             if not proc:
@@ -1386,10 +2032,13 @@ class BrowserLauncher:
             self._clear_process(profile_id)
             return {"success": True, "message": "Đã xác nhận trình duyệt dừng"}
 
-    def stop_all(self):
+    def stop_all(self, profile_ids: Optional[List[str]] = None):
         ids = set(self.active_processes)
         ids.update(self._runtime_store.all().keys())
         ids.update(p.id for p in self.manager.list_profiles() if p.pid or p.status == "running")
+        if profile_ids:
+            wanted = set(profile_ids)
+            ids &= wanted
         results = {pid: self.stop(pid) for pid in ids}
         failed = [pid for pid, result in results.items() if not result.get("success")]
         return {"success": not failed, "failed_profile_ids": failed, "results": results,
@@ -1495,6 +2144,319 @@ class BrowserLauncher:
             print(f"[Launcher] Không thể nạp cookies qua CDP: {type(e).__name__} {e}")
             return False
 
+    def fetch_facebook_pages(
+        self, profile_id: str, timeout: float = 40.0, deep: bool = False
+    ) -> Dict[str, Any]:
+        """Liệt kê fanpage profile này sở hữu/quản lý, đọc trực tiếp từ phiên đang chạy.
+
+        Mở tab facebook.com/bookmarks/pages bằng session đã đăng nhập của
+        profile (tab có stealth như mọi tab khác), đọc DOM, rồi đóng tab.
+        ``deep=True``: sau danh sách, quét thêm TỪNG page (mở tuần tự trên
+        cùng một tab) để lấy ngày tạo + thời gian bài đăng gần nhất và gắn
+        trạng thái theo ``classify_facebook_page``.
+
+        Trả về {"logged_in": bool, "pages": [...], "url": str}.
+        """
+        running = self.is_running(profile_id)
+        port = self.active_ports.get(profile_id)
+        if not port or not running:
+            raise RuntimeError("Hãy mở profile trước khi đọc fanpage.")
+        data = _safe_run_async(self._facebook_pages_cdp(port, timeout))
+        if deep and data.get("logged_in") and data.get("pages"):
+            per_page = 8.0
+            deep_timeout = min(300.0, 20.0 + per_page * len(data["pages"]))
+            try:
+                details = _safe_run_async(
+                    self._facebook_pages_deep_cdp(
+                        port, data["pages"], timeout=deep_timeout
+                    )
+                )
+            except Exception:
+                details = {}
+            now_iso = datetime.date.today().isoformat()
+            for page in data["pages"]:
+                info = details.get(page.get("url")) or {}
+                page["created_raw"] = info.get("created_raw")
+                page["last_post_raw"] = info.get("last_post_raw")
+                page["detail_synced"] = True
+                created = _parse_fb_created_date(page.get("created_raw"))
+                if created:
+                    page["created_date"] = created.isoformat()
+                times = info.get("times") or []
+                if times:
+                    best = min(
+                        times, key=lambda t: _fb_unit_to_days(t["n"], t["u"])
+                    )
+                    page["last_post_days"] = _fb_unit_to_days(best["n"], best["u"])
+                    if not page.get("last_post_raw"):
+                        page["last_post_raw"] = f"{best['n']} {best['u']}"
+                page.update(classify_facebook_page(page))
+                page["detail_synced_at"] = now_iso
+        return data
+
+    async def _facebook_pages_cdp(self, port: int, timeout: float = 40.0) -> Dict[str, Any]:
+        import websockets
+
+        def _http_json(path, method="GET"):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}{path}", method=method
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = resp.read().decode("utf-8", "replace")
+                try:
+                    return json.loads(body)
+                except json.JSONDecodeError:
+                    return {}
+
+        from urllib.parse import quote
+
+        new_url = f"/json/new?{quote('https://www.facebook.com/bookmarks/pages', safe='')}"
+        try:
+            try:
+                info = await asyncio.to_thread(_http_json, new_url, "PUT")
+            except Exception:
+                info = await asyncio.to_thread(_http_json, new_url, "GET")
+            target_id = (info or {}).get("id")
+        except Exception as e:
+            raise RuntimeError(
+                f"Không mở được tab Facebook trong profile: {type(e).__name__}: {e}"
+            ) from e
+        if not target_id:
+            raise RuntimeError("Chrome không trả về tab mới.")
+
+        try:
+            # Đợi tab navigate tới facebook.com (auto-attach sẽ configure
+            # stealth rồi resume tab như mọi tab user mở).
+            ws_url = None
+            deadline = time.monotonic() + min(timeout, 15.0)
+            while time.monotonic() < deadline and not ws_url:
+                try:
+                    targets = await asyncio.to_thread(_http_json, "/json/list")
+                    for t in targets or []:
+                        if t.get("id") != target_id:
+                            continue
+                        url = (t.get("url") or "").lower()
+                        if "facebook.com" in url and t.get("webSocketDebuggerUrl"):
+                            ws_url = t["webSocketDebuggerUrl"]
+                            break
+                except Exception:
+                    pass
+                if not ws_url:
+                    await asyncio.sleep(0.4)
+            if not ws_url:
+                raise RuntimeError(
+                    "Tab Facebook không tải được trong thời gian chờ."
+                )
+
+            async with websockets.connect(
+                ws_url, max_size=10 * 1024 * 1024, open_timeout=3
+            ) as ws:
+                # Tab vừa mở: execution context có thể chưa sẵn sàng khi
+                # evaluate đầu tiên gửi đi (CDP trả protocol error). Retry
+                # cho tới khi trang trả được dict dữ liệu.
+                eval_deadline = time.monotonic() + min(timeout, 30.0)
+                attempt = 0
+                while time.monotonic() < eval_deadline and attempt < 5:
+                    attempt += 1
+                    await ws.send(json.dumps({
+                        "id": 60001,
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "expression": _FB_SCRAPE_JS,
+                            "awaitPromise": True,
+                            "returnByValue": True,
+                        },
+                    }))
+                    resp_deadline = min(
+                        eval_deadline, time.monotonic() + 12.0
+                    )
+                    got_value = None
+                    context_not_ready = False
+                    while time.monotonic() < resp_deadline:
+                        msg = json.loads(await asyncio.wait_for(
+                            ws.recv(),
+                            timeout=max(0.2, resp_deadline - time.monotonic()),
+                        ))
+                        if msg.get("id") != 60001:
+                            continue
+                        err = msg.get("error")
+                        if err:
+                            text = str(err.get("message") or "")
+                            if "context" in text.lower() or "Navigation" in text:
+                                context_not_ready = True
+                            else:
+                                raise RuntimeError(
+                                    f"CDP từ chối đọc tab Facebook: {text}"
+                                )
+                            break
+                        if (msg.get("result") or {}).get("exceptionDetails"):
+                            raise RuntimeError(
+                                "Lỗi đọc trang Facebook trong tab profile."
+                            )
+                        got_value = (
+                            (msg.get("result") or {}).get("result") or {}
+                        ).get("value")
+                        break
+                    if isinstance(got_value, dict):
+                        got_value["logged_in"] = not got_value.get("loggedOut")
+                        return got_value
+                    if not context_not_ready:
+                        await asyncio.sleep(0.6)
+                    else:
+                        await asyncio.sleep(0.8)
+                raise RuntimeError("Đọc trang Facebook quá thời gian chờ.")
+        finally:
+            # Tab này do tool mở — luôn đóng lại, kể cả khi scrape lỗi.
+            try:
+                await asyncio.to_thread(_http_json, f"/json/close/{target_id}", "PUT")
+            except Exception:
+                try:
+                    await asyncio.to_thread(_http_json, f"/json/close/{target_id}", "GET")
+                except Exception:
+                    pass
+
+    async def _facebook_pages_deep_cdp(
+        self, port: int, pages: List[Dict[str, Any]], timeout: float = 120.0
+    ) -> Dict[str, Dict[str, Any]]:
+        """Quét chi tiết từng page: bài gần nhất (feed) + ngày tạo (about).
+
+        Dùng MỘT tab duyệt tuần tự các page thay vì mở N tab — mỗi page tốn
+        ~4-8s (2 lần navigate). Trả {page_url: {"times", "created_raw",
+        "last_post_raw", "title"}}. Trang nào lỗi vẫn có entry rỗng để UI
+        hiển thị "không rõ" thay vì treo.
+        """
+        import websockets
+
+        def _http_json(path, method="GET"):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}{path}", method=method
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = resp.read().decode("utf-8", "replace")
+                try:
+                    return json.loads(body)
+                except json.JSONDecodeError:
+                    return {}
+
+        from urllib.parse import quote
+
+        try:
+            try:
+                info = await asyncio.to_thread(_http_json, "/json/new?about%3Ablank", "PUT")
+            except Exception:
+                info = await asyncio.to_thread(_http_json, "/json/new?about%3Ablank", "GET")
+            target_id = (info or {}).get("id")
+        except Exception as e:
+            raise RuntimeError(
+                f"Không mở được tab quét chi tiết: {type(e).__name__}: {e}"
+            ) from e
+        if not target_id:
+            raise RuntimeError("Chrome không trả về tab mới.")
+
+        results: Dict[str, Dict[str, Any]] = {}
+        try:
+            ws_url = None
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not ws_url:
+                try:
+                    targets = await asyncio.to_thread(_http_json, "/json/list")
+                    for t in targets or []:
+                        if t.get("id") == target_id and t.get("webSocketDebuggerUrl"):
+                            ws_url = t["webSocketDebuggerUrl"]
+                            break
+                except Exception:
+                    pass
+                if not ws_url:
+                    await asyncio.sleep(0.3)
+            if not ws_url:
+                raise RuntimeError("Tab quét chi tiết không kết nối được.")
+
+            async with websockets.connect(ws_url, open_timeout=3) as ws:
+                msg_id = 61000
+
+                async def _evaluate(expression: str, deadline_s: float = 9.0):
+                    """Navigate-ready evaluate với retry khi context chưa sẵn."""
+                    nonlocal msg_id
+                    end = time.monotonic() + deadline_s
+                    attempt = 0
+                    while time.monotonic() < end and attempt < 6:
+                        attempt += 1
+                        msg_id += 1
+                        my_id = msg_id
+                        await ws.send(json.dumps({
+                            "id": my_id,
+                            "method": "Runtime.evaluate",
+                            "params": {
+                                "expression": expression,
+                                "awaitPromise": True,
+                                "returnByValue": True,
+                            },
+                        }))
+                        resp_deadline = min(end, time.monotonic() + 7.0)
+                        got = None
+                        not_ready = False
+                        while time.monotonic() < resp_deadline:
+                            msg = json.loads(await asyncio.wait_for(
+                                ws.recv(),
+                                timeout=max(0.2, resp_deadline - time.monotonic()),
+                            ))
+                            if msg.get("id") != my_id:
+                                continue
+                            err = msg.get("error")
+                            if err:
+                                text = str(err.get("message") or "")
+                                if "context" in text.lower() or "Navigation" in text:
+                                    not_ready = True
+                                break
+                            value = ((msg.get("result") or {}).get("result") or {}).get("value")
+                            got = value if isinstance(value, dict) else None
+                            break
+                        if got is not None:
+                            return got
+                        await asyncio.sleep(0.7 if not_ready else 0.5)
+                    return None
+
+                for page in pages:
+                    page_url = (page.get("url") or "").strip()
+                    entry: Dict[str, Any] = {
+                        "times": [], "created_raw": None, "last_post_raw": None,
+                    }
+                    if page_url:
+                        # 1) Trang chính page: mốc thời gian bài đăng (feed).
+                        msg_id += 1
+                        await ws.send(json.dumps({
+                            "id": msg_id,
+                            "method": "Page.navigate",
+                            "params": {"url": page_url},
+                        }))
+                        main_metrics = await _evaluate(_FB_PAGE_METRICS_JS)
+                        if main_metrics:
+                            entry["times"] = main_metrics.get("times") or []
+                            entry["title"] = main_metrics.get("title")
+                        # 2) Trang about: nhãn ngày tạo trang.
+                        about_url = page_url.rstrip("/") + "/about"
+                        msg_id += 1
+                        await ws.send(json.dumps({
+                            "id": msg_id,
+                            "method": "Page.navigate",
+                            "params": {"url": about_url},
+                        }))
+                        about_metrics = await _evaluate(_FB_PAGE_METRICS_JS)
+                        if about_metrics and about_metrics.get("createdRaw"):
+                            entry["created_raw"] = about_metrics["createdRaw"]
+                        elif main_metrics and main_metrics.get("createdRaw"):
+                            entry["created_raw"] = main_metrics["createdRaw"]
+                    results[page_url] = entry
+            return results
+        finally:
+            try:
+                await asyncio.to_thread(_http_json, f"/json/close/{target_id}", "PUT")
+            except Exception:
+                try:
+                    await asyncio.to_thread(_http_json, f"/json/close/{target_id}", "GET")
+                except Exception:
+                    pass
+
     def launch_all(
         self,
         delay: float = 0.8,
@@ -1503,73 +2465,64 @@ class BrowserLauncher:
         cancel_event: Optional[threading.Event] = None,
         progress_callback: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
-        """Start every stopped profile, queueing when max_concurrent is reached."""
+        """Start every stopped profile, running launches in parallel batches.
+
+        ``max_concurrent`` giới hạn số launch thực hiện ĐỒNG THỜI — browser
+        mở xong vẫn được giữ mở. Phiên bản cũ chờ "slot trống" theo số browser
+        đang sống nên bị kẹt vô hạn khi số profile lớn hơn limit (start-all
+        không đóng browser nào).
+        """
+        import concurrent.futures
+
         profiles = self.manager.list_profiles()
-        results = []
-        limit = max(0, int(max_concurrent or 0))
+        if max_concurrent and int(max_concurrent) > 0:
+            limit = max(1, int(max_concurrent))
+        else:
+            limit = max(1, len(profiles))
 
-        def live_process_count() -> int:
-            count = 0
-            for pid, proc in list(self.active_processes.items()):
-                if proc.poll() is None:
-                    count += 1
-                else:
-                    self._clear_process(pid)
-            return count
-
-        for p in profiles:
+        def _launch_one(p):
             if cancel_event and cancel_event.is_set():
-                results.append({
-                    "profile_id": p.id,
-                    "name": p.name,
-                    "result": {"success": False, "error": "Đã hủy tác vụ bởi người dùng"}
-                })
-                continue
-
-            if self.is_running(p.id):
-                item = {
-                    "profile_id": p.id,
-                    "name": p.name,
-                    "result": {"success": True, "message": "Đang chạy"},
-                }
-                results.append(item)
-                if progress_callback:
-                    try:
-                        progress_callback(p.id, item["result"])
-                    except Exception:
-                        pass
-                continue
-
-            if limit:
-                waited = 0.0
-                while live_process_count() >= limit:
-                    if cancel_event and cancel_event.is_set():
-                        break
-                    time.sleep(0.5)
-                    waited += 0.5
-                    if waited % 15 == 0:
-                        print(
-                            f"[Launcher] Đang chờ slot trống để mở {p.name} "
-                            f"(giới hạn {limit} profile đồng thời)."
-                        )
-
-            if cancel_event and cancel_event.is_set():
-                results.append({
-                    "profile_id": p.id,
-                    "name": p.name,
-                    "result": {"success": False, "error": "Đã hủy tác vụ bởi người dùng"}
-                })
-                break
-
-            res = self.launch(p.id, open_url=open_url)
-            item = {"profile_id": p.id, "name": p.name, "result": res}
-            results.append(item)
+                res = {"success": False, "error": "Đã hủy tác vụ bởi người dùng"}
+            else:
+                res = self.launch(p.id, open_url=open_url)
             if progress_callback:
                 try:
                     progress_callback(p.id, res)
                 except Exception:
                     pass
+            return {"profile_id": p.id, "name": p.name, "result": res}
 
-            if delay > 0:
-                time.sleep(delay)
+        results: List[Dict[str, Any]] = []
+        futures = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=limit) as pool:
+            for p in profiles:
+                if cancel_event and cancel_event.is_set():
+                    results.append({
+                        "profile_id": p.id,
+                        "name": p.name,
+                        "result": {"success": False, "error": "Đã hủy tác vụ bởi người dùng"},
+                    })
+                    continue
+                if self.is_running(p.id):
+                    item = {
+                        "profile_id": p.id,
+                        "name": p.name,
+                        "result": {"success": True, "message": "Đang chạy"},
+                    }
+                    results.append(item)
+                    if progress_callback:
+                        try:
+                            progress_callback(p.id, item["result"])
+                        except Exception:
+                            pass
+                    continue
+                futures.append(pool.submit(_launch_one, p))
+                if delay > 0:
+                    time.sleep(delay)
+            for fut in futures:
+                results.append(fut.result())
+
+        # Giữ thứ tự theo danh sách profile cho UI ổn định.
+        order = {p.id: i for i, p in enumerate(profiles)}
+        results.sort(key=lambda r: order.get(r.get("profile_id"), len(order)))
         return results

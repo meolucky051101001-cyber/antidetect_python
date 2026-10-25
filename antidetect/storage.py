@@ -96,10 +96,41 @@ class InterProcessLock:
             self.fd = None
 
 
+class ReentrantInterProcessLock:
+    """InterProcessLock reentrant theo thread.
+
+    B1: các method mutate giữ file lock quanh toàn bộ chuỗi
+    read-modify-write; save_profiles gọi bên trong cũng cần vào cùng file
+    lock, nên depth-counter chỉ khoá thật ở lần ngoài cùng.
+    """
+
+    def __init__(self, lock_path: str, timeout: float = 8.0):
+        self._local = threading.local()
+        self._inner = InterProcessLock(lock_path, timeout)
+
+    def __enter__(self):
+        depth = getattr(self._local, "depth", 0)
+        if depth == 0:
+            self._inner.__enter__()
+        self._local.depth = depth + 1
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        depth = getattr(self._local, "depth", 1) - 1
+        self._local.depth = depth
+        if depth == 0:
+            self._inner.__exit__(exc_type, exc_val, exc_tb)
+        return False
+
+
 class ProfileManager:
 
     def __init__(self):
         self._lock = threading.RLock()
+        # B1: file lock reentrant dùng chung cho mọi chuỗi read-modify-write.
+        self._ipc_lock = ReentrantInterProcessLock(
+            os.path.join(DATA_DIR, "profiles.lock")
+        )
         self._corrupted = False  # Cờ bảo vệ chống ghi đè khi file hỏng
         self._cache: Optional[List[Profile]] = None
         self._cache_mtime: float = 0.0
@@ -110,9 +141,12 @@ class ProfileManager:
     def _ensure_profiles_file(self):
         with self._lock:
             if not os.path.exists(PROFILES_JSON):
-                temp_file = f"{PROFILES_JSON}.tmp"
+                # Tmp name uuid: 2 process cùng init không giành chung file tạm.
+                temp_file = f"{PROFILES_JSON}.tmp.{uuid.uuid4().hex}"
                 with open(temp_file, "w", encoding="utf-8") as f:
                     json.dump([], f)
+                    f.flush()
+                    os.fsync(f.fileno())
                 os.replace(temp_file, PROFILES_JSON)
                 self._cache = []
                 self._cache_mtime = os.stat(PROFILES_JSON).st_mtime_ns
@@ -205,8 +239,9 @@ class ProfileManager:
             _safe_log(f"[Storage] Cảnh báo tạo backup: {type(e).__name__}: {e}")
 
     def save_profiles(self, profiles: List[Profile]):
-        lock_path = os.path.join(DATA_DIR, "profiles.lock")
-        with self._lock, InterProcessLock(lock_path):
+        # B1: lock reentrant — các method mutate đã giữ cùng lock này quanh
+        # read-modify-write; gọi save_profiles trực tiếp vẫn khoá đúng.
+        with self._lock, self._ipc_lock:
             # Re-read the current file even when callers invoke save directly.
             self.list_profiles()
             # Chống ghi đè khi file đang bị hỏng
@@ -234,6 +269,13 @@ class ProfileManager:
                     ) from e
                 _safe_log(f"[Storage] Cảnh báo kho secret hỏng: {e}")
             except Exception as e:
+                # H3: nuốt lỗi ở đây sẽ ghi password=null xuống đĩa trong khi
+                # caller tưởng mật khẩu đã lưu — mất credential thầm lặng.
+                if has_plaintext_secret:
+                    raise RuntimeError(
+                        "Không di chuyển được mật khẩu proxy vào kho DPAPI "
+                        f"({type(e).__name__}: {e}). Đã hủy ghi để không mất mật khẩu."
+                    ) from e
                 _safe_log(f"[Storage] Di chuyển mật khẩu proxy sang DPAPI: {type(e).__name__}: {e}")
 
             # P0-01: Tạo bản sao lưu timestamped trước khi replace
@@ -294,7 +336,9 @@ class ProfileManager:
         notes: str = "",
         tags: Optional[List[str]] = None,
     ) -> Profile:
-        with self._lock:
+        # B1: giữ file lock quanh cả chuỗi read-modify-write để hai process
+        # (server + cli) cùng ghi không mất profile của nhau.
+        with self._lock, self._ipc_lock:
             if fingerprint is None:
                 fingerprint = generate_fingerprint(target_os=target_os)
 
@@ -319,7 +363,9 @@ class ProfileManager:
 
     def update_profile(self, updated: Profile, expected_revision: Optional[int] = None) -> Optional[Profile]:
         from .models import REDACTED_SECRET
-        with self._lock:
+        # B1: read-modify-write trong file lock; list_profiles() bên trong đọc
+        # lại từ đĩa (mtime đổi khi process khác vừa ghi).
+        with self._lock, self._ipc_lock:
             profiles = self.list_profiles()
             found = False
             for i, p in enumerate(profiles):
@@ -377,6 +423,29 @@ class ProfileManager:
                 return updated
             return None
 
+    def update_profiles_batch(self, updated_list: List[Profile]) -> List[str]:
+        """Cập nhật nhiều profile trong MỘT lần đọc/ghi (thao tác hàng loạt).
+
+        Chỉ dành cho các cập nhật không đổi proxy (vd. switch-location-all):
+        secret password handling của update_profile không áp dụng ở đây.
+        Trả về danh sách id thực sự được ghi.
+        """
+        with self._lock, self._ipc_lock:
+            profiles = self.list_profiles()
+            by_id = {p.id: p for p in profiles}
+            updated_ids: List[str] = []
+            for updated in updated_list:
+                current = by_id.get(updated.id)
+                if current is None:
+                    continue
+                updated.revision = (getattr(current, "revision", 1) or 1) + 1
+                updated.updated_at = int(time.time())
+                by_id[updated.id] = updated
+                updated_ids.append(updated.id)
+            if updated_ids:
+                self.save_profiles(list(by_id.values()))
+            return updated_ids
+
     def delete_profile(self, profile_id: str) -> bool:
         """Delete a profile with retryable, secret-safe ordering.
 
@@ -386,58 +455,64 @@ class ProfileManager:
         save allows the secret to be removed.
         """
         self._validate_profile_id(profile_id)
-        with self._lock:
+        # B1: rmtree user_data có thể chậm (thư mục GB, retry khi file bị
+        # khóa) — làm nó NGOÀI file lock để không chặn create/update của
+        # process khác tới timeout 8s.
+        if not any(p.id == profile_id for p in self.list_profiles()):
+            return False
+
+        p_dir = os.path.join(PROFILES_DATA_DIR, profile_id)
+        if os.path.exists(p_dir):
+            last_error = None
+            for attempt in range(3):
+                try:
+                    shutil.rmtree(p_dir)
+                    last_error = None
+                    break
+                except PermissionError as e:
+                    last_error = e
+                    if attempt < 2:
+                        time.sleep(0.5 * (attempt + 1))
+                except Exception as e:
+                    last_error = e
+                    break
+
+            if os.path.exists(p_dir):
+                _safe_log(
+                    f"[Storage] Không thể xóa thư mục profile {profile_id} "
+                    f"(file đang bị khóa). Hãy đóng trình duyệt trước khi xóa. "
+                    f"Chi tiết: {type(last_error).__name__ if last_error else 'unknown'}"
+                )
+                raise ProfileDeletionError(
+                    "Không thể xóa thư mục profile (file đang bị khóa). "
+                    "Metadata và mật khẩu proxy được giữ nguyên; hãy đóng trình duyệt rồi thử lại."
+                )
+
+        # Directory is gone. Persist the metadata removal before deleting
+        # the DPAPI entry: if this write fails, the secret is still needed
+        # for a retry.
+        with self._lock, self._ipc_lock:
             profiles = self.list_profiles()
             new_list = [p for p in profiles if p.id != profile_id]
             if len(new_list) == len(profiles):
+                # Process khác đã xóa metadata sau khi ta đọc ở trên.
                 return False
-
-            p_dir = os.path.join(PROFILES_DATA_DIR, profile_id)
-            if os.path.exists(p_dir):
-                last_error = None
-                for attempt in range(3):
-                    try:
-                        shutil.rmtree(p_dir)
-                        last_error = None
-                        break
-                    except PermissionError as e:
-                        last_error = e
-                        if attempt < 2:
-                            time.sleep(0.5 * (attempt + 1))
-                    except Exception as e:
-                        last_error = e
-                        break
-
-                if os.path.exists(p_dir):
-                    _safe_log(
-                        f"[Storage] Không thể xóa thư mục profile {profile_id} "
-                        f"(file đang bị khóa). Hãy đóng trình duyệt trước khi xóa. "
-                        f"Chi tiết: {type(last_error).__name__ if last_error else 'unknown'}"
-                    )
-                    raise ProfileDeletionError(
-                        "Không thể xóa thư mục profile (file đang bị khóa). "
-                        "Metadata và mật khẩu proxy được giữ nguyên; hãy đóng trình duyệt rồi thử lại."
-                    )
-
-            # Directory is gone. Persist the metadata removal before deleting
-            # the DPAPI entry: if this write fails, the secret is still needed
-            # for a retry.
             self.save_profiles(new_list)
 
-            try:
-                delete_proxy_password(profile_id)
-            except SecretStoreCorruption as e:
-                # The profile is already gone; do not resurrect metadata just
-                # because the encrypted store is unreadable. Leave an audit log.
-                _safe_log(
-                    f"[Storage] Profile {profile_id} đã xóa nhưng không dọn được secret: {e}"
-                )
-            except Exception as e:
-                _safe_log(
-                    f"[Storage] Profile {profile_id} đã xóa nhưng dọn secret thất bại: "
-                    f"{type(e).__name__}: {e}"
-                )
-            return True
+        try:
+            delete_proxy_password(profile_id)
+        except SecretStoreCorruption as e:
+            # The profile is already gone; do not resurrect metadata just
+            # because the encrypted store is unreadable. Leave an audit log.
+            _safe_log(
+                f"[Storage] Profile {profile_id} đã xóa nhưng không dọn được secret: {e}"
+            )
+        except Exception as e:
+            _safe_log(
+                f"[Storage] Profile {profile_id} đã xóa nhưng dọn secret thất bại: "
+                f"{type(e).__name__}: {e}"
+            )
+        return True
 
     def duplicate_profile(
         self, profile_id: str, new_name: Optional[str] = None, copy_data: bool = False
@@ -473,14 +548,18 @@ class ProfileManager:
                 orig_user_data = os.path.join(orig_dir, "user_data")
                 new_user_data = os.path.join(new_dir, "user_data")
                 if os.path.exists(orig_user_data):
+                    # MED-4: nuốt lỗi copytree ở đây từng khiến bản sao nửa
+                    # chừng/corrupt được báo thành công. Raise để API trả lỗi
+                    # rõ ràng; profile mới đã tạo nhưng user_data trống.
                     try:
                         def ignore_locks(d, files):
                             return [f for f in files if f in ("lockfile", "DevToolsActivePort", "SingletonLock", "SingletonCookie", "SingletonSocket")]
                         shutil.copytree(orig_user_data, new_user_data, dirs_exist_ok=True, ignore=ignore_locks)
                     except Exception as e:
-                        _safe_log(
-                            f"[Storage] Lỗi sao chép dữ liệu user_data: "
-                            f"{type(e).__name__}: {e}"
-                        )
+                        raise RuntimeError(
+                            "Sao chép dữ liệu phiên (user_data) thất bại: "
+                            f"{type(e).__name__}: {e}. Profile mới đã được tạo "
+                            "nhưng KHÔNG có dữ liệu phiên."
+                        ) from e
 
             return new_profile

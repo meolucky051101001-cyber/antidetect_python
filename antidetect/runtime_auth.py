@@ -54,3 +54,30 @@ def delete_runtime():
         RUNTIME_FILE.unlink()
     except OSError:
         pass
+
+
+API_TOKEN_FILE = _DATA_DIR / 'api_token.dpapi'
+
+
+def write_api_token_hash(token_hash):
+    """Lưu SHA-256 hex của API token dài hạn (DPAPI). Plaintext không lưu."""
+    API_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    pending = API_TOKEN_FILE.with_suffix('.tmp')
+    pending.write_bytes(_crypt(json.dumps({"sha256": token_hash}).encode(), True))
+    os.replace(pending, API_TOKEN_FILE)
+
+
+def read_api_token_hash():
+    try:
+        data = json.loads(_crypt(API_TOKEN_FILE.read_bytes(), False))
+        h = data.get("sha256")
+        return h if isinstance(h, str) and h else None
+    except Exception:
+        return None
+
+
+def delete_api_token_hash():
+    try:
+        API_TOKEN_FILE.unlink()
+    except OSError:
+        pass

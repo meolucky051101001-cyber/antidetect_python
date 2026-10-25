@@ -208,6 +208,12 @@ def main():
 
     elif args.command == "delete":
         from antidetect.storage import ProfileDeletionError
+        # Giống API web: dừng browser trước khi xóa — nếu không Chrome giữ
+        # khóa user_data và delete fail với ProfileDeletionError.
+        stopped = launcher.stop(args.id)
+        if not stopped.get("success"):
+            print(stopped.get("error", "Chưa dừng được profile."))
+            sys.exit(1)
         try:
             deleted = manager.delete_profile(args.id)
         except ProfileDeletionError as e:
