@@ -163,10 +163,10 @@ Chrome sạch của máy** (đo 1 lần, ghi lại — không so với 0%).
 
 ## 5. Checklist trước khi đưa profile vào quy trình thật
 
-1. `python -m pytest -q` → 229 passed + 1 skipped (baseline dev 2026-10-26;
+1. `python -m pytest -q` → 255 passed + 1 skipped (baseline dev 2026-10-26;
    skipped là Playwright UI smoke opt-in). Khi sửa nhiều chạy thêm
    `python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing`
-   (coverage hiện tại 65.59%; CI fail dưới 58%).
+   (coverage hiện tại 68.15%; CI fail dưới 58%).
 2. `python tools\verify_live.py --profile <id> --json $env:TEMP\v.json` →
    RESULT: PASS.
 3. `python tools\detector_audit.py --profile <id> --screenshots ... --json ...`

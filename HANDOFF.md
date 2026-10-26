@@ -9,8 +9,8 @@
 
 Tool hoàn chỉnh ở mức production-ready có điều kiện: **HEAD `3ff038a`
 (docs handoff), working tree có thay đổi roadmap P0 + P1 + P2 CHƯA COMMIT**,
-**229 pytest passed + 1 skipped** (Playwright UI smoke chưa bật trong lần chạy
-này), coverage **65.59%** (gate CI 58%), ruff/compileall sạch, E2E smoke
+**255 pytest passed + 1 skipped** (Playwright UI smoke chưa bật trong lần chạy
+này), coverage **68.15%** (gate CI 58%), ruff/compileall sạch, E2E smoke
 **24/24** và Playwright UI smoke **1/1** trên code hiện tại (Chrome thật, data
 tạm, không proxy).
 Fingerprint đạt "không phân biệt được khỏi Chrome thật trên máy" trong phạm vi
@@ -144,9 +144,9 @@ Lịch sử gần nhất:
 4. **Refactor còn lại (P1 đã làm một phần):** launcher launch/stop/CDP core
    vẫn ~1.9k dòng; `web/app.py` ~1.4k dòng còn route + singleton; `index.html`
    còn ~68 inline handler; CSP chưa bỏ được `script-src-attr 'unsafe-inline'`.
-   Coverage thấp ở `launcher.py` (29%), `facebook.py` (29%) và
-   `server_control.py` (32%) vì cần Chrome/CDP/PowerShell thật; `cookies.py`
-   đã lên 97% nhờ test CDP giả lập.
+   Coverage thấp ở `launcher.py` (29%) vì cần Chrome/CDP thật; `facebook.py`
+   đã lên 57% và `server_control.py` 67% nhờ test CDP/PowerShell giả lập,
+   `cookies.py` 97%.
 5. **Playwright UI smoke không chạy trong CI** (Playwright không nằm trong
    requirements-dev) nhưng **bắt buộc trong checklist pre-release** khi thay
    đổi UI. CI vẫn chỉ unit + coverage; phải chạy tay trước phát hành. P2 còn
@@ -169,9 +169,9 @@ Lịch sử gần nhất:
 
 ```powershell
 cd C:\Users\admin\Documents\antigravity\blissful-maxwell\antidetect_python
-python -m pytest -q                                        # 229 passed + 1 skipped
+python -m pytest -q                                        # 255 passed + 1 skipped
 python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing
-                                                           # coverage 65.59%, gate CI 58%
+                                                           # coverage 68.15%, gate CI 58%
 python -m ruff check .                                     # correctness-only, sạch
 python -m compileall -q antidetect web tools run.py        # sạch
 $env:ANTIDETECT_RUN_UI_SMOKE = "1"

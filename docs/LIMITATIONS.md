@@ -211,16 +211,18 @@ Chi tiết và bằng chứng: `docs/VERIFICATION_2026-10-24.md`.
 
 ### 6.4. Trạng thái kiểm thử sau roadmap P0 + P1 + P2 (2026-10-26)
 
-- **Test:** 229 passed + 1 skipped (skipped là Playwright UI smoke opt-in).
-  **Coverage 65.59%** (gate CI 58%); cookies **97%**, launcher 29%, facebook 29%,
-  server_control 32%; `web/app.py` 69%, `web/schemas.py` 100%, `updater.py` 77%,
-  `bulk_jobs.py` 93%. Đợt bổ sung test nhiễu có `test_cookies.py` (11 test),
-  `test_facebook_details.py` (6 test), `test_updater.py` (31 test, gồm apply lỗi
-  giữa chừng và xoay public key) và `test_bulk_jobs.py` (15 test, gồm takeover
-  lease, 25 profile và heartbeat-start fail). Toàn bộ chạy trên data tạm, không
-  đụng `data/`. Phần chưa phủ chủ yếu vẫn là launch/stop/CDP/Fanpage cần Chrome
-  thật và nhánh lỗi proxy. Unit test không thay thế E2E; mọi thay đổi launcher
-  vẫn phải chạy `tools\e2e_smoke.py` + live verify trên data tạm.
+- **Test:** 255 passed + 1 skipped (skipped là Playwright UI smoke opt-in).
+  **Coverage 68.15%** (gate CI 58%); cookies **97%**, facebook **57%**,
+  server_control **67%**, launcher 29%; `web/app.py` 69%, `web/schemas.py` 100%,
+  `updater.py` 77%, `bulk_jobs.py` 93%. Đợt bổ sung test nhiễu có
+  `test_cookies.py` (11 test), `test_facebook_details.py` (6 test),
+  `test_facebook_cdp.py` (8 test), `test_server_control.py` (18 test),
+  `test_updater.py` (31 test, gồm apply lỗi giữa chừng và xoay public key) và
+  `test_bulk_jobs.py` (15 test, gồm takeover lease, 25 profile và heartbeat-start
+  fail). Toàn bộ chạy trên data tạm, không đụng `data/`. Phần chưa phủ chủ yếu
+  vẫn là launch/stop/CDP thật, deep Fanpage (`fetch_pages_deep_cdp`) và nhánh lỗi
+  proxy. Unit test không thay thế E2E; mọi thay đổi launcher vẫn phải chạy
+  `tools\e2e_smoke.py` + live verify trên data tạm.
 - **Đã tách module (P1):** `browser_env`, `cookies`, `facebook` và stealth asset
   (`assets/stealth_page.js`, `assets/stealth_worker.js`) khỏi launcher;
   `web/schemas.py`, `web/services.py` khỏi `web/app.py`; JS/CSS dashboard trong
