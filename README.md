@@ -2,6 +2,8 @@
 
 Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, can thiệp dấu vân tay qua Chrome DevTools Protocol (CDP), hỗ trợ proxy xác thực và dashboard local.
 
+> **Trạng thái 2026-10-26:** roadmap P0 + P1 + P2 (chưa commit): CI Windows thật (`.github/workflows/ci.yml`, pytest + coverage gate 58%), pin dependency (`constraints.txt`), lint correctness (`ruff` qua `pyproject.toml`), UI Edit gửi `expected_revision` và xử lý 409, scheduler gia hạn lease bằng heartbeat + run history bền vững (`data/schedule_runs.json`, trả về qua `recent_runs`) + `run_id` idempotency, logging rotating + metrics API (`GET /api/system/metrics`), tách launcher → `browser_env`/`cookies`/`facebook`, stealth payload → `antidetect/assets/*.js`, DTO/service web → `web/schemas.py`/`web/services.py`, JS/CSS dashboard + `unlock.js` ra `/static` (CSP `script-src 'self'`). **P2-12**: Start-All dùng một slot chung xuyên instance (`data/bulk_jobs.json`, lease 90 giây + heartbeat, status/cancel được từ instance khác, scheduler tự bỏ qua khi có job). **P2-13**: nâng cấp/rollback có chữ ký Ed25519 (`tools/release.py`, `tools/update.py`, manifest `release.json` + SHA-256 từng file, chặn zip-slip/protected path, backup + auto-rollback, **không** tự động update), version **1.1.0**. Kiểm chứng hiện tại: **229 pytest passed + 1 skipped** (UI smoke opt-in), coverage **65.59%**, ruff/compileall sạch, E2E smoke **24/24**, Playwright UI smoke **1/1** (create/edit/export/import/schedule/start-stop, Chrome thật + data tạm). Leak audit bằng proxy thật trên build này **chưa chạy lại** (xem LIMITATIONS 6.4).
+>
 > **Trạng thái 2026-10-24:** đã qua review toàn diện + hardening production (xem [docs/VERIFICATION_2026-10-24.md](docs/VERIFICATION_2026-10-24.md)): khóa interprocess cho profiles.json, atexit không còn đóng browser của process khác, secrets.dpapi có fsync + backup, API thêm cờ `degraded`, `sec-ch-ua` khớp Chrome thật (đo grease brands runtime), và 2 chế độ stealth per-profile — **Unique** (mặc định: hash riêng mỗi profile, Pixelscan "masking detected") và **Authentic** (`stealth_disable` 5 nhóm: trùng Chrome thật trên máy, Pixelscan "not detected"; xem [docs/OPERATIONS.md](docs/OPERATIONS.md)). Nâng cấp chống phát hiện hướng AdsPower/GoLogin: font enumeration cross-OS đầy đủ (61 Win/92 macOS/22 Linux), speech voices chuẩn cross-OS (`instanceof` pass), battery/connection native-sync (hooks opt-in — wrapper bị Pixelscan phát hiện dù giá trị đúng), DOMRect/MediaDevices per-profile (chống nối profile), shader precision cross-OS, sync vị trí theo IP proxy (API + nút trong Edit modal); **GĐ2**: browser pin Chrome-for-Testing per-profile (`tools/install_browser.py`) — fingerprint ổn định khi Chrome tự update, verify_live drift baseline, detector matrix + Iphey/Fingerprint demo; **GĐ3**: audio noise per-index hash (không artifact phổ), TLS diversity qua pin đa phiên bản + JA3/JA4 đo trong leak_audit (MITM rewriting không khả thi — bỏ có lý do); **GĐ4**: `antidetect/human.py` HumanInput — gõ/chuột/scroll như người thật qua CDP Input domain cho automation (không inject JS, zero bề mặt detect mới). Dashboard: dark/light mode, filter chips + tag, multi-select bulk actions, wizard tạo hàng loạt, export/import profiles, lịch tự động (scheduler), API token dài hạn, stats fanpage, viewer app.log, uptime/RAM per profile. Trước đó (2026-10-23): S1–S9 + R1–R4 + P0 — CreepJS 0% stealth, keepalive CDP đã sửa. Leak audit proxy HTTP thật: Proxy 1 full PASS. **Chưa phải sản phẩm production-grade**; xem [FIXES.md](FIXES.md), [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ---
@@ -35,6 +37,12 @@ Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, ca
    - Cổng CDP thật được đọc từ `DevToolsActivePort`; port được reserve trong process.
    - `stop`/`stop-all` có thể dừng browser do process khác khởi chạy sau khi đọc runtime state.
    - Xác minh process bằng PID + image name + `user-data-dir` trước khi gửi lệnh tắt.
+
+6. **Vận hành nhiều instance & nâng cấp có kiểm soát**
+   - Bulk Start-All (thủ công hoặc theo lịch) dùng chung một slot trong `data/bulk_jobs.json`: chỉ một job toàn cục, lease 90 giây, heartbeat 2 giây, instance khác xem/cancel được; job stale được tiếp quản an toàn.
+   - Release zip có manifest `release.json` + chữ ký Ed25519 tách rời; mỗi file payload được kiểm SHA-256 và kích thước trước khi ghi.
+   - Apply/rollback chạy qua CLI có xác nhận, tự backup file bị ghi đè/xóa vào `data/updates/backups/`, lỗi giữa chừng thì tự rollback; **không cập nhật ngầm**.
+   - `data/`, `browsers/`, khóa/secret và file cấu hình nhạy cảm không nằm trong payload hợp lệ.
 
 ---
 
@@ -98,6 +106,32 @@ python cli.py delete <PROFILE_ID>
 ```
 
 `delete` chỉ xóa thư mục profile trước; nếu thư mục bị khóa, metadata và secret được giữ nguyên và lệnh trả lỗi.
+
+---
+
+## Nâng Cấp & Rollback Có Chữ Ký
+
+```powershell
+# Một lần: tạo cặp khóa Ed25519 (giữ private key NGOÀI repo/máy phát hành)
+python tools\release.py keygen --out C:\secure\antidetect-key.pem --public-out update_public_key.pem
+
+# Build bản phát hành (kèm danh sách file xóa nếu suy ra từ bản trước)
+python tools\release.py build --key C:\secure\antidetect-key.pem --out dist\antidetect-1.2.0.zip --previous dist\antidetect-1.1.0.zip
+
+# Máy đích: verify rồi dry-run trước khi ghi
+python tools\update.py verify --zip dist\antidetect-1.2.0.zip --public-key update_public_key.pem
+python tools\update.py apply --zip dist\antidetect-1.2.0.zip --dry-run
+python tools\update.py apply --zip dist\antidetect-1.2.0.zip --stop-server --yes
+
+# Khôi phục bản trước từ backup gần nhất
+python tools\update.py rollback --stop-server --yes
+python tools\update.py status
+```
+
+- Mặc định **bắt buộc chữ ký**; `--allow-unsigned` chỉ dành cho dev. Public key được tìm theo thứ tự `--public-key` → `ANTIDETECT_UPDATE_PUBLIC_KEY` → `<install_root>\update_public_key.pem`.
+- Server đang chạy sẽ chặn apply/rollback trừ khi truyền `--stop-server`; nếu còn profile mở, server từ chối tắt và lệnh dừng lại (không force-kill).
+- `data/`, `browsers/`, file `.dpapi`/`.pem`/`.zip`… bị từ chối trong payload; apply chỉ ghi file đã được ký và kiểm hash. State nằm ở `data/updates/update_state.json`, backup ở `data/updates/backups/` (giữ 5 bản).
+- Không có auto-download hay auto-update: người vận hành phải chạy CLI và xác nhận `--yes`.
 
 ---
 
@@ -185,6 +219,20 @@ Kết quả chạy thật ngày **2026-10-23** trên profile tạm `Audit Smoke`
 # Toàn bộ pytest (unit + API + hardening + audit tools)
 python -m pytest -q
 
+# Coverage (CI gate 58%): hiện tại 65.59%; launcher/server_control vẫn thấp (~29–32%)
+python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing
+
+# Playwright UI smoke (bắt buộc trước khi phát hành thay đổi UI; Chrome thật + data tạm;
+# không chạy trong CI) — pip install playwright && playwright install chromium
+$env:ANTIDETECT_RUN_UI_SMOKE = "1"
+python -m pytest test_ui_smoke.py -q
+
+# Lint correctness-only (E9/F63/F7/F82) — cấu hình trong pyproject.toml
+python -m ruff check .
+
+# Kiểm tra cú pháp toàn bộ entry point
+python -m compileall -q antidetect web tools run.py
+
 # Runner cũ: 9 unit test + 8 API test
 python run_all_tests.py
 
@@ -205,7 +253,21 @@ python tools\leak_audit.py --profile "<id-or-name>" --json "$env:TEMP\leak.json"
 python tools\e2e_smoke.py
 ```
 
-Kết quả đã chạy ngày **2026-10-23**:
+Kết quả chạy mới nhất ngày **2026-10-26** (code hiện tại, working tree chưa commit):
+
+| Hạng mục | Kết quả |
+|---|---|
+| `pytest -q` | **229 passed, 1 skipped** (skipped = Playwright UI smoke opt-in), 3 warnings |
+| Coverage | **65.59%** tổng (`antidetect` + `web`); cookies **97%**, launcher 29%, facebook 29%, server_control 32%; `updater` 77%, `bulk_jobs` 93%, `web/app.py` 69% |
+| P2 E2E (bản cài tạm) | Apply `1.1.0 → 1.2.0` (84 file), rollback `1.2.0 → 1.1.0`; `data/profiles.json` không đổi |
+| `ruff check .` | Sạch (correctness-only) |
+| `compileall` | Sạch |
+| E2E smoke (Chrome thật, data tạm) | **24/24 PASS**, start 1.9s, không `degraded`, runtime `{}` sau khi dừng |
+| Playwright UI smoke (Chrome thật, data tạm) | **1/1 PASS** — create, edit, export, import, schedule, start/stop; bắt regression CSP `/unlock` |
+| Dữ liệu thật | Hash `profiles.json` không đổi so với baseline `8CFC56C4…ABCA5` sau toàn bộ test |
+
+Bảng dưới là kết quả lịch sử ngày **2026-10-23** (baseline cũ, hash
+`EF69A75A…` đã thay đổi hợp lệ do schema mới — xem HANDOFF mục 3):
 
 | Hạng mục | Kết quả |
 |---|---|
@@ -239,19 +301,30 @@ antidetect_python/
 │   ├── process_identity.py    # xác minh PID Chrome/Edge + user-data-dir
 │   ├── server_control.py      # PID/digest/creation-time + shutdown an toàn
 │   ├── fingerprint.py         # sinh/normalize fingerprint, brand, locale
-│   ├── stealth.py             # payload page/worker
+│   ├── stealth.py             # loader payload page/worker
+│   ├── assets/                # stealth_page.js + stealth_worker.js
+│   ├── browser_env.py         # browser resolution, free port, WebRTC flags
+│   ├── cookies.py             # CDP cookie import/export
+│   ├── facebook.py            # scrape fanpage + parse ngày/classify
 │   ├── proxy.py               # proxy auth extension + GeoIP HTTPS
+│   ├── applog.py              # logging rotating + level theo env
+│   ├── metrics.py             # counters/timings process-local
 │   └── launcher.py            # launch, CDP, verify, runtime, stop
 ├── web/
-│   ├── app.py                 # FastAPI + auth + CSP + API
-│   ├── templates/index.html   # dashboard
-│   └── static/vendor/         # Tailwind + Lucide local
+│   ├── app.py                 # FastAPI + auth + CSP + routes
+│   ├── schemas.py             # request/response DTO
+│   ├── services.py            # pure helpers (RAM, geo, worker pool…)
+│   ├── templates/             # index.html + unlock.html (không inline script)
+│   └── static/                # js/css dashboard, unlock.js, vendor local
 ├── tools/probe_fingerprint.py
 ├── tools/audit_common.py       # chọn/launch/attach/cleanup profile cho audit
 ├── tools/leak_audit.py         # IP / WebRTC / DNS leak audit
 ├── tools/detector_audit.py     # CreepJS / BrowserLeaks / Pixelscan baseline
 ├── tools/verify_live.py        # Chrome thật: screen/CSS/CH/WebGL/canvas/worker
+├── tools/e2e_smoke.py          # API + Chrome thật, data tạm
 ├── test_stealth_consistency.py # Hồi quy S1–S8
+├── test_stealth_assets.py      # Asset JS khớp payload render
+├── test_ui_smoke.py            # Playwright UI smoke (opt-in)
 ├── test_antidetect.py
 ├── test_api.py
 ├── test_hardening.py
@@ -269,7 +342,7 @@ antidetect_python/
 
 - Mật khẩu proxy không nằm trong `profiles.json`; được mã hóa DPAPI trong `secrets.dpapi` và gắn với proxy identity. Cùng một tài khoản Windows vẫn có thể giải mã (đây là đặc tính DPAPI, không phải bug).
 - Lock file fail-closed: hết timeout sẽ raise lỗi thay vì ghi không lock. Secret store hỏng được backup và chặn ghi để tránh mất dữ liệu.
-- CSP hiện vẫn cần `script-src 'unsafe-inline'` vì dashboard còn inline script/handler; đã bỏ hoàn toàn script/style/font từ CDN.
+- CSP: `script-src 'self'` (mọi script dashboard/unlock nằm ở `/static`), `script-src-attr 'unsafe-inline'` vì dashboard còn handler `onclick`, `style-src 'unsafe-inline'` cho Tailwind; đã bỏ hoàn toàn script/style/font từ CDN. Không nhúng lại `<script>` inline — CSP sẽ chặn và làm hỏng luồng `/unlock`.
 - Canvas 2D chỉ thêm noise cho pixel alpha = 255 và chỉ cho canvas phức tạp (>=64 màu opaque, >=256 px); canvas đơn giản giữ pixel native. Đây là giới hạn có chủ ý để tránh "rgba noise".
 - Từ R1, `Function.prototype.toString` dùng native-source registry (WeakMap + concise method, không Proxy): wrapper hook trả `[native code]` kể cả cross-realm; CreepJS không báo `hasToStringProxy`, stealth giữ `0%`.
 - Từ R2, các getter work-area (`availWidth`/`availHeight`/`availLeft`/`availTop`) hook theo taskbar host; `screen.width/height`, DPR, `matchMedia` vẫn do CDP quản lý. Cross-OS dùng default theo platform nên có thể lệch taskbar thật của OS đích.

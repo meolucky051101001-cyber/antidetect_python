@@ -1,9 +1,10 @@
 # ⚠️ GIỚI HẠN KỸ THUẬT & KHUYẾN NGHỊ — ANTIDETECT PYTHON
 
-Cập nhật: **2026-10-24**, sau S1–S9, Phase D, R1–R4 + P0 (2026-10-23) và đợt
-review production 2026-10-24 (xem mục 6.2/6.3). Tài liệu này ghi các giới hạn
-còn lại; kết quả test chỉ chứng minh những gì đã chạy, không phải cam kết vượt
-mọi detector.
+Cập nhật: **2026-10-26**, sau S1–S9, Phase D, R1–R4, P0 (2026-10-23), đợt
+review production 2026-10-24 (xem mục 6.2/6.3) và roadmap P0 + P1 + P2 (mục
+6.4/6.5).
+Tài liệu này ghi các giới hạn còn lại; kết quả test chỉ chứng minh những gì đã
+chạy, không phải cam kết vượt mọi detector.
 
 ---
 
@@ -137,8 +138,9 @@ mọi detector.
 - `audit_fingerprint.py` cũ dùng Playwright `add_init_script`; hai harness mới
   (`leak_audit.py`, `detector_audit.py`) dùng BrowserLauncher + CDP thật nhưng
   không thay thế kiểm thử headed E2E trên từng profile.
-- E2E hiện có xác minh 34 check cốt lõi trên một profile Chrome thật, không phải
-  toàn bộ bề mặt fingerprint.
+- `verify_live.py` xác minh 34 check cốt lõi trên một profile Chrome thật; E2E
+  smoke phủ 24 check API/launch/stop trên data tạm. Cả hai không thay thế kiểm
+  thử headed trên từng profile thật.
 
 ### 6.1. Hook visibility, `toString` và work-area (R1/R2/P0)
 
@@ -207,17 +209,92 @@ căn bản của phương pháp inject JS, không phải bug. Chọn theo use-ca
 
 Chi tiết và bằng chứng: `docs/VERIFICATION_2026-10-24.md`.
 
+### 6.4. Trạng thái kiểm thử sau roadmap P0 + P1 + P2 (2026-10-26)
+
+- **Test:** 229 passed + 1 skipped (skipped là Playwright UI smoke opt-in).
+  **Coverage 65.59%** (gate CI 58%); cookies **97%**, launcher 29%, facebook 29%,
+  server_control 32%; `web/app.py` 69%, `web/schemas.py` 100%, `updater.py` 77%,
+  `bulk_jobs.py` 93%. Đợt bổ sung test nhiễu có `test_cookies.py` (11 test),
+  `test_facebook_details.py` (6 test), `test_updater.py` (31 test, gồm apply lỗi
+  giữa chừng và xoay public key) và `test_bulk_jobs.py` (15 test, gồm takeover
+  lease, 25 profile và heartbeat-start fail). Toàn bộ chạy trên data tạm, không
+  đụng `data/`. Phần chưa phủ chủ yếu vẫn là launch/stop/CDP/Fanpage cần Chrome
+  thật và nhánh lỗi proxy. Unit test không thay thế E2E; mọi thay đổi launcher
+  vẫn phải chạy `tools\e2e_smoke.py` + live verify trên data tạm.
+- **Đã tách module (P1):** `browser_env`, `cookies`, `facebook` và stealth asset
+  (`assets/stealth_page.js`, `assets/stealth_worker.js`) khỏi launcher;
+  `web/schemas.py`, `web/services.py` khỏi `web/app.py`; JS/CSS dashboard trong
+  `web/static/`. Phần lõi vẫn lớn: `launcher.py` còn ~1.9k dòng (launch/CDP) và
+  `web/app.py` ~1.4k dòng với route + singleton khởi tạo lúc import; chưa có
+  router/DTO/service đầy đủ, chưa bỏ hết singleton.
+- **Inline handler:** `index.html` còn ~68 handler `onclick=...`, nên CSP vẫn
+  phải giữ `script-src-attr 'unsafe-inline'` (inline `<script>` đã bỏ hẳn,
+  `script-src 'self'`). Bỏ nốt cần chuyển toàn bộ handler sang
+  `addEventListener` trong `dashboard.js`.
+- **UI automation:** Playwright smoke (`test_ui_smoke.py`) đã có, phủ tạo/sửa/
+  export/import/lịch/start/stop trên Chrome thật + data tạm. Test **không chạy
+  trong CI** (Playwright là dependency tùy chọn) nhưng **bắt buộc trong checklist
+  pre-release** khi thay đổi UI. Test này đã bắt được một regression thật: CSP
+  `script-src 'self'` chặn inline script `/unlock`; đã chuyển sang
+  `/static/js/unlock.js` và thêm test chống tái phát.
+- **Leak audit bằng proxy thật chưa chạy lại trên code hiện tại** — lần đo
+  proxy HTTP #1/#2 là 2026-10-23, trước loạt hardening. Không suy diễn kết quả
+  cũ cho build này; chạy lại `leak_audit.py --dns --strict` trước khi dùng
+  profile giá trị cao.
+- **Chưa soak 24h**, chưa test >20 profile đồng thời, SOCKS5 thật,
+  DataDome/Turnstile thật.
+- Multi-instance bulk job + nâng cấp/rollback có chữ ký đã có từ 2026-10-26
+  (xem 6.5). Metrics vẫn là process-local (reset khi restart), không phải
+  time-series lịch sử.
+
+### 6.5. Nâng cấp có chữ ký — giới hạn (2026-10-26)
+
+- **Không auto-download/auto-update.** Tool chỉ có CLI `tools\update.py`; người
+  vận hành phải tự tải zip qua kênh tin cậy, chạy `verify`/`--dry-run` và xác
+  nhận `--yes`. Không có background updater, không có server update feed.
+- **Tin cậy nằm ở public key.** Chữ ký Ed25519 chỉ chứng minh zip được ký bởi
+  private key tương ứng; nếu public key bị thay hoặc private key lộ, mô hình
+  mất hiệu lực. Giữ private key offline, không commit; `update_public_key.pem`
+  phải được phân phối qua kênh riêng (không tải kèm zip).
+- **Không ký Authenticode cho source Python.** `--require-authenticode` chỉ kiểm
+  file PE (`.exe/.dll/.pyd/.sys`) trong payload và là tùy chọn; mã `.py` không
+  có chữ ký Authenticode. Windows SmartScreen vẫn có thể cảnh báo file `.exe`
+  của browser pin.
+- **Payload hợp lệ không gồm dữ liệu vận hành.** `data/`, `browsers/`, `.git`,
+  `.venv`, `dist`, backup, file `.dpapi/.pem/.zip/.log/...` bị từ chối; apply
+  không có đường ghi vào `data/` (test xác nhận `data/profiles.json` nguyên
+  vẹn). Đây là chủ ý, không phải thiếu tính năng migrate dữ liệu.
+- **State/backup cục bộ.** `data/updates/update_state.json` và
+  `data/updates/backups/` không tự replicate; rollback trên máy khác cần backup
+  được chép sang hoặc cài lại. Backup giữ 5 bản gần nhất.
+- **Rollback bảo toàn file người dùng sửa.** File `added` bởi bản mới chỉ bị xóa
+  khi hash còn khớp; file đã bị sửa được giữ và báo `kept_modified_added` — có
+  thể để lại file không còn thuộc bản cũ.
+- **Auto-rollback là best-effort.** Nếu ổ đĩa/mạng lỗi ngay trong lúc rollback,
+  phải khôi phục thủ công từ `data/updates/backups/<...>/` (manifest
+  `backup.json` có hash từng file). Kiểm tra `update.py status` sau mọi lần lỗi.
+- **Server guard best-effort.** Updater đọc `server.pid` + `/health` để phát hiện
+  server; server chạy port khác hoặc instance không ghi PID có thể không bị
+  phát hiện. Luôn dừng dashboard đúng cách trước khi apply.
+- **Không chống kẻ có quyền admin.** Kẻ tấn công same-user/admin có thể sửa
+  binary/Python sau khi cài; chữ ký chỉ bảo vệ lúc apply, không bảo vệ runtime.
+
 ## 7. Bảo mật & vận hành
 
 - DPAPI bảo vệ secret theo tài khoản Windows; cùng user có thể giải mã.
-- CSP vẫn cần `script-src 'unsafe-inline'` và `style-src 'unsafe-inline'` vì
-  dashboard còn inline script/style.
+- CSP non-docs: `script-src 'self'`, `script-src-attr 'unsafe-inline'`,
+  `style-src 'self' 'unsafe-inline'`. Không còn inline `<script>` (script
+  `/unlock` nằm ở `/static/js/unlock.js`), nhưng ~68 inline event handler vẫn
+  buộc phải cho phép attribute; docs routes nới lỏng cho Swagger CDN.
 - Metadata profile (tên, proxy host, fingerprint) không được mã hóa at-rest.
 - `server_control`/`process_identity` dùng PowerShell CIM để lấy command line và
   creation time. Nếu PowerShell bị chặn, identity fail-closed (không kill) và có
   thể cần xử lý thủ công.
-- Start-all queue là trạng thái process-local; nhiều client/instance có thể không
-  chia sẻ cùng queue.
+- Start-all/bulk job dùng **một slot chung** trong `data/bulk_jobs.json` với
+  lease 90 giây + heartbeat, nên nhiều instance trên cùng máy/ổ đĩa chia sẻ
+  trạng thái và cancel được từ instance khác; scheduler bỏ qua khi slot bận.
+  Giới hạn: single-slot toàn cục (không chạy song song 2 job), không phải
+  distributed lock nhiều máy, và `bulk_jobs.json` hỏng thì API fail-closed (503).
 - GeoIP dùng dịch vụ HTTPS bên thứ ba (`ipwho.is`, fallback `ipinfo.io`); cần
   cân nhắc quyền riêng tư và độ tin cậy.
 - Test isolation từng có lỗi: `conftest.py` set `ANTIDETECT_DATA_DIR` quá muộn,

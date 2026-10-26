@@ -1,6 +1,10 @@
 # Runbook vận hành — Antidetect Python
 
-Cập nhật: **2026-10-24**, sau đợt hardening production (xem
+Cập nhật: **2026-10-26** (roadmap P0 + P1 + P2: CI + coverage gate, scheduler
+lease heartbeat + run history, UI `expected_revision`; tách module launcher/web,
+JS/CSS ra asset ngoài + CSP `script-src 'self'`, logging xoay vòng + metrics,
+Playwright UI smoke; bulk job xuyên instance và nâng cấp/rollback có chữ ký).
+Bản 2026-10-24 mô tả đợt hardening production (xem
 `VERIFICATION_2026-10-24.md`). Tài liệu này là hướng dẫn vận hành hàng ngày để
 giảm rủi ro khi dùng cho profile thật.
 
@@ -99,6 +103,27 @@ Từ 2026-10-24, start-all chạy các launch **song song theo batch** (ThreadPo
   lớn hơn limit (slot-logic chờ browser đóng trong khi start-all không đóng
   browser nào) — đã sửa bằng executor song song.
 
+**Nhiều instance server (P2-12, 2026-10-26):**
+
+- Bulk Start-All dùng **một slot chung** ở `data/bulk_jobs.json` (khóa
+  interprocess + ghi atomic). Chỉ một job `start_all`/`scheduled_start_all`
+  toàn cục; instance thứ hai gọi start-all sẽ nhận **409** kèm job đang chạy.
+- Job giữ lease **90 giây**, được gia hạn bằng heartbeat 2 giây khi callback
+  chạy. Instance khác đọc được trạng thái qua
+  `GET /api/profiles/start-all/status` (`remote: true`) và có thể cancel qua
+  `POST /api/profiles/start-all/cancel` — lệnh cancel được ghi vào job state để
+  owner dừng giữa các batch.
+- Instance chết giữa job: lease hết hạn, instance còn lại được tiếp quản (metric
+  `bulk_job_stale`); instance khác cố chiếm khi chủ cũ còn sống bị từ chối
+  (metric `bulk_job_conflicts`).
+- Scheduler cũng dùng slot này: nếu đang có bulk job, rule start-all bị **bỏ
+  qua** thay vì chạy chồng.
+- `bulk_jobs.json` hỏng hoặc không lấy được khóa → API trả **503** (fail-closed),
+  không tự xóa/ghi đè trạng thái. Chỉ đổi tên file sang `.corrupt` sau khi đã
+  dừng mọi instance và chắc chắn không còn job.
+- Giới hạn: đây là single-slot trên **một ổ cục bộ**, không phải distributed lock
+  cho nhiều máy; không đặt `data/` trên share mạng cho mô hình này.
+
 ## 4.2. Browser pin + kiểm tra drift (Giai đoạn 2, 2026-10-24)
 
 **Browser pin** — fingerprint (UA/JA3/WebGL) không đổi khi Chrome máy tự update:
@@ -118,9 +143,9 @@ Profile pin khác phiên bản nhau = giảm liên kết theo UA giữa các pro
 
 ```powershell
 # Lần đầu sau khi verify PASS:
-python toolserify_live.py --profile "<id>" --save-baseline
+python tools\verify_live.py --profile "<id>" --save-baseline
 # Các lần sau (tự so baseline, in [DRIFT] nếu Chrome/GPU/máy đổi):
-python toolserify_live.py --profile "<id>"
+python tools\verify_live.py --profile "<id>"
 ```
 
 Thấy `[DRIFT]` ở `browser_version`/`ua` → Chrome đã update → chạy lại
@@ -138,7 +163,10 @@ Chrome sạch của máy** (đo 1 lần, ghi lại — không so với 0%).
 
 ## 5. Checklist trước khi đưa profile vào quy trình thật
 
-1. `python -m pytest -q` → 73 passed (baseline môi trường dev).
+1. `python -m pytest -q` → 229 passed + 1 skipped (baseline dev 2026-10-26;
+   skipped là Playwright UI smoke opt-in). Khi sửa nhiều chạy thêm
+   `python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing`
+   (coverage hiện tại 65.59%; CI fail dưới 58%).
 2. `python tools\verify_live.py --profile <id> --json $env:TEMP\v.json` →
    RESULT: PASS.
 3. `python tools\detector_audit.py --profile <id> --screenshots ... --json ...`
@@ -153,14 +181,33 @@ Chrome sạch của máy** (đo 1 lần, ghi lại — không so với 0%).
 6. Automation sửa profile từ nhiều chỗ: truyền `expected_revision` (revision đã
    đọc) trong body `PUT /api/profiles/{id}` — nếu profile bị sửa bởi client
    khác từ đó, server trả 409 thay vì ghi đè im lặng.
+7. (**Bắt buộc trước khi phát hành thay đổi UI**) chạy Playwright UI smoke trên
+   **data tạm** — test tự tạo `ANTIDETECT_DATA_DIR` trong `%TEMP%`, mở Chrome
+   thật và kiểm tra tạo/sửa/export/import/lịch/start/stop:
+
+   ```powershell
+   pip install playwright
+   python -m playwright install chromium
+   $env:ANTIDETECT_RUN_UI_SMOKE = "1"
+   python -m pytest test_ui_smoke.py -q
+   ```
+
+   Không đặt `ANTIDETECT_DATA_DIR` trỏ vào `data/` thật khi chạy. Thiếu
+   Playwright/Chromium thì test skip (không phải PASS).
 
 ## 6. Sự cố thường gặp
 
 | Hiện tượng | Nguyên nhân | Xử lý |
 |---|---|---|
-| Start trả `degraded=true` | stealth inject/verify fail (CDP chậm, Chrome update) | Stop rồi start lại; nếu lặp lại chạy `verify_live.py` xem check nào fail |
+| Start trả `degraded=true` | stealth inject/verify fail (CDP chậm, Chrome update) | Stop rồi start lại; nếu lặp lại chạy `verify_live.py` xem check nào fail; xem counter `launch_degraded` trong `/api/system/metrics` |
+| Stop fail tăng trong metrics | browser treo/không khớp ownership | Chạy `cli.py status`, stop lại; xem `data/app.log` và counter `stop_failures` |
 | Xóa profile báo "file đang bị khóa" | browser vẫn mở | Stop profile rồi xóa lại; metadata+secret được giữ nguyên trong lúc chờ |
 | Server báo "Đang có tác vụ Start-All" | job trước chưa xong | `POST /api/profiles/start-all/cancel` hoặc đợi |
+| Start-All trả 409 kèm job lạ | instance khác đang giữ bulk slot | `GET /api/profiles/start-all/status` xem `remote`; cancel hoặc đợi; job chết tự được tiếp quản sau 90 giây |
+| Start-All/status trả 503 bulk state | `data/bulk_jobs.json` hỏng hoặc không khóa được | Dừng mọi instance, kiểm tra quyền/ổ đĩa; đổi tên file sang `.corrupt` rồi thử lại — không xóa khi job còn chạy |
+| Apply/verify báo chữ ký hoặc hash sai | zip bị sửa, sai public key, hoặc build lỗi | Build lại và kiểm tra đúng `update_public_key.pem`; không dùng `--allow-unsigned` cho production |
+| Apply báo server đang chạy | guard phát hiện server từ `server.pid`/health | Tắt server đúng cách hoặc thêm `--stop-server`; nếu còn profile mở, server từ chối tắt và lệnh dừng |
+| Rollback bị chặn | thiếu/hỏng backup, state hỏng, hoặc version hiện tại khác bản đã cập nhật | `python tools\update.py status`; chọn `--backup` đúng thư mục trong `data/updates/backups/`; chỉ dùng `--force` khi hiểu rõ thay đổi sẽ bị ghi đè |
 | `profiles.json bị hỏng` khi mở app | file hỏng/ứng dụng cũ ghi dở | Khôi phục từ `data/backups/` (mục 3) |
 | WebRTC trả IP thật khi có proxy | mode `auto` hoặc thiếu cờ | Đặt `webrtc_mode=disable_non_proxied`; Chrome 155 cần cả 2 cờ (tool tự thêm) |
 | DNS bash.ws báo LEAK | resolver proxy lệch ASN | Không phải rò rỉ nội bộ; muốn khớp ASN cần SOCKS5 remote-DNS hoặc proxy có DNS riêng |
@@ -171,6 +218,20 @@ Chrome sạch của máy** (đo 1 lần, ghi lại — không so với 0%).
 - Không dùng profile cross-OS cho tài khoản quan trọng.
 - Chạy lại detector audit định kỳ (site đổi UI/điểm chấm bất cứ lúc nào).
 - Không hỗ trợ Firefox.
+- CSP đã bỏ inline `<script>` nhưng còn `script-src-attr 'unsafe-inline'`
+  (~68 handler `onclick` trong `index.html`) và `style-src 'unsafe-inline'`.
+- Playwright UI smoke chưa chạy trong CI (Playwright không nằm trong
+  `requirements-dev.txt`) nhưng **bắt buộc trong checklist pre-release** khi
+  thay đổi UI; metrics là process-local (reset khi restart), không thay thế log
+  tập trung.
+- Bulk job state là **single-slot cục bộ** (`data/bulk_jobs.json`), không phải
+  distributed lock nhiều máy; `update_state.json`/backup nằm trong `data/` nên
+  không tự replicate sang máy khác.
+- Updater chưa có auto-download/auto-update hay ký Authenticode bắt buộc; chữ ký
+  release chỉ có nghĩa khi public key được phân phối qua kênh tin cậy và private
+  key giữ offline. `--allow-unsigned` chỉ dành cho dev.
+- Server guard của updater là best-effort (đọc `server.pid` + health); server
+  chạy port lạ hoặc do user khác khởi chạy có thể không bị phát hiện.
 
 
 ## 4.3. TLS diversity + JA3/JA4 (Giai đoạn 3, 2026-10-24)
@@ -245,4 +306,67 @@ muốn replay cho test: `HumanInput(port, seed=...)`.
   - **Tạo Hàng Loạt**: wizard N profile (1-50) cùng cấu hình — fingerprint RIÊNG từng profile; proxy dán theo dòng gán theo thứ tự, thiếu = direct + cảnh báo (không tuần hoàn cùng proxy); Authentic tự gắn GPU host.
   - **Tags**: sửa trong Edit profile, hiện chips trên row, lọc bằng dropdown "Tag".
   - **Lịch tự động**: nút calendar-clock — daily rules (mở tất cả / đóng tất cả / sync vị trí theo proxy) chạy khi server mở; lỡ giờ trong 60 phút do restart vẫn chạy bù 1 lần; scope profile qua API `profile_ids`.
+  - **Lịch tự động — độ bền (2026-10-26)**: claim được lưu vào `schedules.json` và **gia hạn lease bằng heartbeat** trong lúc callback chạy (callback dài hơn lease không bị instance khác tiếp quản); lịch sử chạy 200 sự kiện gần nhất lưu tại `data/schedule_runs.json` và trả về trong `GET /api/schedules` → `recent_runs` (đọc để biết rule chạy lúc nào, thành công/lỗi).
   - **API token**: nút key — token dài hạn cho automation (`Authorization: Bearer <token>`), KHÔNG đổi khi restart (khác access key); chỉ lưu SHA-256 trên máy, plaintext hiện đúng 1 lần lúc tạo; thu hồi/rotate mọi lúc.
+
+## 4.6. Asset/CSP, logging và metrics (P1, 2026-10-26)
+
+- **Tách asset + CSP non-docs:** JS/CSS dashboard nằm trong `web/static/`
+  (`js/dashboard.js`, `js/theme-init.js`, `js/unlock.js`, `css/dashboard.css`).
+  CSP các route thường là `script-src 'self'` — **không nhúng lại `<script>`
+  inline** vì sẽ bị chặn; script `/unlock` phải nạp qua `/static/js/unlock.js`
+  (đây là regression thật đã bị UI smoke bắt được). Docs routes vẫn nới lỏng
+  cho Swagger CDN.
+- **Logging:** `data/app.log` UTF-8, xoay vòng 2 MB × 5 bản (`app.log.1`…).
+  Mức log qua `ANTIDETECT_LOG_LEVEL` (mặc định `INFO`); log ra stderr khi
+  `ANTIDETECT_LOG_CONSOLE=1`. Đuôi log xem trên dashboard
+  (`GET /api/system/logs`).
+- **Metrics:** `GET /api/system/metrics` (auth) trả `uptime_seconds`, counters
+  (`launch_attempts`, `launch_success`, `launch_failures`, `launch_degraded`,
+  `stop_attempts`, `stop_success`, `stop_failures`, `scheduler_runs`,
+  `scheduler_errors`), timings (`launch`: count/total/avg) và
+  `scheduler.recent_runs` (10 sự kiện gần nhất). Số liệu **process-local**,
+  reset khi restart — dùng để phát hiện `degraded`/stop fail tăng bất thường,
+  không phải time-series lịch sử.
+
+## 4.7. Nâng cấp / rollback có chữ ký (P2-13, 2026-10-26)
+
+Quy trình phát hành (máy build, giữ private key **ngoài repo**):
+
+```powershell
+python tools\release.py keygen --out C:\secure\antidetect-key.pem --public-out update_public_key.pem
+python tools\release.py build --key C:\secure\antidetect-key.pem --out dist\antidetect-1.2.0.zip --previous dist\antidetect-1.1.0.zip
+python tools\release.py build --key C:\secure\antidetect-key.pem --password-env AD_KEY_PASS --out dist\antidetect-1.2.0.zip --previous dist\antidetect-1.1.0.zip
+```
+
+- `build` đóng gói `payload/<path>` + `release.json` (schema, version, danh sách
+  file `{path, sha256, size}`, `delete[]`) + `release.json.sig` (Ed25519 trên
+  đúng byte của manifest). `--previous` tự suy ra file cần xóa so với bản trước.
+- `--allow-unsigned` chỉ để thử dev; release thật phải ký.
+- Private key nên đặt ngoài repo/ổ mạng, có mật khẩu (`--password-env` hoặc
+  `--ask-password`); `.gitignore` đã chặn `*.pem`, `keys/`, `dist/`.
+
+Máy đích:
+
+```powershell
+python tools\update.py status
+python tools\update.py verify --zip dist\antidetect-1.2.0.zip --public-key update_public_key.pem
+python tools\update.py apply --zip dist\antidetect-1.2.0.zip --dry-run
+python tools\update.py apply --zip dist\antidetect-1.2.0.zip --stop-server --yes
+python tools\update.py rollback --stop-server --yes
+```
+
+- Thứ tự tìm public key: `--public-key` → `ANTIDETECT_UPDATE_PUBLIC_KEY` →
+  `<install_root>\update_public_key.pem`.
+- `apply` kiểm chữ ký + hash + kích thước **trước khi ghi**, từ chối path tuyệt
+  đối/`..`/path bảo vệ (`data/`, `browsers/`, `.git/`, `.venv/`, `.dpapi`,
+  `.pem`, `.zip`…), rồi mới stage. Mọi file bị ghi đè/xóa được backup vào
+  `data/updates/backups/<timestamp>-<from>-to-<to>/`; state ở
+  `data/updates/update_state.json`.
+- Nếu ghi file/state lỗi giữa chừng, tool tự rollback. Rollback kiểm hash toàn
+  bộ backup trước khi ghi; file `added` chỉ bị xóa nếu chưa bị sửa (file đã sửa
+  được giữ lại và báo trong `kept_modified_added`).
+- `--stop-server` chỉ tắt server qua đường xác minh hiện có; nếu còn profile mở,
+  server trả 409 và lệnh dừng — đóng profile rồi chạy lại.
+- Không có cơ chế tự tải/tự cập nhật: mọi thay đổi do người vận hành chủ động
+  chạy CLI và xác nhận `--yes`.

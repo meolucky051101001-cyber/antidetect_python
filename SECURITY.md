@@ -1,6 +1,6 @@
 # 🔒 CHÍNH SÁCH BẢO MẬT & THREAT MODEL — ANTIDETECT PYTHON
 
-Cập nhật: **2026-10-23**. Tài liệu mô tả mô hình đe dọa và các cơ chế phòng vệ
+Cập nhật: **2026-10-26**. Tài liệu mô tả mô hình đe dọa và các cơ chế phòng vệ
 thực tế trong code. Đây không phải cam kết bảo mật tuyệt đối.
 
 ---
@@ -119,40 +119,108 @@ quyền admin. DPAPI không chống được same-user malware.
 
 ---
 
-## 6. Content Security Policy (CSP)
+## 6. Cập Nhật Có Chữ Ký (Signed Update)
 
-Dashboard hiện tại:
+### Mô hình tin cậy
+
+- Release là zip chứa `payload/<path>`, manifest `release.json` và chữ ký tách
+  rời `release.json.sig`.
+- Manifest ghi schema, version, `created_at`, danh sách file
+  `{path, sha256, size}` và danh sách `delete[]`.
+- Chữ ký là **Ed25519 trên đúng byte của manifest**. Apply mặc định **bắt buộc**
+  chữ ký; `--allow-unsigned` chỉ dành cho dev.
+- Public key lấy theo thứ tự `--public-key` → `ANTIDETECT_UPDATE_PUBLIC_KEY` →
+  `<install_root>\update_public_key.pem`. Không có cơ chế tự tải key từ mạng.
+- Private key không nằm trong repo (`.gitignore` chặn `*.pem`, `keys/`,
+  `dist/`), hỗ trợ PEM có mật khẩu; khuyến nghị giữ offline.
+
+### Kiểm tra trước khi ghi
+
+- Mọi entry phải nằm dưới `payload/`; từ chối path tuyệt đối, ổ đĩa, `..`,
+  path rỗng, tên Windows reserved, trailing dot/space, entry trùng tên, entry mã
+  hóa, symlink.
+- Tập file trong payload phải khớp **chính xác** danh sách manifest; mỗi file
+  được băm SHA-256 streaming và so kích thước; giới hạn số file/kích thước để
+  chống zip bomb.
+- Từ chối path thuộc vùng bảo vệ: `data/`, `browsers/`, `.git/`, `.venv/`,
+  `dist/`, backup, export, và các đuôi `.dpapi`, `.pem`, `.key`, `.zip`, `.log`,
+  `.pid`, `.pyc`… Nhờ vậy apply không thể ghi đè dữ liệu profile/secret.
+- Nếu bật `--require-authenticode`, mọi file PE trong payload phải có
+  Authenticode hợp lệ (PowerShell `Get-AuthenticodeSignature`); đây là tùy chọn,
+  không thay thế chữ ký release.
+
+### Ghi, backup và rollback
+
+- Trước khi ghi, updater kiểm tra server đang chạy (`server.pid` + `/health`,
+  `application == antidetect-python`). Mặc định **từ chối** nếu server còn chạy;
+  `--stop-server` dùng đúng đường shutdown có xác minh hiện có và dừng nếu
+  server không tắt được (ví dụ còn profile mở).
+- Toàn bộ thao tác nằm trong `InterProcessLock` tại
+  `data/updates/update.lock`; verification và đọc version được làm lại **trong
+  lock** để tránh TOCTOU giữa hai lần apply.
+- File được ghi qua temp + `fsync` + kiểm hash + `os.replace`. File bị ghi đè
+  hoặc bị xóa được backup vào `data/updates/backups/<unique>/` kèm
+  `backup.json`; state ở `data/updates/update_state.json`.
+- Lỗi giữa chừng khi apply (kể cả ghi state) kích hoạt auto-rollback. Rollback
+  kiểm hash **toàn bộ** backup trước khi ghi; file `added` chỉ bị xóa nếu chưa
+  bị sửa, file đã sửa được giữ và báo `kept_modified_added`.
+- Không có auto-download/auto-update: mọi lần apply/rollback do người vận hành
+  chạy CLI và xác nhận `--yes`.
+
+---
+
+## 7. Content Security Policy (CSP)
+
+Dashboard (mọi route thường):
 
 ```text
 default-src 'self';
-script-src 'self' 'unsafe-inline';
+script-src 'self';
+script-src-attr 'unsafe-inline';
 style-src 'self' 'unsafe-inline';
 font-src 'self' data:;
 img-src 'self' data: https:;
 connect-src 'self' https:;
+object-src 'none';
+base-uri 'self';
+form-action 'self';
 frame-ancestors 'none';
 ```
 
+Riêng `/docs` và `/redoc` (Swagger UI/ReDoc) nới thêm `https://cdn.jsdelivr.net`
+cho script/style và `https://fonts.gstatic.com` cho font — chỉ sau khi đã có
+phiên hợp lệ.
+
 - Tailwind và Lucide được vendor tại `web/static/vendor/`; **không tải script,
-  style hay font từ CDN**.
+  style hay font từ CDN** trên dashboard.
 - Có `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: no-referrer`, `Cache-Control: no-store`.
-- **Technical debt:** `unsafe-inline` vẫn cần vì template còn inline script và
-  handler. Cần chuyển sang nonce/tách file ở giai đoạn P2.
+- **Technical debt:** inline `<script>` đã bỏ hẳn (JS nằm trong `web/static/`;
+  script `/unlock` ở `web/static/js/unlock.js`). Vẫn còn ~68 inline handler
+  (`onclick=...`) nên phải giữ `script-src-attr 'unsafe-inline'`; bỏ được khi
+  chuyển hết sang `addEventListener` trong `dashboard.js`.
 
 ---
 
-## 7. Giới Hạn Bảo Mật Đã Biết
+## 8. Giới Hạn Bảo Mật Đã Biết
 
 1. DPAPI bảo vệ theo Windows user; same-user process có thể giải mã.
 2. `server_control`/`process_identity` phụ thuộc PowerShell CIM cho command line
    và creation time. Nếu PowerShell bị chặn, hệ thống fail-closed (không kill)
    nhưng có thể cần xử lý thủ công.
-3. CSP còn `unsafe-inline`.
+3. CSP còn `script-src-attr 'unsafe-inline'` (inline handler) và
+   `style-src 'unsafe-inline'`; chưa có nonce/hash cho style.
 4. Chưa có mã hóa at-rest cho metadata profile (tên, proxy host, fingerprint).
 5. Chưa chống được kẻ tấn công có quyền admin, debug process hoặc đọc memory.
 6. Chưa hỗ trợ Firefox; hook fingerprint gắn với Chromium.
 7. API loopback không thay thế được việc bảo vệ máy host và tài khoản Windows.
+8. Chữ ký release chỉ bảo vệ lúc apply: public key là trust root (phân phối qua
+   kênh riêng), private key phải offline, và `--allow-unsigned` là dev-only.
+   Không có auto-update; Authenticode chỉ kiểm file PE và là tùy chọn.
+9. Server guard của updater là best-effort (`server.pid` + `/health`); server
+   chạy port khác hoặc do user khác khởi chạy có thể không bị phát hiện.
+10. Bulk job state là single-slot cục bộ (`data/bulk_jobs.json`), không phải
+    distributed lock nhiều máy; file hỏng thì fail-closed (HTTP 503).
 
 Xem thêm [docs/LIMITATIONS.md](docs/LIMITATIONS.md) và
 [docs/VERIFICATION_2026-10-23.md](docs/VERIFICATION_2026-10-23.md).
