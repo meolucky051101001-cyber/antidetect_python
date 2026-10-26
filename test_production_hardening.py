@@ -489,6 +489,9 @@ def test_launch_response_has_degraded_flag():
 
 def test_ui_has_stealth_disable_controls():
     html = open(os.path.join(BASE_DIR, "web", "templates", "index.html"), encoding="utf-8").read()
+    js = open(
+        os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
+    ).read()
     for element in (
         "edit-stealth-canvas",
         "edit-stealth-webgl",
@@ -497,16 +500,18 @@ def test_ui_has_stealth_disable_controls():
         "edit-stealth-worker",
     ):
         assert f'id="{element}"' in html
-    assert "stealth_disable:" in html
+    assert "stealth_disable:" in js
 
 
 def test_ui_badge_shows_authentic_mode():
-    html = open(os.path.join(BASE_DIR, "web", "templates", "index.html"), encoding="utf-8").read()
+    js = open(
+        os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
+    ).read()
     # Danh sách profile phải cho thấy chế độ stealth để không nhầm lẫn giữa
     # authentic (không noise) và unique (noise).
-    assert "authenticMode" in html
-    assert "Authentic</span>" in html
-    assert "Partial" in html
+    assert "authenticMode" in js
+    assert "Authentic</span>" in js
+    assert "Partial" in js
 
 
 def test_cli_delete_stops_browser_first():
@@ -705,10 +710,13 @@ def test_facebook_pages_deep_endpoint(monkeypatch):
 
 def test_facebook_deep_ui_present():
     html = open(os.path.join(BASE_DIR, "web", "templates", "index.html"), encoding="utf-8").read()
+    js = open(
+        os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
+    ).read()
     assert "refreshFanpages(true)" in html
-    assert "deep=1" in html
-    assert "Đang đăng" in html and "Dừng" in html and "Sẵn sàng" in html
-    assert "ageText" in html
+    assert "deep=1" in js
+    assert "Đang đăng" in js and "Dừng" in js and "Sẵn sàng" in js
+    assert "ageText" in js
 
 
 def test_stop_profile_with_deleted_metadata_cleans_stale_record():
@@ -882,9 +890,12 @@ def test_phase1_sync_location_from_proxy_endpoint(monkeypatch):
 
 def test_phase1_ui_sync_button():
     html = open(os.path.join(BASE_DIR, "web", "templates", "index.html"), encoding="utf-8").read()
+    js = open(
+        os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
+    ).read()
     assert "syncLocationFromProxy" in html
     assert "Đồng bộ vị trí theo IP proxy" in html
-    assert "sync-location-proxy" in html
+    assert "sync-location-proxy" in js
 
 
 def test_browser_resolution_order(monkeypatch, tmp_path):
@@ -1224,24 +1235,34 @@ def test_phase4_human_input_samplers():
 def test_dashboard_theme_and_management_ui():
     """Dashboard: dark/light theme + filter chips + logs viewer + fanpage badge."""
     html = open(os.path.join(BASE_DIR, "web", "templates", "index.html"), encoding="utf-8").read()
+    js = open(
+        os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
+    ).read()
+    theme_js = open(
+        os.path.join(BASE_DIR, "web", "static", "js", "theme-init.js"), encoding="utf-8"
+    ).read()
+    css = open(
+        os.path.join(BASE_DIR, "web", "static", "css", "dashboard.css"), encoding="utf-8"
+    ).read()
     # Theme: init trước render (không flash) + toggle + persist
-    assert "localStorage.getItem('antidetect-theme')" in html
-    assert "data-theme" in html and "toggleTheme" in html
-    assert 'html[data-theme="light"]' in html  # override CSS
+    assert "localStorage.getItem('antidetect-theme')" in theme_js
+    assert "dataset.theme" in theme_js
+    assert "toggleTheme" in html and "toggleTheme" in js
+    assert 'html[data-theme="light"]' in css  # override CSS
     assert "theme-icon-sun" in html and "theme-icon-moon" in html
     # Filter chips
     for chip in ("all", "running", "stopped", "proxy", "authentic"):
         assert f'data-filter-chip="{chip}"' in html
-    assert "function setFilter" in html
+    assert "function setFilter" in js
     # Stats fanpage + badge trong row
-    assert 'id="stat-pages"' in html and "stat-pages" in html
-    assert "fbBadge" in html
+    assert 'id="stat-pages"' in html and "stat-pages" in js
+    assert "fbBadge" in js
     # Logs viewer
-    assert "openLogsModal" in html and "/api/system/logs" in html
+    assert "openLogsModal" in html and "/api/system/logs" in js
     # Fanpage href phải qua safeHref (chặn javascript:/data:) chứ không chỉ
     # escapeHtml — import JSON độc hại không thể tạo stored XSS.
-    assert "function safeHref" in html
-    assert "escapeHtml(safeHref(pg.url))" in html
+    assert "function safeHref" in js
+    assert "escapeHtml(safeHref(pg.url))" in js
 
 
 def test_system_logs_endpoint(monkeypatch, tmp_path):
@@ -1630,6 +1651,96 @@ def test_schedule_claim_lease_can_be_taken_over(tmp_path):
     assert first.complete_claim(
         rule["id"], "crashed", now.strftime("%Y-%m-%d")
     ) is False
+
+
+def test_schedule_claim_renewal_prevents_takeover(tmp_path):
+    from datetime import datetime, timedelta
+    from antidetect.scheduler import ScheduleStore
+
+    path = str(tmp_path / "schedules.json")
+    store = ScheduleStore(path)
+    now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    rule = store.add(
+        "Renew", (now - timedelta(minutes=1)).strftime("%H:%M"), "start_all"
+    )
+    assert store.claim_due(
+        rule["id"], now, 60, "owner", lease_seconds=10
+    ) is not None
+    assert store.renew_claim(rule["id"], "wrong", now + timedelta(seconds=8)) is False
+    assert store.renew_claim(rule["id"], "owner", now + timedelta(seconds=8)) is True
+
+    # Renewed at +8s with a 10s lease: still owned at +16s, expired at +19s.
+    assert store.claim_due(
+        rule["id"], now + timedelta(seconds=16), 60, "other", lease_seconds=10
+    ) is None
+    assert store.claim_due(
+        rule["id"], now + timedelta(seconds=19), 60, "other", lease_seconds=10
+    ) is not None
+
+
+def test_scheduler_heartbeat_renews_lease_during_long_callback(tmp_path):
+    from datetime import datetime
+    from antidetect.scheduler import ScheduleStore, Scheduler
+
+    store = ScheduleStore(str(tmp_path / "schedules.json"))
+    now = datetime.now()
+    rule = store.add("Heartbeat", now.strftime("%H:%M"), "start_all")
+    takeover = []
+    done = threading.Event()
+
+    def slow_callback(_ids):
+        time.sleep(1.0)
+        takeover.append(
+            store.claim_due(
+                rule["id"], datetime.now(), 1440, "intruder", lease_seconds=0.5
+            )
+        )
+        done.set()
+
+    scheduler = Scheduler(
+        store,
+        {"start_all": slow_callback},
+        check_interval=0.02,
+        catchup_minutes=1440,
+        claim_lease_seconds=0.5,
+        history_path=str(tmp_path / "schedule_runs.json"),
+    )
+    scheduler.start()
+    try:
+        assert done.wait(5)
+    finally:
+        scheduler.stop()
+        scheduler.join(timeout=2)
+
+    assert takeover == [None]
+    stored = ScheduleStore(str(tmp_path / "schedules.json")).list()[0]
+    assert stored["last_run_date"] == datetime.now().strftime("%Y-%m-%d")
+    assert "_run_claim" not in stored
+
+    from antidetect.scheduler import ScheduleRunHistory
+
+    events = ScheduleRunHistory(
+        str(tmp_path / "schedule_runs.json")
+    ).recent(10)
+    assert len(events) == 1
+    assert events[0].get("run_id")
+    assert events[0].get("idempotency_key", "").startswith(rule["id"] + ":")
+
+
+def test_scheduler_run_history_persists_and_caps(tmp_path):
+    from antidetect.scheduler import ScheduleRunHistory
+
+    path = tmp_path / "schedule_runs.json"
+    history = ScheduleRunHistory(str(path), max_events=3)
+    for index in range(5):
+        history.append({"at": str(index), "rule": "r"})
+    assert [event["at"] for event in history.recent(10)] == ["2", "3", "4"]
+
+    reloaded = ScheduleRunHistory(str(path), max_events=3)
+    assert [event["at"] for event in reloaded.recent(10)] == ["2", "3", "4"]
+
+    path.write_text("{not-json", encoding="utf-8")
+    assert ScheduleRunHistory(str(path)).recent(10) == []
 
 
 def test_scheduler_callback_failure_releases_claim_for_retry(tmp_path):

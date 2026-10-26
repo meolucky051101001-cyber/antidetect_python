@@ -9,6 +9,7 @@ import uuid
 from typing import List, Optional
 from .models import Profile, FingerprintConfig, ProxyConfig
 from .fingerprint import generate_fingerprint
+from .applog import get_logger
 from .secrets import (
     SecretStoreCorruption,
     get_proxy_password,
@@ -20,6 +21,8 @@ from .secrets import (
 # Regex kiểm tra profile_id hợp lệ (UUID v4 hoặc chuỗi alphanumeric-dash)
 _VALID_PROFILE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,63}$")
 
+log = get_logger("storage")
+
 
 class ProfileDeletionError(RuntimeError):
     """Directory/metadata deletion failed; state must stay retryable."""
@@ -27,13 +30,7 @@ class ProfileDeletionError(RuntimeError):
 
 def _safe_log(message: str) -> None:
     """Log without crashing on legacy cp1252 consoles (Vietnamese text)."""
-    try:
-        print(message)
-    except UnicodeEncodeError:
-        try:
-            print(message.encode("ascii", "backslashreplace").decode("ascii"))
-        except Exception:
-            pass
+    log.warning(message)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Tests and portable deployments can point data/ elsewhere without touching

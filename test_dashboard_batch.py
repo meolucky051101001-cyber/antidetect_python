@@ -240,13 +240,26 @@ def test_batch_c_api_token_rotate_and_revoke():
 def test_dashboard_new_management_ui():
     """Dashboard: checkbox multi-select + bulk bar + wizard + import + schedules + token modals."""
     html = open(os.path.join(BASE_DIR, "web", "templates", "index.html"), encoding="utf-8").read()
-    assert 'id="select-all-chk"' in html and "toggleSelect" in html
-    assert 'id="bulk-bar"' in html and "bulkStart" in html and "bulkDelete" in html
-    assert "openWizardModal" in html and "/api/profiles/bulk-create" in html
-    assert "openImportModal" in html and "/api/profiles/import" in html
-    assert "exportProfiles" in html and "x-confirm-export" in html
-    assert "openSchedulesModal" in html and "/api/schedules" in html
-    assert "openTokenModal" in html and "/api/auth/token/rotate" in html
-    assert "formatUptime" in html and "ram_mb" in html
+    js = open(
+        os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
+    ).read()
+    assert 'id="select-all-chk"' in html and "toggleSelect" in js
+    assert 'id="bulk-bar"' in html and "bulkStart" in js and "bulkDelete" in js
+    assert "openWizardModal" in html and "/api/profiles/bulk-create" in js
+    assert "openImportModal" in html and "/api/profiles/import" in js
+    assert "exportProfiles" in html and "x-confirm-export" in js
+    assert "openSchedulesModal" in html and "/api/schedules" in js
+    assert "openTokenModal" in html and "/api/auth/token/rotate" in js
+    assert "formatUptime" in js and "ram_mb" in js
     # Tags UI
     assert 'id="edit-tags"' in html and 'id="tag-filter"' in html
+
+
+def test_edit_profile_sends_expected_revision_and_handles_conflict():
+    """Edit modal phải gửi revision và không ghi đè khi server trả 409."""
+    js = open(
+        os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
+    ).read()
+    assert "expected_revision: (editingProfile && Number.isInteger(editingProfile.revision))" in js
+    assert "res.status === 409" in js
+    assert "Profile đã bị sửa ở tab/phiên khác" in js

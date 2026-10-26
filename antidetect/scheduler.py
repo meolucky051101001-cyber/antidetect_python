@@ -17,13 +17,81 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .storage import InterProcessLock, _replace_with_retry
+from .applog import get_logger
+from . import metrics
 
 VALID_ACTIONS = ("start_all", "stop_all", "sync_location_proxy")
 MAX_RULES = 20
 
+log = get_logger("scheduler")
+
 
 class ScheduleStoreCorruption(RuntimeError):
     pass
+
+
+class ScheduleRunHistory:
+    """Persistent ring buffer of scheduler events (no tokens or secrets)."""
+
+    def __init__(self, path: Optional[str], max_events: int = 200):
+        self.path = path
+        self.max_events = max(1, int(max_events))
+        self._lock = threading.Lock()
+        self._ipc_lock = InterProcessLock(f"{path}.lock") if path else None
+        self._events: List[Dict[str, Any]] = []
+        self._load()
+
+    def _read(self) -> List[Dict[str, Any]]:
+        if not self.path:
+            return []
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return []
+        events = data.get("runs") if isinstance(data, dict) else data
+        if not isinstance(events, list):
+            return []
+        return [dict(event) for event in events if isinstance(event, dict)][-self.max_events:]
+
+    def _load(self) -> None:
+        self._events = self._read()
+
+    def _write_locked(self) -> None:
+        if not self.path:
+            return
+        directory = os.path.dirname(os.path.abspath(self.path))
+        os.makedirs(directory, exist_ok=True)
+        tmp = f"{self.path}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"runs": self._events}, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            _replace_with_retry(tmp, self.path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
+    def append(self, event: Dict[str, Any]) -> None:
+        if not self.path:
+            return
+        with self._lock, self._ipc_lock:
+            self._load()
+            self._events.append(dict(event))
+            if len(self._events) > self.max_events:
+                self._events = self._events[-self.max_events:]
+            self._write_locked()
+
+    def recent(self, limit: int = 20) -> List[Dict[str, Any]]:
+        with self._lock:
+            self._load()
+            if limit <= 0:
+                return []
+            return [dict(event) for event in self._events[-int(limit):]]
 
 
 def _due_reason(rule: Dict[str, Any], now: datetime,
@@ -169,6 +237,7 @@ class ScheduleStore:
     def claim_due(
         self, rule_id: str, now: datetime, catchup_minutes: int,
         token: str, lease_seconds: float = 600.0,
+        run_id: Optional[str] = None,
     ) -> Optional[Tuple[Dict[str, Any], str]]:
         with self._lock, self._ipc_lock:
             self._rules = self._read_rules()
@@ -190,10 +259,33 @@ class ScheduleStore:
                     "token": token,
                     "at": now.timestamp(),
                     "date": now.strftime("%Y-%m-%d"),
+                    "run_id": run_id or token,
+                    # Khoá logic để audit/retry biết đây cùng một lượt chạy
+                    # (rule + ngày + action), không phải một lần bấm khác.
+                    "idempotency_key": (
+                        f"{rule.get('id')}:{now.strftime('%Y-%m-%d')}:"
+                        f"{rule.get('action')}"
+                    ),
                 }
                 self._save_locked()
                 return self._public_rule(rule), reason
             return None
+
+    def renew_claim(self, rule_id: str, token: str, now: datetime) -> bool:
+        """Extend a live claim so a long callback is not taken over mid-run."""
+        with self._lock, self._ipc_lock:
+            self._rules = self._read_rules()
+            for rule in self._rules:
+                if rule.get("id") != rule_id:
+                    continue
+                claim = rule.get("_run_claim")
+                if not isinstance(claim, dict) or claim.get("token") != token:
+                    return False
+                claim["at"] = now.timestamp()
+                claim["date"] = now.strftime("%Y-%m-%d")
+                self._save_locked()
+                return True
+            return False
 
     def complete_claim(self, rule_id: str, token: str, today: str) -> bool:
         with self._lock, self._ipc_lock:
@@ -240,6 +332,7 @@ class Scheduler(threading.Thread):
         self, store: ScheduleStore, callbacks: Dict[str, Callable],
         check_interval: float = 30.0, catchup_minutes: int = 60,
         claim_lease_seconds: float = 600.0,
+        history_path: Optional[str] = None,
     ):
         super().__init__(daemon=True, name="antidetect-scheduler")
         self.store = store
@@ -247,6 +340,7 @@ class Scheduler(threading.Thread):
         self.check_interval = check_interval
         self.catchup_minutes = catchup_minutes
         self.claim_lease_seconds = claim_lease_seconds
+        self.run_history = ScheduleRunHistory(history_path)
         self._stop_event = threading.Event()
         self.last_run_info: Dict[str, Any] = {"last_tick": None, "ran": []}
 
@@ -261,6 +355,31 @@ class Scheduler(threading.Thread):
         self.last_run_info["ran"].append(event)
         if len(self.last_run_info["ran"]) > 50:
             self.last_run_info["ran"] = self.last_run_info["ran"][-50:]
+        metrics.inc("scheduler_errors" if event.get("error") else "scheduler_runs")
+        try:
+            self.run_history.append(event)
+        except Exception as exc:  # noqa: BLE001 - history không được giết runner
+            log.warning("Không ghi được run history: %s: %s", type(exc).__name__, exc)
+
+    def _start_claim_heartbeat(
+        self, rule_id: str, token: str
+    ) -> Tuple[threading.Event, threading.Thread]:
+        """Renew the lease while a callback runs; daemon thread, stopped after."""
+        stop = threading.Event()
+        interval = max(0.05, float(self.claim_lease_seconds) / 3.0)
+
+        def beat() -> None:
+            while not stop.wait(interval):
+                try:
+                    self.store.renew_claim(rule_id, token, datetime.now())
+                except Exception:  # noqa: BLE001 - lease hết hạn vẫn được chốt sau callback
+                    pass
+
+        thread = threading.Thread(
+            target=beat, daemon=True, name="antidetect-scheduler-heartbeat"
+        )
+        thread.start()
+        return stop, thread
 
     def run(self) -> None:
         while not self._stop_event.wait(self.check_interval):
@@ -279,15 +398,20 @@ class Scheduler(threading.Thread):
                 if self.callbacks.get(rule.get("action")) is None:
                     continue
                 token = uuid.uuid4().hex
+                run_id = uuid.uuid4().hex
+                today = now.strftime("%Y-%m-%d")
+                idempotency_key = f"{rule['id']}:{today}:{rule.get('action')}"
                 try:
                     claimed = self.store.claim_due(
                         rule["id"], now, self.catchup_minutes, token,
                         lease_seconds=self.claim_lease_seconds,
+                        run_id=run_id,
                     )
                 except Exception as exc:  # noqa: BLE001 - runner không được chết
                     self._record({
                         "rule": rule.get("name"), "action": rule.get("action"),
                         "at": tick_at, "error": f"claim: {str(exc)[:200]}",
+                        "run_id": run_id, "idempotency_key": idempotency_key,
                     })
                     continue
                 if claimed is None:
@@ -302,14 +426,23 @@ class Scheduler(threading.Thread):
                         self._record({
                             "rule": claimed_rule.get("name"), "action": action,
                             "at": tick_at, "error": f"release: {str(exc)[:200]}",
+                            "run_id": run_id, "idempotency_key": idempotency_key,
                         })
                     continue
                 ids = claimed_rule.get("profile_ids") or None
-                today = now.strftime("%Y-%m-%d")
+                heartbeat_stop, heartbeat = self._start_claim_heartbeat(
+                    rule["id"], token
+                )
+                callback_error = None
                 try:
                     cb(ids)
                 except Exception as exc:  # noqa: BLE001 - callback được retry
-                    error = str(exc)[:200]
+                    callback_error = exc
+                finally:
+                    heartbeat_stop.set()
+                    heartbeat.join(timeout=2.0)
+                if callback_error is not None:
+                    error = str(callback_error)[:200]
                     try:
                         self.store.release_claim(rule["id"], token)
                     except Exception as release_exc:  # noqa: BLE001
@@ -317,6 +450,7 @@ class Scheduler(threading.Thread):
                     self._record({
                         "rule": claimed_rule.get("name"), "action": action,
                         "at": tick_at, "error": error,
+                        "run_id": run_id, "idempotency_key": idempotency_key,
                     })
                     continue
                 try:
@@ -325,15 +459,18 @@ class Scheduler(threading.Thread):
                     self._record({
                         "rule": claimed_rule.get("name"), "action": action,
                         "at": tick_at, "error": f"complete: {str(exc)[:200]}",
+                        "run_id": run_id, "idempotency_key": idempotency_key,
                     })
                     continue
                 if not completed:
                     self._record({
                         "rule": claimed_rule.get("name"), "action": action,
                         "at": tick_at, "error": "complete: claim không còn hợp lệ",
+                        "run_id": run_id, "idempotency_key": idempotency_key,
                     })
                     continue
                 self._record({
                     "rule": claimed_rule.get("name"), "action": action,
                     "at": tick_at, "reason": reason,
+                    "run_id": run_id, "idempotency_key": idempotency_key,
                 })

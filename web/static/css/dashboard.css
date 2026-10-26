@@ -1,0 +1,76 @@
+:root {
+    --c-bg: #0f172a;
+    --c-card: #1e293b;
+    --c-border: #334155;
+    --c-input: #0f172a;
+    --c-surface: #0f172a;
+    --c-surface-2: #1e293b;
+}
+html[data-theme="light"] {
+    --c-bg: #f1f5f9;
+    --c-card: #ffffff;
+    --c-border: #e2e8f0;
+    --c-input: #f8fafc;
+    --c-surface: #f8fafc;
+    --c-surface-2: #e2e8f0;
+}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--c-bg); }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #475569; }
+html[data-theme="light"] ::-webkit-scrollbar-thumb { background: #cbd5e1; }
+html[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* ===== Light theme: remap các utility class dùng khắp template
+   (kể cả markup do JS render) — không phải sửa từng dòng. ===== */
+html[data-theme="light"] body { background: var(--c-bg); color: #0f172a; }
+html[data-theme="light"] .bg-darkBg { background-color: var(--c-bg) !important; }
+html[data-theme="light"] .bg-cardBg { background-color: var(--c-card) !important; }
+html[data-theme="light"] .bg-slate-900,
+html[data-theme="light"] .bg-slate-900\/80,
+html[data-theme="light"] .bg-slate-900\/60,
+html[data-theme="light"] .bg-slate-900\/50,
+html[data-theme="light"] .bg-slate-900\/90 { background-color: var(--c-surface) !important; }
+html[data-theme="light"] .bg-slate-800,
+html[data-theme="light"] .bg-slate-800\/40,
+html[data-theme="light"] .bg-slate-800\/80,
+html[data-theme="light"] .bg-slate-800\/90,
+html[data-theme="light"] .bg-slate-700 { background-color: var(--c-surface-2) !important; }
+html[data-theme="light"] .hover\:bg-slate-800:hover,
+html[data-theme="light"] .hover\:bg-slate-700:hover { background-color: var(--c-surface-2) !important; }
+html[data-theme="light"] .hover\:bg-slate-900:hover { background-color: var(--c-surface) !important; }
+html[data-theme="light"] .border-borderBg,
+html[data-theme="light"] .border-slate-700,
+html[data-theme="light"] .border-slate-700\/60,
+html[data-theme="light"] .border-slate-600\/50 { border-color: var(--c-border) !important; }
+html[data-theme="light"] .divide-borderBg > :not([hidden]) ~ :not([hidden]),
+html[data-theme="light"] .divide-slate-800 > :not([hidden]) ~ :not([hidden]) { border-color: var(--c-border) !important; }
+html[data-theme="light"] .text-slate-100,
+html[data-theme="light"] .text-slate-200 { color: #0f172a !important; }
+html[data-theme="light"] .text-slate-300 { color: #334155 !important; }
+html[data-theme="light"] .text-slate-400 { color: #64748b !important; }
+html[data-theme="light"] .text-slate-500 { color: #94a3b8 !important; }
+html[data-theme="light"] .placeholder-slate-500::placeholder { color: #94a3b8 !important; }
+/* Badge/label màu trên nền sáng: dùng shade đậm hơn cho đủ tương phản */
+html[data-theme="light"] .text-blue-400 { color: #2563eb !important; }
+html[data-theme="light"] .text-blue-300 { color: #1d4ed8 !important; }
+html[data-theme="light"] .text-emerald-400 { color: #059669 !important; }
+html[data-theme="light"] .text-emerald-300 { color: #047857 !important; }
+html[data-theme="light"] .text-amber-400 { color: #b45309 !important; }
+html[data-theme="light"] .text-amber-300 { color: #92400e !important; }
+html[data-theme="light"] .text-amber-500 { color: #b45309 !important; }
+html[data-theme="light"] .text-rose-400 { color: #e11d48 !important; }
+html[data-theme="light"] .text-red-400 { color: #dc2626 !important; }
+html[data-theme="light"] .text-red-300 { color: #b91c1c !important; }
+html[data-theme="light"] .text-purple-400 { color: #9333ea !important; }
+html[data-theme="light"] .text-violet-300 { color: #7c3aed !important; }
+html[data-theme="light"] .text-violet-400 { color: #7c3aed !important; }
+html[data-theme="light"] .text-sky-400 { color: #0284c7 !important; }
+html[data-theme="light"] .text-sky-500 { color: #0284c7 !important; }
+html[data-theme="light"] .text-sky-300 { color: #0369a1 !important; }
+html[data-theme="light"] .text-slate-300.font-mono,
+html[data-theme="light"] .font-mono.text-slate-200 { color: #1e293b !important; }
+/* Icon theme toggle: chỉ hiện icon của theme kia (mời bấm) */
+html[data-theme="dark"] .theme-icon-sun { display: none; }
+html[data-theme="light"] .theme-icon-moon { display: none; }
+html[data-theme="light"] .theme-icon-sun { display: block; }

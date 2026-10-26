@@ -1,0 +1,21 @@
+# Tested dependency set for CI and local verification.
+# Refresh deliberately after running the full suite on Windows.
+#
+# Range requirements stay in requirements.txt; this file pins the versions
+# that were actually exercised on 2026-10-26 (Python 3.10.11, Windows 11).
+fastapi==0.141.1
+uvicorn==0.53.0
+pydantic==2.13.5
+jinja2==3.1.6
+requests==2.34.2
+websockets==16.1.1
+playwright==1.62.0
+PySocks==1.7.1
+tzdata==2026.3
+psutil==7.2.2
+cryptography==50.0.2
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+ruff==0.17.2

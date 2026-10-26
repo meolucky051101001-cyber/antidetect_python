@@ -507,23 +507,71 @@ def test_facebook_pages_endpoint(monkeypatch):
         client.delete(f"/api/profiles/{p['id']}")
 
 
-def test_facebook_pages_ui_and_scraper_present():
+def test_dashboard_assets_are_external():
+    """P1-8: JS/CSS dashboard nằm ở /static, không còn inline block."""
+    root = os.path.dirname(os.path.abspath(__file__))
     html = open(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "templates", "index.html"),
-        encoding="utf-8",
+        os.path.join(root, "web", "templates", "index.html"), encoding="utf-8"
+    ).read()
+    assert "<style>" not in html
+    assert "<script>" not in html
+    assert 'src="/static/js/dashboard.js"' in html
+    assert 'href="/static/css/dashboard.css"' in html
+
+    for rel, minimum in (
+        ("js/dashboard.js", 50000),
+        ("js/theme-init.js", 100),
+        ("js/tailwind-config.js", 200),
+        ("css/dashboard.css", 3000),
+    ):
+        path = os.path.join(root, "web", "static", rel)
+        assert os.path.getsize(path) >= minimum, f"{rel} thiếu hoặc rỗng"
+
+    dashboard_js = open(
+        os.path.join(root, "web", "static", "js", "dashboard.js"), encoding="utf-8"
+    ).read()
+    assert "setFilter('all')" in dashboard_js
+    assert "{{" not in dashboard_js and "{%" not in dashboard_js
+
+
+def test_unlock_script_is_external():
+    """CSP script-src 'self' chặn inline block — unlock phải nạp file /static."""
+    root = os.path.dirname(os.path.abspath(__file__))
+    html = open(
+        os.path.join(root, "web", "templates", "unlock.html"), encoding="utf-8"
+    ).read()
+    assert "<script>" not in html
+    assert 'src="/static/js/unlock.js"' in html
+
+    unlock_js = open(
+        os.path.join(root, "web", "static", "js", "unlock.js"), encoding="utf-8"
+    ).read()
+    assert "/auth/login" in unlock_js
+    assert "location.hash" in unlock_js
+
+
+def test_facebook_pages_ui_and_scraper_present():
+    root = os.path.dirname(os.path.abspath(__file__))
+    html = open(
+        os.path.join(root, "web", "templates", "index.html"), encoding="utf-8"
+    ).read()
+    dashboard_js = open(
+        os.path.join(root, "web", "static", "js", "dashboard.js"), encoding="utf-8"
     ).read()
     assert "fanpagesModal" in html
-    assert "openFanpagesModal" in html
-    assert "refreshFanpages" in html
+    assert "openFanpagesModal" in dashboard_js
+    assert "refreshFanpages" in dashboard_js
 
     src = open(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "antidetect", "launcher.py"),
-        encoding="utf-8",
+        os.path.join(root, "antidetect", "launcher.py"), encoding="utf-8"
+    ).read()
+    fb_src = open(
+        os.path.join(root, "antidetect", "facebook.py"), encoding="utf-8"
     ).read()
     # Scrape đọc DOM bookmarks/pages; tab tool mở phải được đóng trong finally.
-    assert "_FB_SCRAPE_JS" in src
-    assert "bookmarks/pages" in src
-    assert "/json/close/" in src
+    assert "_FB_SCRAPE_JS" in fb_src
+    assert "bookmarks/pages" in fb_src
+    assert "/json/close/" in fb_src
     # Tab được mở bằng session của chính profile (qua CDP của nó).
     assert "def fetch_facebook_pages" in src
 
@@ -673,7 +721,9 @@ def test_docs_csp_allows_cdn_while_dashboard_stays_strict():
     dashboard_csp = client.get("/").headers["content-security-policy"]
     assert "cdn.jsdelivr.net" not in dashboard_csp
     assert "fonts.googleapis.com" not in dashboard_csp
-    assert "script-src 'self' 'unsafe-inline';" in dashboard_csp
+    # P1-8: script block nằm ở /static; inline handler vẫn được phép riêng.
+    assert "script-src 'self';" in dashboard_csp
+    assert "script-src-attr 'unsafe-inline';" in dashboard_csp
 
 
 def test_login_non_ascii_token_returns_401_not_500():
@@ -789,6 +839,54 @@ def test_dashboard_csp_blocks_plugins_and_foreign_forms():
     assert "object-src 'none'" in csp
     assert "base-uri 'self'" in csp
     assert "form-action 'self'" in csp
+
+
+def test_metrics_counters_and_endpoint():
+    from antidetect import metrics
+
+    metrics.reset()
+    try:
+        with patch.object(
+            app_module.launcher, "_launch_impl",
+            return_value={"success": True, "degraded": True},
+        ):
+            app_module.launcher.launch("fake-profile")
+        with patch.object(
+            app_module.launcher, "_stop_impl",
+            return_value={"success": False, "error": "boom"},
+        ):
+            app_module.launcher.stop("fake-profile")
+
+        snap = metrics.snapshot()
+        assert snap["counters"]["launch_attempts"] == 1
+        assert snap["counters"]["launch_success"] == 1
+        assert snap["counters"]["launch_degraded"] == 1
+        assert snap["counters"]["stop_attempts"] == 1
+        assert snap["counters"]["stop_failures"] == 1
+        assert snap["timings"]["launch"]["count"] == 1
+
+        login()
+        r = client.get("/api/system/metrics")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["counters"]["launch_attempts"] == 1
+        assert "scheduler" in body and "recent_runs" in body["scheduler"]
+    finally:
+        metrics.reset()
+
+
+def test_logging_uses_rotating_file_handler():
+    from logging.handlers import RotatingFileHandler
+
+    from antidetect.applog import setup_logging
+
+    logger = setup_logging()
+    handlers = [
+        h for h in logger.handlers if isinstance(h, RotatingFileHandler)
+    ]
+    assert handlers, "phải có RotatingFileHandler cho app.log"
+    assert handlers[0].maxBytes >= 1024 * 1024
+    assert handlers[0].backupCount >= 1
 
 
 if __name__ == "__main__":

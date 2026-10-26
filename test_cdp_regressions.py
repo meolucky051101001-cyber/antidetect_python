@@ -18,7 +18,7 @@ import pytest
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LAUNCHER_SRC = os.path.join(BASE_DIR, "antidetect", "launcher.py")
-INDEX_SRC = os.path.join(BASE_DIR, "web", "templates", "index.html")
+DASHBOARD_JS_SRC = os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js")
 
 
 def _read(path):
@@ -116,8 +116,8 @@ def _js_function_block(html, name):
 
 @pytest.mark.parametrize("fn", ["startProfile", "testFingerprint"])
 def test_r3_ui_shows_warnings_even_when_cdp_ready(fn):
-    html = _read(INDEX_SRC)
-    block = _js_function_block(html, fn)
+    js = _read(DASHBOARD_JS_SRC)
+    block = _js_function_block(js, fn)
     # R3: warnings must surface on a successful launch too. They are an
     # else-if chain after the cdp_ready === false branch, not part of the
     # error path, and the success toast comes last.

@@ -13,6 +13,8 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+_HAS_CONSOLE = sys.stdout is not None and sys.stderr is not None
+
 # Add current directory to sys.path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -37,6 +39,9 @@ if sys.stderr is None:
 
 from antidetect.launcher import find_browser_executable
 from antidetect.server_control import write_server_info, remove_server_info
+from antidetect.applog import setup_logging
+
+setup_logging(LOG_FILE, console=_HAS_CONSOLE)
 
 
 def get_app_port() -> int:

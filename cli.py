@@ -12,6 +12,7 @@ from antidetect.models import ProxyConfig
 from antidetect.storage import ProfileManager
 from antidetect.launcher import BrowserLauncher
 from antidetect.fingerprint import generate_fingerprint
+from antidetect.applog import setup_logging
 
 if sys.platform == "win32":
     try:
@@ -22,6 +23,7 @@ if sys.platform == "win32":
 
 
 def main():
+    setup_logging(console=True)
     parser = argparse.ArgumentParser(
         description="Antidetect Python CLI — Điều khiển trình duyệt Antidetect qua dòng lệnh"
     )

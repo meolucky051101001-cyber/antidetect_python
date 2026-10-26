@@ -6,14 +6,12 @@ import uuid
 import asyncio
 import threading
 import secrets
-import zoneinfo
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
 
 # Add root folder to sys.path
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,70 +29,40 @@ from antidetect.fingerprint import (
 from antidetect.launcher import BrowserLauncher
 from antidetect.proxy import check_proxy
 from antidetect.scheduler import ScheduleStoreCorruption
+from antidetect.bulk_jobs import (
+    BulkJobHeartbeat,
+    BulkJobStore,
+    BulkJobStoreCorruption,
+)
+from antidetect.applog import get_logger, setup_logging
+from antidetect import metrics
 
+from .schemas import (
+    BulkCreateRequest,
+    CheckProxyRequest,
+    CreateProfileRequest,
+    ImportCookiesRequest,
+    ImportProfilesRequest,
+    ProfileRuntime,
+    ScheduleCreateRequest,
+    ScheduleUpdateRequest,
+    StartAllBody,
+    StopAllBody,
+    SwitchLocationRequest,
+    UpdateProfileRequest,
+)
+from .services import (
+    apply_geo_to_profile as _apply_geo_to_profile,
+    auto_max_concurrent as _auto_max_concurrent,
+    enrich_facebook_pages as _enrich_facebook_pages,
+    host_gpu_strings as _host_gpu_strings,
+    ram_by_profile_dir as _ram_by_profile_dir,
+    sanitize_facebook_pages as _sanitize_facebook_pages,
+    validate_iana_timezone,
+    worker_pool as _worker_pool,
+)
 
-def _auto_max_concurrent() -> int:
-    """Số Chrome mở đồng thời khi start-all, chọn theo RAM của máy.
-
-    Mỗi Chrome profile tiêu tốn ~300-600MB; với quy mô ~20 profile, mở dần
-    theo batch tránh làm máy 16GB bị quá tải trong lúc các phiên trước chưa
-    giữ ổn định.
-    """
-    ram = get_host_device_memory() or 8
-    if ram <= 8:
-        return 4
-    if ram <= 16:
-        return 6
-    return 8
-
-
-# --- Đợt A: uptime + RAM cho profile đang chạy ---
-
-try:
-    import psutil  # type: ignore
-except ImportError:  # pragma: no cover - psutil là optional
-    psutil = None
-
-_ram_cache: Dict[str, Any] = {"at": 0.0, "data": {}}
-
-
-class ProfileRuntime(Profile):
-    """Profile + trạng thái runtime chỉ đọc (uptime/RAM) cho GET /api/profiles."""
-    uptime_seconds: Optional[int] = None
-    ram_mb: Optional[float] = None
-
-
-def _ram_by_profile_dir(user_data_dirs: Dict[str, str]) -> Dict[str, float]:
-    """Tổng WorkingSet (MB) của các Chrome process theo user-data-dir.
-
-    Cache 5 giây — psutil.process_iter quét toàn bộ process table, không rẻ
-    khi gọi mỗi lần poll 3s với 20 profile.
-    """
-    if psutil is None:
-        return {}
-    now = time.time()
-    if now - _ram_cache["at"] < 5.0:
-        return {k: v for k, v in _ram_cache["data"].items() if k in user_data_dirs}
-    result: Dict[str, float] = {}
-    needle_map = {ud: pid for pid, ud in user_data_dirs.items() if ud}
-    for proc in psutil.process_iter(["pid", "name", "memory_info", "cmdline"]):
-        try:
-            name = (proc.info.get("name") or "").lower()
-            if name not in ("chrome.exe", "msedge.exe", "chromium.exe"):
-                continue
-            cmdline = proc.info.get("cmdline") or []
-            joined = " ".join(cmdline)
-            mem = proc.info.get("memory_info")
-            if not mem:
-                continue
-            for ud, pid in needle_map.items():
-                if ud and ud in joined:
-                    result[pid] = result.get(pid, 0.0) + mem.rss / (1024 * 1024)
-        except Exception:
-            continue
-    _ram_cache["at"] = now
-    _ram_cache["data"] = result
-    return {k: v for k, v in result.items() if k in user_data_dirs}
+log = get_logger("web")
 
 
 def _profiles_with_status():
@@ -125,22 +93,9 @@ def _profiles_with_status():
     return runtime_profiles
 
 
-def _worker_pool(max_workers: int = 64):
-    """Default executor thật cho asyncio.to_thread.
-
-    anyio.to_thread limiter không điều khiển asyncio.to_thread; muốn batch
-    start-all (~20 lệnh handshake CDP 10-15s) không chiếm hết thread mặc định
-    của loop thì phải set_default_executor.
-    """
-    import concurrent.futures
-
-    return concurrent.futures.ThreadPoolExecutor(
-        max_workers=max_workers, thread_name_prefix="ad-worker"
-    )
-
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    setup_logging(os.path.join(DATA_DIR, "app.log"), console=False)
     # Quy mô ~20 profile: mỗi lệnh start giữ một worker thread suốt handshake
     # CDP (~10-15s). Pool mặc định của loop chỉ có min(32, cpu+4) thread, nên
     # stop/list gửi ngay sau batch start sẽ xếp hàng — nâng lên 64.
@@ -161,21 +116,25 @@ async def lifespan(_app: FastAPI):
             }
         )
     except Exception as e:
-        print(f"[Web] Không ghi được runtime key: {e}")
+        log.warning("Không ghi được runtime key: %s", e)
     # Đợt C: lịch tự động — runner daemon dậy mỗi 30s.
     global _scheduler, _schedule_store
     try:
         from antidetect.scheduler import ScheduleStore, Scheduler
 
         _schedule_store = ScheduleStore(os.path.join(DATA_DIR, "schedules.json"))
-        _scheduler = Scheduler(_schedule_store, callbacks={
-            "start_all": _scheduler_start_all,
-            "stop_all": launcher.stop_all,
-            "sync_location_proxy": _scheduler_sync_all_locations,
-        })
+        _scheduler = Scheduler(
+            _schedule_store,
+            callbacks={
+                "start_all": _scheduler_start_all,
+                "stop_all": launcher.stop_all,
+                "sync_location_proxy": _scheduler_sync_all_locations,
+            },
+            history_path=os.path.join(DATA_DIR, "schedule_runs.json"),
+        )
         _scheduler.start()
     except Exception as e:
-        print(f"[Web] Không khởi động được scheduler: {e}")
+        log.warning("Không khởi động được scheduler: %s", e)
     yield
     try:
         if _scheduler is not None:
@@ -198,7 +157,7 @@ _schedule_store = None
 app = FastAPI(
     title="Antidetect Python API",
     description="REST API & Dashboard cho Antidetect Browser",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 app.state.access_key = secrets.token_urlsafe(32)
@@ -303,8 +262,9 @@ async def local_origin_check_middleware(request: Request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     # P2-04: Content Security Policy chống XSS và script injection.
-    # 'unsafe-inline' còn cần vì dashboard dùng inline handler/script; các
-    # directive dưới đây chặn plugin, base tag và form gửi ra ngoài.
+    # Inline <script> đã chuyển ra /static (P1-8); chỉ còn inline handler
+    # (onclick=) nên script-src-attr vẫn cần 'unsafe-inline'. Các directive
+    # dưới đây chặn plugin, base tag và form gửi ra ngoài.
     # Swagger UI/ReDoc mặc định tải bundle từ jsdelivr và font từ Google
     # Fonts; chỉ nới CSP trên đúng trang docs (đã yêu cầu phiên), dashboard
     # vẫn giữ CSP siết.
@@ -325,7 +285,8 @@ async def local_origin_check_middleware(request: Request, call_next):
     else:
         response.headers['Content-Security-Policy'] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; "
+            "script-src-attr 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; "
             "font-src 'self' data:; "
             "img-src 'self' data: https:; "
@@ -350,69 +311,80 @@ _bulk_launch_lock = threading.Lock()
 _start_all_lock = threading.Lock()
 _active_start_all_job: Optional[Dict[str, Any]] = None
 _start_all_cancel_event: Optional[threading.Event] = None
+_bulk_job_store = BulkJobStore(os.path.join(DATA_DIR, "bulk_jobs.json"))
 
 
-def validate_iana_timezone(tz_name: str) -> bool:
-    """P1-03: Kiểm tra múi giờ chuẩn IANA hợp lệ."""
-    if not tz_name or not isinstance(tz_name, str):
-        return False
+def _record_bulk_progress(
+    job_id: str, profile_id: str, res: Dict[str, Any]
+) -> None:
+    """Cập nhật job cục bộ + file trạng thái dùng chung; lỗi ghi chỉ log."""
+    with _start_all_lock:
+        job = _active_start_all_job
+        if not job or job.get("job_id") != job_id:
+            return
+        if res.get("success"):
+            job["completed_count"] += 1
+        else:
+            job["failed_count"] += 1
+        job["results"].append({"profile_id": profile_id, "result": res})
+        completed = job["completed_count"]
+        failed = job["failed_count"]
+        results = list(job["results"])
     try:
-        zoneinfo.ZoneInfo(tz_name.strip())
-        return True
-    except Exception:
-        return False
+        _bulk_job_store.update(
+            job_id,
+            app.state.instance_id,
+            completed_count=completed,
+            failed_count=failed,
+            results=results,
+        )
+    except Exception as exc:  # noqa: BLE001 - progress chỉ là quan sát
+        log.warning("Không ghi được tiến độ bulk job: %s", exc)
 
 
-# --- Data Transfer Objects ---
-class CreateProfileRequest(BaseModel):
-    name: str = "Profile Mới"
-    os: str = "windows"  # windows, macos, linux
-    proxy: Optional[ProxyConfig] = None
-    notes: Optional[str] = ""
-    tags: Optional[List[str]] = []
-    city: Optional[str] = "hanoi"  # Mặc định Hà Nội theo vị trí người dùng
-    # Tuỳ chọn tự sinh fingerprint hoặc dùng cấu hình tuỳ biến
-    fingerprint: Optional[FingerprintConfig] = None
-
-
-class SwitchLocationRequest(BaseModel):
-    city: str = "hanoi"
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-    timezone: Optional[str] = None
-
-
-class UpdateProfileRequest(BaseModel):
-    name: Optional[str] = None
-    notes: Optional[str] = None
-    tags: Optional[List[str]] = None
-    proxy: Optional[ProxyConfig] = None
-    fingerprint: Optional[FingerprintConfig] = None
-    # Browser pin riêng (Giai đoạn 2): tên trong browsers/ hoặc đường dẫn
-    # tuyệt đối; None = giữ nguyên, "" = về mặc định của tool.
-    browser_path: Optional[str] = None
-    # Opt-in strict concurrency: truyền revision mình đã đọc; nếu profile bị
-    # sửa bởi client khác từ đó, update bị từ chối 409 thay vì ghi đè.
-    expected_revision: Optional[int] = None
-
-
-class CheckProxyRequest(BaseModel):
-    protocol: str = "http"
-    host: str
-    port: int
-    username: Optional[str] = None
-    password: Optional[str] = None
-    profile_id: Optional[str] = None
-
-
-class ImportCookiesRequest(BaseModel):
-    cookies: List[Dict[str, Any]]
+def _finish_bulk_job(
+    job_id: str, status: str, error: Optional[str] = None
+) -> None:
+    with _start_all_lock:
+        job = _active_start_all_job
+        snapshot = None
+        if job and job.get("job_id") == job_id:
+            job["status"] = status
+            job["end_time"] = time.time()
+            if error:
+                job["error"] = error
+            snapshot = dict(job)
+    if snapshot is None:
+        return
+    try:
+        _bulk_job_store.finish(
+            job_id,
+            app.state.instance_id,
+            status,
+            error=error,
+            results=snapshot.get("results"),
+        )
+    except Exception as exc:  # noqa: BLE001 - job đã chạy xong
+        log.warning("Không ghi được trạng thái bulk job: %s", exc)
 
 
 # --- Web Page Route ---
 @app.get('/health')
 async def health():
     return {'application': 'antidetect-python', 'instance_id': app.state.instance_id}
+
+
+@app.get('/api/system/metrics')
+async def system_metrics():
+    """Counters/timings của tiến trình hiện tại + lịch sử lịch gần nhất."""
+    data = metrics.snapshot()
+    data["scheduler"] = {
+        "last_tick": (
+            _scheduler.last_run_info.get("last_tick") if _scheduler else None
+        ),
+        "recent_runs": _scheduler.run_history.recent(10) if _scheduler else [],
+    }
+    return data
 
 
 @app.get('/unlock', response_class=HTMLResponse)
@@ -515,10 +487,6 @@ async def create_profile(req: CreateProfileRequest):
     return profile
 
 
-class StartAllBody(BaseModel):
-    profile_ids: Optional[List[str]] = None
-
-
 @app.post("/api/profiles/start-all")
 async def start_all_profiles(
     url: Optional[str] = None,
@@ -549,10 +517,10 @@ async def start_all_profiles(
         if not profiles:
             raise HTTPException(status_code=404, detail="Không profile nào trong danh sách chọn tồn tại.")
 
-    # Lock order: _bulk_launch_lock -> _start_all_lock. The bulk thread already
-    # holds the bulk lock for its whole lifetime before touching job state, so
-    # acquiring in this order cannot deadlock. Failing to acquire it means
-    # another bulk launch is alive, not merely a stale job record.
+    # Lock order: _bulk_launch_lock -> _start_all_lock -> bulk job IPC lock.
+    # The bulk thread holds the process lock for its whole lifetime, so a
+    # failure to acquire it means another local bulk launch is alive. A second
+    # server instance is rejected by the file-backed job store instead.
     if not _bulk_launch_lock.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
@@ -568,10 +536,43 @@ async def start_all_profiles(
             to_start = [p for p in profiles if p.status != "running"]
             job_id = str(uuid.uuid4())
             cancel_event = threading.Event()
+        try:
+            claimed, existing = _bulk_job_store.try_claim(
+                job_id=job_id,
+                owner_instance=app.state.instance_id,
+                kind="start_all",
+                total=len(profiles),
+                starting_count=len(to_start),
+                max_concurrent=max_concurrent,
+            )
+        except BulkJobStoreCorruption as exc:
+            log.error("Bulk job state hỏng: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Trạng thái Start-All dùng chung bị hỏng. Kiểm tra data/bulk_jobs.json trước khi chạy lại.",
+            ) from exc
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Không lấy được khóa trạng thái Start-All; thử lại sau.",
+            ) from exc
+        if not claimed:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Đang có tác vụ {existing.get('kind') or 'Start-All'} "
+                    f"({existing.get('job_id')}) do instance "
+                    f"{str(existing.get('owner_instance') or 'khác')[:8]} xử lý. "
+                    "Hãy đợi hoặc hủy tác vụ hiện tại."
+                ),
+            )
+        with _start_all_lock:
             _start_all_cancel_event = cancel_event
             _active_start_all_job = {
                 "job_id": job_id,
+                "kind": "start_all",
                 "status": "running",
+                "owner_instance": app.state.instance_id,
                 "total": len(profiles),
                 "starting_count": len(to_start),
                 "completed_count": 0,
@@ -579,15 +580,21 @@ async def start_all_profiles(
                 "max_concurrent": max_concurrent,
                 "results": [],
                 "start_time": time.time(),
+                "heartbeat_at": time.time(),
+                "cancel_requested": False,
             }
     except BaseException:
         _bulk_launch_lock.release()
         raise
 
     def run_bulk():
+        heartbeat = BulkJobHeartbeat(
+            _bulk_job_store, job_id, app.state.instance_id, cancel_event
+        )
         status = "completed"
         error = None
         try:
+            heartbeat.start()
             launcher.launch_all(
                 delay=0.8,
                 open_url=url,
@@ -602,31 +609,17 @@ async def start_all_profiles(
             status = "failed"
             error = str(exc)[:500]
         finally:
-            with _start_all_lock:
-                if _active_start_all_job and _active_start_all_job.get("job_id") == job_id:
-                    _active_start_all_job["status"] = status
-                    _active_start_all_job["end_time"] = time.time()
-                    if error:
-                        _active_start_all_job["error"] = error
+            heartbeat.stop()
+            _finish_bulk_job(job_id, status, error)
             _bulk_launch_lock.release()
 
     def on_progress(p_id, res):
-        with _start_all_lock:
-            if _active_start_all_job and _active_start_all_job.get("job_id") == job_id:
-                if res.get("success"):
-                    _active_start_all_job["completed_count"] += 1
-                else:
-                    _active_start_all_job["failed_count"] += 1
-                _active_start_all_job["results"].append({"profile_id": p_id, "result": res})
+        _record_bulk_progress(job_id, p_id, res)
 
     try:
         threading.Thread(target=run_bulk, daemon=True).start()
     except Exception as exc:
-        with _start_all_lock:
-            if _active_start_all_job and _active_start_all_job.get("job_id") == job_id:
-                _active_start_all_job["status"] = "failed"
-                _active_start_all_job["error"] = str(exc)[:500]
-                _active_start_all_job["end_time"] = time.time()
+        _finish_bulk_job(job_id, "failed", str(exc)[:500])
         _bulk_launch_lock.release()
         raise HTTPException(status_code=500, detail="Không khởi động được luồng Start-All.") from exc
 
@@ -645,30 +638,76 @@ async def start_all_profiles(
 
 @app.get("/api/profiles/start-all/status")
 async def get_start_all_status():
-    """P1-06: Lấy tiến độ và trạng thái của hàng đợi Start-All."""
+    """P1-06/P2-12: tiến độ Start-All, kể cả job do instance khác sở hữu."""
     with _start_all_lock:
-        if not _active_start_all_job:
-            return {"active": False, "job": None}
+        local_job = dict(_active_start_all_job) if _active_start_all_job else None
+    try:
+        remote_job = _bulk_job_store.read()
+    except BulkJobStoreCorruption as exc:
+        log.error("Bulk job state hỏng: %s", exc)
         return {
-            "active": _active_start_all_job.get("status") in ("running", "cancelling"),
-            "job": dict(_active_start_all_job)
+            "active": False,
+            "job": None,
+            "error": "Trạng thái Start-All dùng chung bị hỏng; kiểm tra data/bulk_jobs.json.",
         }
+    job = local_job
+    if remote_job and (
+        not local_job or remote_job.get("job_id") != local_job.get("job_id")
+    ):
+        job = remote_job
+    if not job:
+        return {"active": False, "job": None}
+    job["remote"] = job.get("owner_instance") != app.state.instance_id
+    if job is local_job:
+        active = job.get("status") in ("running", "cancelling")
+    else:
+        active = _bulk_job_store.is_active(job)
+    if not active and job.get("status") in ("running", "cancelling"):
+        job["stale"] = True
+    return {"active": active, "job": job}
 
 
 @app.post("/api/profiles/start-all/cancel")
 async def cancel_start_all():
-    """P1-06: Hủy bỏ hàng đợi Start-All đang chạy."""
+    """P1-06/P2-12: hủy job cục bộ hoặc gửi yêu cầu tới instance đang sở hữu."""
     with _start_all_lock:
-        if not _active_start_all_job or _active_start_all_job.get("status") != "running":
-            return {"success": False, "message": "Không có tiến trình Start-All nào đang chạy."}
-        if _start_all_cancel_event:
-            _start_all_cancel_event.set()
-        _active_start_all_job["status"] = "cancelling"
-        return {"success": True, "message": "Đã gửi yêu cầu dừng hàng đợi Start-All."}
-
-
-class StopAllBody(BaseModel):
-    profile_ids: Optional[List[str]] = None
+        local_job = _active_start_all_job
+        local_active = bool(
+            local_job and local_job.get("status") in ("running", "cancelling")
+        )
+        if local_active:
+            job_id = local_job.get("job_id")
+            if _start_all_cancel_event:
+                _start_all_cancel_event.set()
+            local_job["status"] = "cancelling"
+    if local_active:
+        try:
+            _bulk_job_store.request_cancel(job_id)
+        except Exception as exc:  # noqa: BLE001 - local cancel vẫn có hiệu lực
+            log.warning("Không ghi được yêu cầu hủy bulk job: %s", exc)
+        return {
+            "success": True,
+            "job_id": job_id,
+            "remote": False,
+            "message": "Đã gửi yêu cầu dừng hàng đợi Start-All.",
+        }
+    try:
+        remote_job = _bulk_job_store.request_cancel()
+    except BulkJobStoreCorruption as exc:
+        log.error("Bulk job state hỏng: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Trạng thái Start-All dùng chung bị hỏng; kiểm tra data/bulk_jobs.json.",
+        ) from exc
+    if remote_job:
+        metrics.inc("bulk_job_remote_cancel")
+        return {
+            "success": True,
+            "job_id": remote_job.get("job_id"),
+            "remote": True,
+            "message": "Đã gửi yêu cầu hủy tới instance đang chạy Start-All.",
+        }
+    return {"success": False, "message": "Không có tiến trình Start-All nào đang chạy."}
 
 
 @app.post("/api/profiles/stop-all")
@@ -719,10 +758,6 @@ async def export_profiles(request: Request):
             "Cache-Control": "no-store",
         },
     )
-
-
-class ImportProfilesRequest(BaseModel):
-    profiles: List[Dict[str, Any]] = []
 
 
 @app.get("/api/profiles/{profile_id}", response_model=Profile)
@@ -896,43 +931,111 @@ async def set_profile_location(profile_id: str, req: SwitchLocationRequest):
     return updated
 
 
-def _apply_geo_to_profile(p, geo: dict) -> dict:
-    """Áp GeoIP result vào fingerprint profile (sync — gọi trong thread)."""
-    changes = {}
-    tz = geo.get("timezone")
-    if tz and validate_iana_timezone(tz) and tz != p.fingerprint.timezone:
-        changes["timezone"] = [p.fingerprint.timezone, tz]
-        p.fingerprint.timezone = tz
-    lat, lon = geo.get("lat"), geo.get("lon")
-    if lat is not None and lon is not None:
-        lat, lon = float(lat), float(lon)
-        if abs((p.fingerprint.latitude or 0) - lat) > 0.001 or abs((p.fingerprint.longitude or 0) - lon) > 0.001:
-            changes["latitude"] = [p.fingerprint.latitude, lat]
-            changes["longitude"] = [p.fingerprint.longitude, lon]
-            p.fingerprint.latitude = lat
-            p.fingerprint.longitude = lon
-    country = geo.get("country_code")
-    if country:
-        new_locale = locale_for_country(country, default=p.fingerprint.locale)
-        if new_locale != p.fingerprint.locale:
-            changes["locale"] = [p.fingerprint.locale, new_locale]
-            p.fingerprint.locale = new_locale
-            base_lang = new_locale.split("-")[0]
-            p.fingerprint.languages = [new_locale, base_lang, "en-US", "en"]
-            seen = set()
-            p.fingerprint.languages = [l for l in p.fingerprint.languages if not (l in seen or seen.add(l))]
-    if changes:
-        profile_manager.update_profile(p)
-    return changes
-
-
 def _scheduler_start_all(profile_ids=None):
     """Callback scheduler: Scheduler.run gọi cb(ids) positionally.
 
     Không truyền thẳng launcher.launch_all vì tham số đầu của nó là ``delay``
     (list ID sẽ bị hiểu thành delay) và sẽ raise TypeError.
+
+    Job theo lịch dùng chung slot với Start-All thủ công: nếu slot đang bận
+    (cùng process hoặc instance khác) thì bỏ lượt, để không mở trùng browser
+    và không giữ claim của lịch suốt thời gian chờ.
     """
-    return launcher.launch_all(delay=0.8, profile_ids=profile_ids)
+    global _active_start_all_job, _start_all_cancel_event
+    if not _bulk_launch_lock.acquire(blocking=False):
+        metrics.inc("scheduler_start_all_skipped")
+        log.warning("Bỏ qua Start-All theo lịch: một bulk job khác đang chạy.")
+        return {"success": False, "skipped": True, "reason": "bulk_busy"}
+    job_id = uuid.uuid4().hex
+    cancel_event = threading.Event()
+    heartbeat = None
+    try:
+        profiles = _profiles_with_status()
+        if profile_ids is not None:
+            wanted = set(profile_ids)
+            profiles = [p for p in profiles if p.id in wanted]
+        to_start = [p for p in profiles if p.status != "running"]
+        with _start_all_lock:
+            if _active_start_all_job is not None and _active_start_all_job.get(
+                "status"
+            ) in ("running", "cancelling"):
+                metrics.inc("scheduler_start_all_skipped")
+                log.warning(
+                    "Bỏ qua Start-All theo lịch: job %s đang chạy.",
+                    _active_start_all_job.get("job_id"),
+                )
+                return {"success": False, "skipped": True, "reason": "bulk_busy"}
+        try:
+            claimed, existing = _bulk_job_store.try_claim(
+                job_id=job_id,
+                owner_instance=app.state.instance_id,
+                kind="scheduled_start_all",
+                total=len(profiles),
+                starting_count=len(to_start),
+            )
+        except (BulkJobStoreCorruption, TimeoutError) as exc:
+            raise RuntimeError(f"bulk job state: {exc}") from exc
+        if not claimed:
+            metrics.inc("scheduler_start_all_skipped")
+            log.warning(
+                "Bỏ qua Start-All theo lịch: instance %s đang chạy job %s.",
+                existing.get("owner_instance"), existing.get("job_id"),
+            )
+            return {
+                "success": False,
+                "skipped": True,
+                "reason": "remote_bulk_job",
+                "job_id": existing.get("job_id"),
+            }
+        with _start_all_lock:
+            _start_all_cancel_event = cancel_event
+            _active_start_all_job = {
+                "job_id": job_id,
+                "kind": "scheduled_start_all",
+                "status": "running",
+                "owner_instance": app.state.instance_id,
+                "total": len(profiles),
+                "starting_count": len(to_start),
+                "completed_count": 0,
+                "failed_count": 0,
+                "max_concurrent": 0,
+                "results": [],
+                "start_time": time.time(),
+                "heartbeat_at": time.time(),
+                "cancel_requested": False,
+            }
+        heartbeat = BulkJobHeartbeat(
+            _bulk_job_store, job_id, app.state.instance_id, cancel_event
+        )
+        status = "completed"
+        error = None
+        try:
+            heartbeat.start()
+            results = launcher.launch_all(
+                delay=0.8,
+                cancel_event=cancel_event,
+                progress_callback=lambda p_id, res: _record_bulk_progress(
+                    job_id, p_id, res
+                ),
+                profile_ids=profile_ids,
+            )
+            if cancel_event.is_set():
+                status = "cancelled"
+            return {
+                "success": True,
+                "job_id": job_id,
+                "status": status,
+                "results": results,
+            }
+        except Exception as exc:
+            status = "failed"
+            error = str(exc)[:500]
+            raise
+        finally:
+            heartbeat.stop()
+            _finish_bulk_job(job_id, status, error)
+    finally:
+        _bulk_launch_lock.release()
 
 
 def _scheduler_sync_all_locations(profile_ids=None):
@@ -949,7 +1052,7 @@ def _scheduler_sync_all_locations(profile_ids=None):
         try:
             geo = check_proxy(p.proxy, 12)
             if geo.get("success"):
-                if _apply_geo_to_profile(p, geo):
+                if _apply_geo_to_profile(p, geo, profile_manager.update_profile):
                     done += 1
             else:
                 skipped += 1
@@ -977,7 +1080,9 @@ async def sync_location_from_proxy(profile_id: str):
     if not geo.get("success"):
         raise HTTPException(status_code=502, detail=f"Không truy vấn được GeoIP qua proxy: {geo.get('error') or 'lỗi không xác định'}")
 
-    changes = await asyncio.to_thread(_apply_geo_to_profile, p, geo)
+    changes = await asyncio.to_thread(
+        _apply_geo_to_profile, p, geo, profile_manager.update_profile
+    )
     if not profile_manager.get_profile(profile_id):
         raise HTTPException(status_code=404, detail="Profile không tồn tại")
     return {
@@ -1131,22 +1236,6 @@ SCHEDULES_CORRUPT_DETAIL = (
 )
 
 
-class ScheduleCreateRequest(BaseModel):
-    name: str = ""
-    time: str  # HH:MM
-    action: str  # start_all | stop_all | sync_location_proxy
-    profile_ids: Optional[List[str]] = None
-    enabled: bool = True
-
-
-class ScheduleUpdateRequest(BaseModel):
-    name: Optional[str] = None
-    time: Optional[str] = None
-    action: Optional[str] = None
-    profile_ids: Optional[List[str]] = None
-    enabled: Optional[bool] = None
-
-
 @app.get("/api/schedules")
 async def list_schedules():
     if _schedule_store is None:
@@ -1155,8 +1244,10 @@ async def list_schedules():
         rules = _schedule_store.list()
     except ScheduleStoreCorruption as e:
         raise HTTPException(status_code=503, detail=SCHEDULES_CORRUPT_DETAIL) from e
+    recent_runs = _scheduler.run_history.recent(20) if _scheduler else []
     return {"success": True, "rules": rules,
-            "last_tick": (_scheduler.last_run_info.get("last_tick") if _scheduler else None)}
+            "last_tick": (_scheduler.last_run_info.get("last_tick") if _scheduler else None),
+            "recent_runs": recent_runs}
 
 
 @app.post("/api/schedules")
@@ -1313,43 +1404,6 @@ async def import_profile_cookies(profile_id: str, req: ImportCookiesRequest):
     }
 
 
-def _sanitize_facebook_pages(raw: Any) -> List[Dict[str, Any]]:
-    """Chỉ giữ fanpage có URL http(s) tuyệt đối.
-
-    URL này được render thẳng thành href trên dashboard, nên loại bỏ
-    javascript:/data:/file: từ cache hoặc file import (chống stored XSS cục bộ).
-    Entry sai kiểu hoặc URL không hợp lệ bị bỏ qua thay vì làm hỏng cả danh sách.
-    """
-    from urllib.parse import urlparse
-
-    pages: List[Dict[str, Any]] = []
-    if not isinstance(raw, list):
-        return pages
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        url = str(entry.get("url") or "").strip()
-        if not url:
-            continue
-        try:
-            parsed = urlparse(url)
-        except ValueError:
-            continue
-        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
-            continue
-        item = dict(entry)
-        item["url"] = url
-        pages.append(item)
-    return pages
-
-
-def _enrich_facebook_pages(raw: Any) -> List[Dict[str, Any]]:
-    from antidetect.launcher import classify_facebook_page
-
-    pages = _sanitize_facebook_pages(raw)
-    return [{**entry, **classify_facebook_page(entry)} for entry in pages]
-
-
 @app.get("/api/profiles/{profile_id}/facebook/pages")
 async def get_facebook_pages(
     profile_id: str, refresh: bool = False, deep: bool = False, force: bool = False
@@ -1484,34 +1538,6 @@ async def import_profiles(req: ImportProfilesRequest):
         "imported": imported,
         "failed": failed,
     }
-
-
-class BulkCreateRequest(BaseModel):
-    count: int = Field(ge=1, le=50)
-    os: str = "windows"
-    city: str = "hanoi"
-    stealth_mode: str = "unique"  # unique | authentic
-    name_prefix: str = "Profile"
-    cpu: Optional[int] = None
-    proxies: List[str] = []
-
-
-def _host_gpu_strings() -> tuple:
-    """Vendor/renderer GPU thật của host (cho authentic bulk-create).
-
-    Dự phòng theo bảng GPU khai báo — verify_live sẽ bắt nếu authentic lệch.
-    """
-    try:
-        from antidetect.fingerprint import GPU_PROFILES
-        for gp in GPU_PROFILES:
-            r = gp if isinstance(gp, str) else (gp.get("renderer") or "")
-            if "Intel" in r:
-                return "Google Inc. (Intel)", r
-        first = GPU_PROFILES[0]
-        r = first if isinstance(first, str) else (first.get("renderer") or "")
-        return "Google Inc. (Intel)", r
-    except Exception:
-        return "Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11)"
 
 
 @app.post("/api/profiles/bulk-create")

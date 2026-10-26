@@ -11,10 +11,14 @@ from pathlib import Path
 from ctypes import wintypes
 from typing import Optional, Dict, Any, List
 
+from .applog import get_logger
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.environ.get("ANTIDETECT_DATA_DIR") or os.path.join(BASE_DIR, "data")
 SECRETS_FILE = Path(DATA_DIR) / "secrets.dpapi"
 LOCK_FILE = Path(DATA_DIR) / "secrets.lock"
+
+log = get_logger("secrets")
 
 _lock = threading.RLock()
 _store_corrupted = False
@@ -29,13 +33,7 @@ class SecretStoreCorruption(RuntimeError):
 
 
 def _safe_log(message: str) -> None:
-    try:
-        print(message)
-    except UnicodeEncodeError:
-        try:
-            print(message.encode("ascii", "backslashreplace").decode("ascii"))
-        except Exception:
-            pass
+    log.warning(message)
 
 
 class _StoreLock:
