@@ -181,6 +181,8 @@ def read_server_info() -> Optional[Dict[str, Any]]:
             data = json.loads(content)
             if isinstance(data, dict):
                 return data
+            if isinstance(data, int) and not isinstance(data, bool) and data > 0:
+                return {"pid": data, "port": 8000, "legacy": True}
         except json.JSONDecodeError:
             if content.isdigit():
                 return {"pid": int(content), "port": 8000, "legacy": True}
