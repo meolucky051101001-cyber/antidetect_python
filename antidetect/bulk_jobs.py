@@ -284,6 +284,14 @@ class BulkJobHeartbeat:
                     log.warning("Bulk heartbeat lỗi: %s: %s", type(exc).__name__, exc)
             else:
                 if job is None:
+                    # Mất quyền sở hữu (job bị process khác tiếp quản hoặc đã
+                    # bị xóa): phải dừng job đang chạy, nếu không hai process
+                    # sẽ cùng launch/stop profile.
+                    log.warning(
+                        "Bulk job %s mất quyền sở hữu; yêu cầu dừng.",
+                        self.job_id,
+                    )
+                    self.cancel_event.set()
                     return
                 if job.get("cancel_requested"):
                     self.cancel_event.set()

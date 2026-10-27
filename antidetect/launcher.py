@@ -17,13 +17,11 @@ from .models import Profile
 from .storage import ProfileManager, DATA_DIR, PROFILES_DATA_DIR
 from .browser_runtime import BrowserRuntimeStore
 from .stealth import get_stealth_script, get_worker_stealth_script, get_webgl_limits
-from .proxy import create_proxy_auth_extension
 from .process_identity import read_browser_identity
 from .applog import get_logger
 from . import metrics
 from .fingerprint import (
     normalize_fingerprint_for_launch,
-    get_version_from_browser_path,
     get_host_screen_info,
     host_os,
 )
@@ -496,6 +494,10 @@ class BrowserLauncher:
             else ("Chromium" if getattr(fp, "browser_brand", "chrome") == "chromium"
                   else "Google Chrome")
         )
+        # Authentic mode disables the WebGL hook, so the page reports the
+        # host GPU. Comparing it to the stored fingerprint would fail on every
+        # launch and mark a healthy profile as degraded.
+        webgl_spoofed = "webgl" not in (getattr(fp, "stealth_disable", None) or [])
         expected_texture = None
         expected_viewport = None
         limits = get_webgl_limits(fp)
@@ -584,16 +586,21 @@ class BrowserLauncher:
                                 fp.timezone,
                                 "Asia/Saigon" if fp.timezone == "Asia/Ho_Chi_Minh" else fp.timezone,
                             )
-                            checks["webgl_vendor"] = value.get("glVendor") == fp.webgl_vendor
-                            checks["webgl_renderer"] = value.get("glRenderer") == fp.webgl_renderer
+                            if webgl_spoofed:
+                                checks["webgl_vendor"] = (
+                                    value.get("glVendor") == fp.webgl_vendor
+                                )
+                                checks["webgl_renderer"] = (
+                                    value.get("glRenderer") == fp.webgl_renderer
+                                )
                             checks["css_device_width"] = value.get("cssDeviceW") is True
                             checks["css_device_height"] = value.get("cssDeviceH") is True
                             checks["css_device_pixel_ratio"] = value.get("cssDpr") is True
-                            if expected_texture is not None:
+                            if webgl_spoofed and expected_texture is not None:
                                 checks["webgl_max_texture"] = (
                                     int(value.get("glMaxTexture") or 0) == expected_texture
                                 )
-                            if expected_viewport is not None:
+                            if webgl_spoofed and expected_viewport is not None:
                                 checks["webgl_max_viewport"] = (
                                     list(value.get("glMaxViewport") or [])
                                     == expected_viewport
@@ -1438,35 +1445,19 @@ class BrowserLauncher:
                         profile.proxy.password or "",
                     )
 
-                    # Chrome 137+ removed --load-extension for branded builds.
-                    # Use CDP Fetch.authRequired instead. Older builds keep the
-                    # extension path because their Fetch domain is less reliable.
-                    browser_ver = get_version_from_browser_path(browser_path)
-                    major = 0
-                    if browser_ver:
-                        try:
-                            major = int(browser_ver[1].split(".", 1)[0])
-                        except Exception:
-                            major = 0
-                    if major >= 137:
-                        log.info(
-                            "[Launcher] Chrome >=137: xác thực proxy qua CDP "
-                            f"({profile.proxy.host}:{profile.proxy.port}, {profile.proxy.protocol})."
+                    # Xác thực proxy qua CDP (Fetch.authRequired) cho mọi bản
+                    # Chrome. Đường extension MV3 cũ ghi mật khẩu dạng plaintext
+                    # vào thư mục profile nên đã bị loại bỏ; Chrome 137+ cũng
+                    # không còn nhận --load-extension trên bản branded.
+                    log.info(
+                        "[Launcher] Xác thực proxy qua CDP "
+                        f"({profile.proxy.host}:{profile.proxy.port}, {profile.proxy.protocol})."
+                    )
+                    if profile.proxy.protocol in ("socks5", "socks4"):
+                        log.warning(
+                            "[Launcher] Lưu ý: Chrome có thể không hỗ trợ xác thực "
+                            "SOCKS5; nên dùng HTTP/HTTPS proxy nếu proxy yêu cầu auth."
                         )
-                        if profile.proxy.protocol in ("socks5", "socks4"):
-                            log.warning(
-                                "[Launcher] Lưu ý: Chrome có thể không hỗ trợ xác thực "
-                                "SOCKS5; nên dùng HTTP/HTTPS proxy nếu proxy yêu cầu auth."
-                            )
-                    else:
-                        ext_dir = create_proxy_auth_extension(profile.proxy, profile_dir)
-                        if ext_dir:
-                            args.append(f"--load-extension={ext_dir}")
-                        elif profile.proxy.protocol in ("socks5", "socks4"):
-                            log.warning(
-                                "[Launcher] Cảnh báo: Chrome cũ không hỗ trợ xác thực "
-                                "SOCKS5 qua extension. Hãy dùng proxy HTTP/HTTPS có auth."
-                            )
 
             # Mở trang trắng theo mặc định; chỉ điều hướng ra ngoài khi người dùng chỉ định URL.
             target_url = open_url or "about:blank"

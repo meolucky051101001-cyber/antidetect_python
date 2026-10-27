@@ -160,18 +160,24 @@ def enrich_facebook_pages(raw: Any) -> List[Dict[str, Any]]:
 
 
 def host_gpu_strings() -> tuple:
-    """Vendor/renderer GPU thật của host (cho authentic bulk-create).
+    """GPU khai báo hợp lệ theo OS host cho authentic bulk-create.
 
-    Dự phòng theo bảng GPU khai báo — verify_live sẽ bắt nếu authentic lệch.
+    Authentic tắt WebGL spoof nên trình duyệt dùng GPU thật; giá trị này chỉ
+    cần là một entry hợp lệ trong bảng GPU để audit/UI không thấy chuỗi rác.
     """
-    try:
-        from antidetect.fingerprint import GPU_PROFILES
-        for gp in GPU_PROFILES:
-            r = gp if isinstance(gp, str) else (gp.get("renderer") or "")
-            if "Intel" in r:
-                return "Google Inc. (Intel)", r
-        first = GPU_PROFILES[0]
-        r = first if isinstance(first, str) else (first.get("renderer") or "")
-        return "Google Inc. (Intel)", r
-    except Exception:
-        return "Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11)"
+    from antidetect.fingerprint import GPU_PROFILES, host_os
+
+    gpus = GPU_PROFILES.get(host_os()) or GPU_PROFILES.get("windows") or []
+    for gpu in gpus:
+        if not isinstance(gpu, dict):
+            continue
+        renderer = gpu.get("renderer") or ""
+        if "Intel" in renderer:
+            return gpu.get("vendor") or "Google Inc. (Intel)", renderer
+    if gpus and isinstance(gpus[0], dict):
+        first = gpus[0]
+        return first.get("vendor") or "Google Inc.", first.get("renderer") or ""
+    return (
+        "Google Inc. (Intel)",
+        "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    )

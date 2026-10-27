@@ -105,6 +105,24 @@ def test_heartbeat_renews_lease_and_surfaces_cancel(tmp_path):
     assert store.finish("job-a", "instance-a", "cancelled")
 
 
+def test_heartbeat_cancels_job_when_ownership_is_lost(tmp_path):
+    """Sai owner (job bị process khác tiếp quản) phải hủy job đang chạy.
+
+    Nếu heartbeat chỉ im lặng dừng, process cũ vẫn launch profile song song
+    với process đã tiếp quản.
+    """
+    store = _store(tmp_path)
+    assert store.try_claim("job-a", "instance-a", "start_all", 1)[0]
+    cancel_event = threading.Event()
+    beat = BulkJobHeartbeat(
+        store, "job-a", "wrong-instance", cancel_event, interval=0.05
+    ).start()
+    try:
+        assert cancel_event.wait(1.0), "mất ownership phải set cancel_event"
+    finally:
+        beat.stop()
+
+
 def test_corrupt_store_fails_closed(tmp_path):
     path = tmp_path / "bulk_jobs.json"
     path.write_text("{not json", encoding="utf-8")

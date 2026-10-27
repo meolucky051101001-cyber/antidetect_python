@@ -1051,19 +1051,34 @@
                 <button onclick="closeSchedulesModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
             </div>
             <div class="p-5 overflow-y-auto space-y-3">
-                <div class="flex items-center gap-2 bg-slate-900/50 p-3 rounded-xl border border-borderBg">
-                    <input type="time" id="sched-time" class="bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
-                    <select id="sched-action" class="bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs text-slate-200 flex-1">
-                        <option value="start_all">Mở tất cả profile</option>
-                        <option value="stop_all">Đóng tất cả profile</option>
-                        <option value="sync_location_proxy">Sync vị trí theo proxy</option>
-                    </select>
-                    <input type="text" id="sched-name" placeholder="Tên lịch (tuỳ chọn)" class="bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200 w-32">
-                    <button onclick="createSchedule()" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-semibold transition">Thêm</button>
+                <div class="space-y-2 bg-slate-900/50 p-3 rounded-xl border border-borderBg">
+                    <div class="flex items-center gap-2">
+                        <input type="time" id="sched-time" class="bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                        <select id="sched-action" class="bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs text-slate-200 flex-1">
+                            <option value="start_all">Mở tất cả profile</option>
+                            <option value="stop_all">Đóng tất cả profile</option>
+                            <option value="sync_location_proxy">Sync vị trí theo proxy</option>
+                        </select>
+                        <input type="text" id="sched-name" placeholder="Tên lịch (tuỳ chọn)" class="bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200 w-32">
+                        <button id="sched-cancel-edit" onclick="cancelScheduleEdit()" class="hidden px-2.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Hủy</button>
+                        <button onclick="createSchedule()" id="sched-submit" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-semibold transition">Thêm</button>
+                    </div>
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="text-[11px] text-slate-400">Profile áp dụng</span>
+                        <label class="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer">
+                            <input type="checkbox" id="sched-all" checked onchange="toggleScheduleScopeAll(this.checked)" class="accent-violet-500">
+                            Tất cả profile
+                        </label>
+                    </div>
+                    <div id="sched-profiles" class="hidden max-h-28 overflow-y-auto grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-slate-300"></div>
                 </div>
                 <div id="schedules-meta" class="text-[11px] text-slate-500"></div>
                 <div id="schedules-list" class="space-y-2"></div>
-                <p class="text-[10px] text-slate-500">Lịch chạy khi server đang mở; lỡ giờ trong vòng 60 phút (do restart) vẫn tự chạy bù một lần. Profile scope: tất cả (chọn riêng qua API).</p>
+                <div class="pt-1">
+                    <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Lần chạy gần đây</div>
+                    <div id="schedule-runs" class="space-y-1 text-[11px] text-slate-400"></div>
+                </div>
+                <p class="text-[10px] text-slate-500">Lịch chạy khi server đang mở; lỡ giờ trong vòng 60 phút (do restart) vẫn tự chạy bù một lần. Phạm vi: tất cả profile hoặc chọn từng profile.</p>
             </div>
             <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
                 <button onclick="closeSchedulesModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>

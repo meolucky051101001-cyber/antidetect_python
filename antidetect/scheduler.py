@@ -219,6 +219,16 @@ class ScheduleStore:
                     updated["profile_ids"] = list(fields["profile_ids"] or [])
                 if "name" in fields:
                     updated["name"] = str(fields["name"] or updated["name"])
+                if (
+                    ("time" in fields and updated.get("time") != rule.get("time"))
+                    or (
+                        "action" in fields
+                        and updated.get("action") != rule.get("action")
+                    )
+                ):
+                    # Lịch/hành động mới chưa chạy hôm nay; giữ last_run_date
+                    # của lịch cũ sẽ khiến nó bị bỏ qua tới ngày mai.
+                    updated["last_run_date"] = None
                 self._rules[index] = updated
                 self._save_locked()
                 return self._public_rule(updated)

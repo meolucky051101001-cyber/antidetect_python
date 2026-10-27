@@ -9,7 +9,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from antidetect.models import Profile, ProxyConfig, FingerprintConfig
+from antidetect.models import Profile, ProxyConfig, FingerprintConfig, REDACTED_SECRET
 from antidetect.storage import ProfileManager
 from antidetect.launcher import BrowserLauncher
 from antidetect.launch_gate import (
@@ -164,7 +164,11 @@ def action_create(manager: ProfileManager, launcher: BrowserLauncher, data: Dict
         host=proxy_data.get("host", ""),
         port=proxy_data.get("port", 0),
         username=proxy_data.get("username"),
-        password=proxy_data.get("password")
+        password=(
+            None
+            if proxy_data.get("password") in (None, "", REDACTED_SECRET)
+            else proxy_data.get("password")
+        ),
     )
 
     lat, lon, tz = get_location_coordinates(city, randomize=True)
@@ -231,14 +235,26 @@ def action_update(manager: ProfileManager, launcher: BrowserLauncher, profile_id
         p.tags = data["tags"]
     if "proxy" in data:
         pr = data["proxy"]
-        p.proxy = ProxyConfig(
+        new_proxy = ProxyConfig(
             enabled=pr.get("enabled", False),
             protocol=pr.get("protocol", "http"),
             host=pr.get("host", ""),
             port=pr.get("port", 0),
             username=pr.get("username"),
-            password=pr.get("password")
+            password=pr.get("password"),
         )
+        if new_proxy.password == REDACTED_SECRET:
+            new_proxy.password = None
+        # Cùng endpoint + password trống/che → giữ secret DPAPI hiện có.
+        # Đổi endpoint thì không mang secret cũ sang (identity binding).
+        if (
+            p.proxy
+            and new_proxy.identity_key() == p.proxy.identity_key()
+            and p.proxy.password
+            and new_proxy.password in (None, "")
+        ):
+            new_proxy.password = p.proxy.password
+        p.proxy = new_proxy
     updated = manager.update_profile(p)
     p_dict = updated.model_dump() if hasattr(updated, "model_dump") else updated.dict()
     return {"success": True, "profile": p_dict}
@@ -257,12 +273,27 @@ def action_options() -> Dict[str, Any]:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--action", required=True, help="Hành động cần thực hiện")
-    parser.add_argument("--payload", default="{}", help="Dữ liệu JSON đầu vào")
+    parser.add_argument(
+        "--payload",
+        default=None,
+        help="Dữ liệu JSON đầu vào (không dùng cho mật khẩu proxy)",
+    )
+    parser.add_argument(
+        "--payload-stdin",
+        action="store_true",
+        help="Đọc JSON payload từ stdin để mật khẩu không lộ qua command line",
+    )
     args = parser.parse_args()
 
     action = args.action
     try:
-        payload = json.loads(args.payload)
+        if args.payload_stdin:
+            raw = sys.stdin.read()
+            payload = json.loads(raw) if raw.strip() else {}
+        elif args.payload is not None:
+            payload = json.loads(args.payload)
+        else:
+            payload = {}
     except Exception:
         payload = {}
 

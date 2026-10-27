@@ -108,17 +108,19 @@ def test_batch_b_bulk_create():
 
 
 def test_batch_b_authentic_bulk_gets_host_gpu():
-    """bulk-create authentic same-OS: stealth_disable 5 nhóm + GPU bảng dự phòng."""
+    """bulk-create authentic same-OS: stealth_disable 5 nhóm + GPU hợp lệ theo OS."""
     import web.app as app_module
     from fastapi.testclient import TestClient
+    from antidetect.fingerprint import GPU_PROFILES, host_os
 
+    target_os = host_os() if host_os() in GPU_PROFILES else "windows"
     client = TestClient(app_module.app, base_url="http://127.0.0.1:8000")
     client.post(
         "/auth/login",
         headers={"Authorization": "Bearer " + app_module.app.state.access_key},
     )
     r = client.post("/api/profiles/bulk-create", json={
-        "count": 1, "os": "windows", "stealth_mode": "authentic",
+        "count": 1, "os": target_os, "stealth_mode": "authentic",
         "name_prefix": "AuthBulk",
     })
     assert r.status_code == 200
@@ -127,9 +129,46 @@ def test_batch_b_authentic_bulk_gets_host_gpu():
         p = client.get(f"/api/profiles/{pid}").json()
         assert set(p["fingerprint"]["stealth_disable"]) == {
             "canvas", "webgl", "audio", "media", "worker"}
-        assert p["fingerprint"]["webgl_vendor"].startswith("Google Inc.")
+        fp = p["fingerprint"]
+        assert any(
+            fp["webgl_vendor"] == gpu["vendor"]
+            and fp["webgl_renderer"] == gpu["renderer"]
+            for gpu in GPU_PROFILES[target_os]
+        )
     finally:
         client.delete(f"/api/profiles/{pid}")
+
+
+def test_batch_b_authentic_cross_os_rejected():
+    """authentic + OS khác host phải bị từ chối thay vì tạo fingerprint mâu thuẫn."""
+    import web.app as app_module
+    from fastapi.testclient import TestClient
+    from antidetect.fingerprint import GPU_PROFILES, host_os
+
+    target_os = host_os() if host_os() in GPU_PROFILES else "windows"
+    other_os = next(os_ for os_ in GPU_PROFILES if os_ != target_os)
+    client = TestClient(app_module.app, base_url="http://127.0.0.1:8000")
+    client.post(
+        "/auth/login",
+        headers={"Authorization": "Bearer " + app_module.app.state.access_key},
+    )
+    r = client.post("/api/profiles/bulk-create", json={
+        "count": 1, "os": other_os, "stealth_mode": "authentic",
+        "name_prefix": "AuthCross",
+    })
+    assert r.status_code == 400
+    assert "cùng hệ điều hành" in r.json()["detail"]
+
+
+def test_host_gpu_strings_matches_declared_table():
+    from web.services import host_gpu_strings
+    from antidetect.fingerprint import GPU_PROFILES, host_os
+
+    gpus = GPU_PROFILES.get(host_os()) or GPU_PROFILES["windows"]
+    vendor, renderer = host_gpu_strings()
+    assert any(
+        vendor == gpu["vendor"] and renderer == gpu["renderer"] for gpu in gpus
+    )
 
 
 def test_batch_c_scheduler_store_and_due():

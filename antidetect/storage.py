@@ -6,7 +6,7 @@ import time
 import threading
 import re
 import uuid
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from .models import Profile, FingerprintConfig, ProxyConfig
 from .fingerprint import generate_fingerprint
 from .applog import get_logger
@@ -446,6 +446,31 @@ class ProfileManager:
             if found:
                 self.save_profiles(profiles)
                 return updated
+            return None
+
+    def update_facebook_pages(
+        self,
+        profile_id: str,
+        pages: List[Dict[str, Any]],
+        synced_at: int,
+    ) -> Optional[Profile]:
+        """Merge only fanpage fields into the current record.
+
+        A deep Facebook scrape can run for minutes; replacing the whole profile
+        with the snapshot taken before it started would revert proxy edits made
+        in the meantime. Re-read under the lock and touch only these fields.
+        """
+        with self._lock, self._ipc_lock:
+            profiles = self.list_profiles()
+            for p in profiles:
+                if p.id != profile_id:
+                    continue
+                p.facebook_pages = pages
+                p.facebook_pages_synced_at = synced_at
+                p.revision = (getattr(p, "revision", 1) or 1) + 1
+                p.updated_at = int(time.time())
+                self.save_profiles(profiles)
+                return p
             return None
 
     def update_profiles_batch(self, updated_list: List[Profile]) -> List[str]:

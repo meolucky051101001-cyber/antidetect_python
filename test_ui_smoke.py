@@ -295,12 +295,18 @@ def test_dashboard_ui_smoke(live_server):
             assert imported_id, "Không lấy được id profile import"
             page.click("#importModal button[onclick='closeImportModal()']")
 
-            # --- Lịch tự động: tạo + tắt qua checkbox ---
+            # --- Lịch tự động: scope profile + sửa lịch + recent runs ---
+            assert _profile_row(page, profile_id).locator("text=Pin: mặc định").count() == 1
             page.click("button[onclick='openSchedulesModal()']")
             page.wait_for_selector("#schedulesModal:not(.hidden)")
+            assert page.locator("#schedule-runs").count() == 1
             schedule_time = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
             page.fill("#sched-time", schedule_time)
             page.fill("#sched-name", "UI Smoke Schedule")
+            # Chọn riêng profile vừa tạo thay vì "tất cả".
+            page.uncheck("#sched-all")
+            page.wait_for_selector("#sched-profiles:not(.hidden)")
+            page.check(f"#sched-profiles input[value='{profile_id}']")
             with page.expect_response(
                 lambda r: r.url.rstrip("/").endswith("/api/schedules")
                 and r.request.method == "POST"
@@ -311,6 +317,34 @@ def test_dashboard_ui_smoke(live_server):
                 page.locator("#schedules-list > div").filter(has_text="UI Smoke Schedule").first
             )
             schedule_row.wait_for()
+            rules = page.evaluate(
+                "async () => (await (await fetch('/api/schedules')).json()).rules"
+            )
+            ours = [rule for rule in rules if rule.get("name") == "UI Smoke Schedule"]
+            assert ours and ours[0]["profile_ids"] == [profile_id], ours
+
+            # Sửa lịch: nạp đúng scope cũ, đổi về "tất cả".
+            schedule_row.locator("button[onclick^='editSchedule']").click()
+            page.wait_for_function(
+                "() => document.getElementById('sched-submit').innerText.trim() === 'Lưu'"
+            )
+            assert page.input_value("#sched-time") == schedule_time
+            assert page.is_checked(f"#sched-profiles input[value='{profile_id}']")
+            page.check("#sched-all")
+            with page.expect_response(
+                lambda r: "/api/schedules/" in r.url and r.request.method == "PUT"
+            ) as edit_response:
+                page.click("#schedulesModal button[onclick='createSchedule()']")
+            assert edit_response.value.status == 200, "Sửa lịch qua UI thất bại"
+            rules = page.evaluate(
+                "async () => (await (await fetch('/api/schedules')).json()).rules"
+            )
+            ours = [rule for rule in rules if rule.get("name") == "UI Smoke Schedule"]
+            assert ours and ours[0]["profile_ids"] == [] and ours[0]["enabled"] is True, ours
+
+            schedule_row = (
+                page.locator("#schedules-list > div").filter(has_text="UI Smoke Schedule").first
+            )
             with page.expect_response(
                 lambda r: "/api/schedules/" in r.url and r.request.method == "PUT"
             ) as toggle_response:

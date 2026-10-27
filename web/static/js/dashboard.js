@@ -620,6 +620,15 @@
                         ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-sky-500/10 text-slate-400 border border-slate-500/30" title="Tắt ' + disabled.size + ' nhóm hook (xem Edit profile)">Partial</span>'
                         : '');
 
+                // Browser pin: profile.browser_path (API trả sẵn) hoặc mặc định của tool.
+                const pinPath = (p.browser_path || '').trim();
+                const pinName = pinPath ? pinPath.split(/[\\/]/).pop() : '';
+                const defaultPinVer = systemOptions && systemOptions.browser_version
+                    ? systemOptions.browser_version : '';
+                const pinBadge = pinPath
+                    ? `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-indigo-500/15 text-indigo-300 border border-indigo-500/30" title="Browser pin: ${escapeHtml(pinPath)}">Pin: ${escapeHtml(pinName)}</span>`
+                    : `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] text-slate-500 border border-slate-600/40" title="Browser mặc định của tool${defaultPinVer ? ' — Chrome ' + escapeHtml(defaultPinVer) : ''}">Pin: mặc định</span>`;
+
                 tr.innerHTML = `
                     <td class="py-3 px-3">
                         <input type="checkbox" ${selectedIds.has(p.id) ? 'checked' : ''} onchange="toggleSelect('${p.id}', this.checked)" class="accent-blue-500 cursor-pointer">
@@ -642,8 +651,9 @@
                             ${osBadge}
                             ${stealthBadge}
                         </div>
-                        <div class="text-[11px] text-slate-400 mt-0.5 truncate max-w-[180px]" title="${safeGpuFull}">
-                            ${safeGpuShort}
+                        <div class="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5 min-w-0">
+                            ${pinBadge}
+                            <span class="truncate max-w-[140px]" title="${safeGpuFull}">${safeGpuShort}</span>
                         </div>
                     </td>
 
@@ -1344,11 +1354,92 @@
         }
 
         // --- Lịch tự động ---
-        function openSchedulesModal() {
+        let scheduleRules = [];
+        let editingScheduleId = null;
+
+        function scheduleProfileIds() {
+            return Array.from(
+                document.querySelectorAll('#sched-profiles input[type="checkbox"]:checked')
+            ).map(cb => cb.value);
+        }
+        function renderScheduleProfiles(selectedIds) {
+            const box = document.getElementById('sched-profiles');
+            const ids = selectedIds instanceof Set ? selectedIds : new Set(selectedIds || []);
+            const items = (currentProfiles || []).map(p => `
+                <label class="flex items-center gap-1.5 cursor-pointer min-w-0" title="${escapeHtml(p.name)}">
+                    <input type="checkbox" value="${escapeHtml(p.id)}" ${ids.has(p.id) ? 'checked' : ''} class="accent-violet-500 shrink-0">
+                    <span class="truncate">${escapeHtml(p.name)}</span>
+                </label>`).join('');
+            box.innerHTML = items || '<span class="text-slate-500 col-span-2">Chưa có profile</span>';
+        }
+        function setScheduleScope(profileIds) {
+            const ids = new Set(profileIds || []);
+            renderScheduleProfiles(ids);
+            const all = ids.size === 0;
+            document.getElementById('sched-all').checked = all;
+            document.getElementById('sched-profiles').classList.toggle('hidden', all);
+        }
+        function toggleScheduleScopeAll(checked) {
+            const box = document.getElementById('sched-profiles');
+            if (checked) {
+                box.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+            }
+            box.classList.toggle('hidden', checked);
+        }
+        function resetScheduleForm() {
+            editingScheduleId = null;
+            document.getElementById('sched-time').value = '';
+            document.getElementById('sched-name').value = '';
+            document.getElementById('sched-action').value = 'start_all';
+            setScheduleScope([]);
+            document.getElementById('sched-submit').innerText = 'Thêm';
+            document.getElementById('sched-cancel-edit').classList.add('hidden');
+        }
+        function editSchedule(id) {
+            const rule = scheduleRules.find(r => r.id === id);
+            if (!rule) return;
+            editingScheduleId = id;
+            document.getElementById('sched-time').value = rule.time || '';
+            document.getElementById('sched-name').value = rule.name || '';
+            document.getElementById('sched-action').value = rule.action || 'start_all';
+            setScheduleScope(rule.profile_ids || []);
+            document.getElementById('sched-submit').innerText = 'Lưu';
+            document.getElementById('sched-cancel-edit').classList.remove('hidden');
+            document.getElementById('sched-time').focus();
+        }
+        function cancelScheduleEdit() { resetScheduleForm(); }
+
+        async function openSchedulesModal() {
             document.getElementById('schedulesModal').classList.remove('hidden');
+            if (!currentProfiles || !currentProfiles.length) {
+                try {
+                    const res = await fetch('/api/profiles');
+                    if (res.ok) currentProfiles = await res.json();
+                } catch (e) {}
+            }
+            resetScheduleForm();
             loadSchedules();
         }
-        function closeSchedulesModal() { document.getElementById('schedulesModal').classList.add('hidden'); }
+        function closeSchedulesModal() {
+            document.getElementById('schedulesModal').classList.add('hidden');
+            resetScheduleForm();
+        }
+        function renderScheduleRuns(runs) {
+            const el = document.getElementById('schedule-runs');
+            const events = (runs || []).slice(-8).reverse();
+            if (!events.length) {
+                el.innerHTML = '<div class="text-slate-600">Chưa có lượt chạy.</div>';
+                return;
+            }
+            el.innerHTML = events.map(ev => {
+                const at = String(ev.at || '').replace('T', ' ').slice(0, 19);
+                const err = ev.error ? String(ev.error) : '';
+                return `<div class="flex items-start gap-2 ${err ? 'text-red-400' : 'text-slate-400'}">
+                    <span class="font-mono text-slate-500 shrink-0">${escapeHtml(at)}</span>
+                    <span class="min-w-0 truncate" title="${escapeHtml(err || 'OK')}">${escapeHtml(ev.rule || '—')} · ${escapeHtml(actionLabel(ev.action))}${err ? ' · Lỗi: ' + escapeHtml(err) : ' · OK'}</span>
+                </div>`;
+            }).join('');
+        }
         async function loadSchedules() {
             const listEl = document.getElementById('schedules-list');
             try {
@@ -1356,6 +1447,7 @@
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) { listEl.innerHTML = `<div class="text-xs text-red-400">${escapeHtml(data.detail || 'Lỗi')}</div>`; return; }
                 const rules = data.rules || [];
+                scheduleRules = rules;
                 document.getElementById('schedules-meta').innerText = rules.length ? `${rules.length} lịch · tick cuối: ${data.last_tick || '—'}` : 'Chưa có lịch nào';
                 listEl.innerHTML = rules.map(r => `
                     <div class="flex items-center justify-between bg-slate-900/50 border border-borderBg rounded-xl px-3.5 py-2.5">
@@ -1364,11 +1456,13 @@
                             <div class="text-[11px] text-slate-500">${escapeHtml(actionLabel(r.action))} · ${r.profile_ids && r.profile_ids.length ? r.profile_ids.length + ' profile' : 'tất cả'}${r.last_run_date ? ' · chạy: ' + escapeHtml(r.last_run_date) : ''}</div>
                         </div>
                         <div class="flex items-center gap-2 shrink-0">
+                            <button onclick="editSchedule('${r.id}')" title="Sửa giờ / hành động / profile áp dụng" class="p-1 text-slate-400 hover:text-violet-400 transition"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
                             <label class="cursor-pointer"><input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="toggleSchedule('${r.id}', this.checked)" class="accent-emerald-500"></label>
                             <button onclick="deleteSchedule('${r.id}')" class="p-1 text-slate-400 hover:text-red-400 transition"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
                         </div>
                     </div>
                 `).join('');
+                renderScheduleRuns(data.recent_runs || []);
                 safeCreateIcons();
             } catch (e) {
                 listEl.innerHTML = `<div class="text-xs text-red-400">Lỗi: ${escapeHtml(String(e))}</div>`;
@@ -1378,22 +1472,28 @@
             return a === 'start_all' ? 'Mở tất cả' : a === 'stop_all' ? 'Đóng tất cả' : 'Sync vị trí theo proxy';
         }
         async function createSchedule() {
+            const time = document.getElementById('sched-time').value;
+            if (!time) { showToast('Chọn giờ trước.', 'warning'); return; }
             const body = {
                 name: document.getElementById('sched-name').value || '',
-                time: document.getElementById('sched-time').value,
+                time,
                 action: document.getElementById('sched-action').value,
-                profile_ids: [], enabled: true,
+                profile_ids: scheduleProfileIds(),
             };
-            if (!body.time) { showToast('Chọn giờ trước.', 'warning'); return; }
+            const editingId = editingScheduleId;
             try {
-                const res = await fetch('/api/schedules', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
-                });
+                const res = await fetch(
+                    editingId ? `/api/schedules/${encodeURIComponent(editingId)}` : '/api/schedules',
+                    {
+                        method: editingId ? 'PUT' : 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(editingId ? body : { ...body, enabled: true }),
+                    }
+                );
                 const data = await res.json().catch(() => ({}));
-                if (!res.ok) { showToast(data.detail || 'Không tạo được lịch.', 'error'); return; }
-                showToast('Đã tạo lịch.', 'success');
-                document.getElementById('sched-time').value = '';
+                if (!res.ok) { showToast(data.detail || (editingId ? 'Không lưu được lịch.' : 'Không tạo được lịch.'), 'error'); return; }
+                showToast(editingId ? 'Đã lưu lịch.' : 'Đã tạo lịch.', 'success');
+                resetScheduleForm();
                 loadSchedules();
             } catch (e) { showToast('Lỗi: ' + e, 'error'); }
         }

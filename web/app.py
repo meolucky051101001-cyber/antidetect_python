@@ -1691,9 +1691,10 @@ async def get_facebook_pages(
                     "Nếu tài khoản thực sự không còn fanpage, gọi lại với force=1."
                 ),
             }
-        p.facebook_pages = pages
-        p.facebook_pages_synced_at = int(time.time())
-        updated = profile_manager.update_profile(p)
+        synced_at = int(time.time())
+        updated = profile_manager.update_facebook_pages(
+            profile_id, pages, synced_at
+        )
         if updated is None:
             raise HTTPException(status_code=404, detail="Profile không tồn tại")
         return {
@@ -1702,7 +1703,7 @@ async def get_facebook_pages(
             "pages": pages,
             "source": "live",
             "stale": False,
-            "synced_at": p.facebook_pages_synced_at,
+            "synced_at": synced_at,
         }
 
     # Cache: tính lại trạng thái runtime (không lưu) để phản ánh quy tắc mới.
@@ -1783,6 +1784,14 @@ async def bulk_create_profiles(req: BulkCreateRequest):
     req.stealth_mode = (req.stealth_mode or "unique").lower()
     if req.stealth_mode not in ("unique", "authentic"):
         req.stealth_mode = "unique"
+    if req.stealth_mode == "authentic" and req.os != host_os():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Stealth authentic chỉ hỗ trợ profile cùng hệ điều hành với "
+                f"máy host ({host_os()}). Dùng unique cho profile {req.os}."
+            ),
+        )
     prefix = (req.name_prefix or "Profile").strip() or "Profile"
 
     created, warnings = [], []

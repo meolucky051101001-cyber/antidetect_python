@@ -1,5 +1,3 @@
-import os
-import json
 import requests
 from typing import Optional, Dict, Any
 from .models import ProxyConfig
@@ -108,72 +106,6 @@ def check_proxy(proxy: ProxyConfig, timeout: int = 8) -> Dict[str, Any]:
             if secret:
                 error = error.replace(secret, "********")
     return {"success": False, "error": error}
-
-
-def create_proxy_auth_extension(proxy: ProxyConfig, output_dir: str) -> Optional[str]:
-    """Tạo Chrome Extension Manifest V3 trên đĩa để tự động xác thực Proxy có User/Pass.
-
-    Chrome không hỗ trợ user:pass trên flag CLI, nên Extension Manifest V3 là giải pháp
-    chuẩn và tương thích nhất với Chrome hiện đại.
-    """
-    if not proxy.username or not proxy.password:
-        return None
-
-    ext_dir = os.path.join(output_dir, "proxy_auth_extension")
-    os.makedirs(ext_dir, exist_ok=True)
-
-    manifest_json = {
-        "version": "1.0.0",
-        "manifest_version": 3,
-        "name": "Chrome Proxy Authentication",
-        "permissions": [
-            "webRequest",
-            "webRequestAuthProvider",
-            "alarms",
-        ],
-        "host_permissions": [
-            "<all_urls>",
-        ],
-        "background": {
-            "service_worker": "background.js"
-        },
-        "minimum_chrome_version": "108.0.0",
-    }
-
-    user_json = json.dumps(proxy.username or "")
-    pass_json = json.dumps(proxy.password or "")
-
-    background_js = f"""
-chrome.webRequest.onAuthRequired.addListener(
-    function(details) {{
-        return {{
-            authCredentials: {{
-                username: {user_json},
-                password: {pass_json}
-            }}
-        }};
-    }},
-    {{urls: ["<all_urls>"]}},
-    ['blocking']
-);
-
-// H14: Giữ service worker luôn thức (keep-alive) chống rơi vào trạng thái sleep sau 30s
-try {{
-    chrome.alarms.create('proxyKeepAlive', {{ periodInMinutes: 0.4 }});
-    chrome.alarms.onAlarm.addListener(function(alarm) {{}});
-    setInterval(function() {{
-        try {{ chrome.runtime.getPlatformInfo(function() {{}}); }} catch(e) {{}}
-    }}, 20000);
-}} catch(e) {{}}
-"""
-
-    with open(os.path.join(ext_dir, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest_json, f, indent=2)
-
-    with open(os.path.join(ext_dir, "background.js"), "w", encoding="utf-8") as f:
-        f.write(background_js)
-
-    return ext_dir
 
 
 def parse_proxy_line(line: str) -> ProxyConfig:

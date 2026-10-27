@@ -35,11 +35,33 @@ def _crypt(data, protect):
         kernel.LocalFree(output.data)
 
 
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Ghi blob DPAPI qua temp duy nhất + fsync rồi replace có retry.
+
+    Temp cố định ``.tmp`` bị hai process ghi đè lẫn nhau; replace trên Windows
+    cũng có thể hụt tạm thời khi antivirus đang giữ handle file đích.
+    """
+    import uuid
+
+    from .storage import _replace_with_retry
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.parent / f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    try:
+        with open(pending, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        _replace_with_retry(pending, path)
+    finally:
+        try:
+            pending.unlink()
+        except OSError:
+            pass
+
+
 def write_runtime(record):
-    RUNTIME_FILE.parent.mkdir(parents=True, exist_ok=True)
-    pending = RUNTIME_FILE.with_suffix('.tmp')
-    pending.write_bytes(_crypt(json.dumps(record).encode(), True))
-    os.replace(pending, RUNTIME_FILE)
+    _atomic_write_bytes(RUNTIME_FILE, _crypt(json.dumps(record).encode(), True))
 
 
 def read_runtime():
@@ -61,10 +83,9 @@ API_TOKEN_FILE = _DATA_DIR / 'api_token.dpapi'
 
 def write_api_token_hash(token_hash):
     """Lưu SHA-256 hex của API token dài hạn (DPAPI). Plaintext không lưu."""
-    API_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    pending = API_TOKEN_FILE.with_suffix('.tmp')
-    pending.write_bytes(_crypt(json.dumps({"sha256": token_hash}).encode(), True))
-    os.replace(pending, API_TOKEN_FILE)
+    _atomic_write_bytes(
+        API_TOKEN_FILE, _crypt(json.dumps({"sha256": token_hash}).encode(), True)
+    )
 
 
 def read_api_token_hash():

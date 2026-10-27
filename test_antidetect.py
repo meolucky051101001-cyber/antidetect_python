@@ -22,7 +22,6 @@ from antidetect.storage import ProfileManager
 from antidetect.fingerprint import generate_fingerprint, normalize_fingerprint_for_launch
 from antidetect.stealth import get_stealth_script
 from antidetect.launcher import find_browser_executable, BrowserLauncher
-from antidetect.proxy import create_proxy_auth_extension
 
 
 class _FakeProcess:
@@ -184,34 +183,6 @@ class TestAntidetectCore(unittest.TestCase):
         self.assertEqual(fixed.device_pixel_ratio, 2.0)
         self.assertEqual((fixed.screen_width, fixed.screen_height), (1440, 900))
         self.assertEqual(fixed.languages, ["vi-VN", "vi", "en-US"])
-
-    def test_proxy_auth_extension(self):
-        proxy = ProxyConfig(
-            enabled=True,
-            protocol="http",
-            host="1.2.3.4",
-            port=8080,
-            username="admin",
-            password="secret_password",
-        )
-        test_dir = os.path.join(TEST_DATA_DIR, "test_ext")
-        ext_dir = create_proxy_auth_extension(proxy, test_dir)
-        self.assertIsNotNone(ext_dir)
-        self.assertTrue(os.path.exists(os.path.join(ext_dir, "manifest.json")))
-        self.assertTrue(os.path.exists(os.path.join(ext_dir, "background.js")))
-
-        # Check content
-        with open(
-            os.path.join(ext_dir, "background.js"), "r", encoding="utf-8"
-        ) as f:
-            content = f.read()
-            self.assertIn("admin", content)
-            self.assertIn("secret_password", content)
-
-        # Clean up
-        import shutil
-
-        shutil.rmtree(test_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

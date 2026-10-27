@@ -1,4 +1,5 @@
 import argparse
+import getpass
 import sys
 import os
 import json
@@ -42,6 +43,36 @@ def _print_gate_block(gate):
     )
 
 
+def _apply_secure_proxy_password(proxy_cfg):
+    """Lấy mật khẩu proxy mà không bắt người dùng gõ vào argv.
+
+    Password trong argv bị lộ qua process list và lịch sử shell, nên URL chỉ
+    được chứa username. Password lấy từ ANTIDETECT_PROXY_PASSWORD hoặc prompt
+    khi chạy tương tác.
+    """
+    if proxy_cfg.password:
+        print(
+            "Lỗi: không nhập mật khẩu proxy trực tiếp trong --proxy vì sẽ lộ "
+            "qua process list/lịch sử shell. Dùng dạng protocol://user@host:port "
+            "rồi đặt ANTIDETECT_PROXY_PASSWORD hoặc nhập khi được hỏi.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not proxy_cfg.username:
+        return
+    password = os.environ.get("ANTIDETECT_PROXY_PASSWORD")
+    if password is None:
+        if not sys.stdin.isatty():
+            print(
+                "Lỗi: cần mật khẩu proxy nhưng không có terminal để nhập. "
+                "Đặt biến môi trường ANTIDETECT_PROXY_PASSWORD.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        password = getpass.getpass(f"Mật khẩu proxy cho {proxy_cfg.username}: ")
+    proxy_cfg.password = password or None
+
+
 def main():
     setup_logging(console=True)
     parser = argparse.ArgumentParser(
@@ -63,7 +94,8 @@ def main():
     )
     create_parser.add_argument(
         "--proxy",
-        help="Proxy định dạng protocol://user:pass@host:port hoặc protocol://host:port",
+        help="Proxy dạng protocol://user@host:port hoặc protocol://host:port "
+        "(mật khẩu qua ANTIDETECT_PROXY_PASSWORD hoặc prompt, không đặt trong URL)",
     )
 
     # Lệnh: start
@@ -105,7 +137,11 @@ def main():
     # Lệnh: set-proxy
     proxy_parser = subparsers.add_parser("set-proxy", help="Cài đặt hoặc cập nhật proxy cho profile")
     proxy_parser.add_argument("id", help="ID của profile")
-    proxy_parser.add_argument("--proxy", help="Proxy định dạng protocol://user:pass@host:port hoặc protocol://host:port")
+    proxy_parser.add_argument(
+        "--proxy",
+        help="Proxy dạng protocol://user@host:port hoặc protocol://host:port "
+        "(mật khẩu qua ANTIDETECT_PROXY_PASSWORD hoặc prompt, không đặt trong URL)",
+    )
     proxy_parser.add_argument("--disable", action="store_true", help="Tắt proxy cho profile này")
 
     args = parser.parse_args()
@@ -142,6 +178,7 @@ def main():
             except Exception as e:
                 print(f"Lỗi phân tích cú pháp proxy: {e}")
                 sys.exit(1)
+            _apply_secure_proxy_password(proxy_cfg)
 
         fp = generate_fingerprint(target_os=args.os)
         p = manager.create_profile(
@@ -338,7 +375,11 @@ def main():
             p.proxy.host = parsed.hostname or ""
             p.proxy.port = parsed.port or 8080
             p.proxy.username = parsed.username
-            p.proxy.password = parsed.password
+            # Secret cũ có thể đã được get_profile nạp sẵn; xóa trước để helper
+            # không nhầm nó là mật khẩu vừa nhập trong URL. Nếu URL có mật khẩu
+            # thì giữ lại để helper từ chối (argv đã lộ).
+            p.proxy.password = parsed.password or None
+            _apply_secure_proxy_password(p.proxy)
             manager.update_profile(p)
             print(f"Đã cập nhật proxy cho profile '{p.name}': {p.proxy.to_display_url()}")
         else:

@@ -514,6 +514,35 @@ def test_ui_badge_shows_authentic_mode():
     assert "Partial" in js
 
 
+def test_ui_schedule_scope_and_browser_pin_present():
+    html = open(os.path.join(BASE_DIR, "web", "templates", "index.html"), encoding="utf-8").read()
+    js = open(
+        os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
+    ).read()
+    # Lịch tự động: chọn phạm vi profile + hiển thị lượt chạy gần đây.
+    for element in (
+        "sched-all",
+        "sched-profiles",
+        "schedule-runs",
+        "sched-submit",
+        "sched-cancel-edit",
+    ):
+        assert f'id="{element}"' in html
+    assert "toggleScheduleScopeAll" in html
+    for symbol in (
+        "scheduleProfileIds",
+        "editSchedule(",
+        "renderScheduleRuns",
+        "recent_runs",
+        "profile_ids: scheduleProfileIds()",
+    ):
+        assert symbol in js
+    # Browser pin: profile hiển thị pin thực tế hoặc pin mặc định của tool.
+    assert "browser_path" in js
+    assert "Pin: mặc định" in js
+    assert "Pin: ${escapeHtml(pinName)}" in js
+
+
 def test_cli_delete_stops_browser_first():
     src = open(os.path.join(BASE_DIR, "cli.py"), encoding="utf-8").read()
     block = src[src.index('args.command == "delete"'):]
@@ -704,6 +733,60 @@ def test_facebook_pages_deep_endpoint(monkeypatch):
         r = client.get(f"/api/profiles/{pid}/facebook/pages")
         page = r.json()["pages"][0]
         assert page["status"] == "active" and page["ready"] is True
+    finally:
+        client.delete(f"/api/profiles/{pid}")
+
+
+def test_facebook_refresh_does_not_clobber_concurrent_proxy_edit(monkeypatch):
+    """Refresh fanpage không được ghi đè proxy sửa trong lúc scrape sâu.
+
+    Endpoint đọc profile trước khi scrape (có thể mất 2-3 phút). Nếu lúc lưu
+    lại dùng nguyên snapshot cũ thì thay đổi proxy của người dùng trong lúc
+    chờ sẽ bị revert. Test: sửa proxy NGAY TRONG lúc fetch chạy.
+    """
+    import web.app as app_module
+    from fastapi.testclient import TestClient
+    from antidetect.storage import ProfileManager
+    from antidetect.models import ProxyConfig
+
+    client = TestClient(app_module.app, base_url="http://127.0.0.1:8000")
+    client.post(
+        "/auth/login",
+        headers={"Authorization": "Bearer " + app_module.app.state.access_key},
+    )
+    r = client.post("/api/profiles", json={"name": "FB Race", "os": "windows"})
+    pid = r.json()["id"]
+    try:
+        monkeypatch.setattr(app_module.launcher, "is_running", lambda x: True, raising=False)
+
+        def fake_fetch(profile_id, timeout=40.0, deep=False):
+            # Người dùng đổi proxy trong lúc scrape sâu đang chạy.
+            m = ProfileManager()
+            fresh = m.get_profile(profile_id)
+            fresh.proxy = ProxyConfig(
+                enabled=True, protocol="http",
+                host="9.9.9.9", port=9999, username="racer",
+            )
+            assert m.update_profile(fresh) is not None
+            return {
+                "logged_in": True,
+                "pages": [{"name": "Race Page", "url": "https://www.facebook.com/race"}],
+            }
+
+        monkeypatch.setattr(app_module.launcher, "fetch_facebook_pages", fake_fetch, raising=False)
+
+        r = client.get(f"/api/profiles/{pid}/facebook/pages?refresh=1&deep=1")
+        assert r.status_code == 200
+        assert r.json()["pages"][0]["name"] == "Race Page"
+
+        saved = ProfileManager().get_profile(pid)
+        assert saved.proxy.enabled is True
+        assert saved.proxy.host == "9.9.9.9"
+        assert saved.proxy.port == 9999
+        assert saved.facebook_pages[0]["name"] == "Race Page"
+        assert saved.facebook_pages_synced_at
+        # create(1) -> edit proxy(2) -> merge fanpage(3): merge không ghi đè revision cũ.
+        assert saved.revision == 3
     finally:
         client.delete(f"/api/profiles/{pid}")
 
@@ -1958,3 +2041,442 @@ def test_fanpage_deep_sync_marks_failed_scan_as_not_synced(monkeypatch):
     monkeypatch.setattr(launcher, "_facebook_pages_deep_cdp", fake_deep_ok)
     data2 = launcher.fetch_facebook_pages("deep-profile", timeout=1, deep=True)
     assert data2["pages"][0]["detail_synced"] is True
+
+
+def test_verify_emulation_skips_webgl_when_spoof_disabled(monkeypatch):
+    """Authentic tắt WebGL hook: GPU thật của host không được làm fail verify."""
+    import asyncio
+    import types
+
+    import antidetect.launcher as launcher_mod
+    from antidetect.models import FingerprintConfig
+
+    fp = FingerprintConfig(
+        stealth_disable=["canvas", "webgl", "audio", "media", "worker"],
+        webgl_vendor="Google Inc. (Intel)",
+        webgl_renderer="STORED-RENDERER",
+    )
+    actual = {
+        "ua": fp.user_agent,
+        "dpr": fp.device_pixel_ratio,
+        "sw": fp.screen_width,
+        "sh": fp.screen_height,
+        "cd": fp.screen_color_depth,
+        "hc": fp.hardware_concurrency,
+        "dm": fp.device_memory,
+        "lang": fp.locale,
+        "langs": ",".join(fp.languages),
+        "wd": False,
+        "platform": "Win32",
+        "tz": fp.timezone,
+        "cssDeviceW": True,
+        "cssDeviceH": True,
+        "cssDpr": True,
+        # Native host GPU: deliberately different from the stored fingerprint.
+        "glVendor": "Google Inc. (NVIDIA)",
+        "glRenderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11)",
+        "glMaxTexture": 1,
+        "glMaxViewport": [1, 1],
+    }
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps([
+                {"type": "page", "webSocketDebuggerUrl": "ws://fake"}
+            ]).encode()
+
+    class _WebSocket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def send(self, payload):
+            return None
+
+        async def recv(self):
+            return json.dumps({
+                "id": 91002,
+                "result": {"result": {"value": actual}},
+            })
+
+    websockets = types.ModuleType("websockets")
+    websockets.connect = lambda *args, **kwargs: _WebSocket()
+    monkeypatch.setitem(sys.modules, "websockets", websockets)
+    monkeypatch.setattr(
+        launcher_mod.urllib.request,
+        "urlopen",
+        lambda url, timeout=1: _Response(),
+    )
+
+    result = asyncio.run(
+        launcher_mod.BrowserLauncher._verify_emulation(None, 9222, fp)
+    )
+    assert result["ok"] is True
+    assert "webgl_vendor" not in result["checks"]
+    assert "webgl_renderer" not in result["checks"]
+    assert "webgl_max_texture" not in result["checks"]
+
+    unique = FingerprintConfig(
+        webgl_vendor="Google Inc. (Intel)",
+        webgl_renderer="STORED-RENDERER",
+    )
+    result_unique = asyncio.run(
+        launcher_mod.BrowserLauncher._verify_emulation(None, 9222, unique)
+    )
+    assert result_unique["ok"] is False
+    assert result_unique["checks"]["webgl_vendor"] is False
+    assert result_unique["checks"]["webgl_renderer"] is False
+
+
+def test_schedule_update_resets_last_run_when_schedule_changes(tmp_path):
+    """Đổi giờ/action phải xóa last_run_date để lịch mới chạy lại trong ngày."""
+    from datetime import datetime, timedelta
+    from antidetect.scheduler import ScheduleStore
+
+    store = ScheduleStore(str(tmp_path / "schedules.json"))
+    now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    due_time = (now - timedelta(minutes=1)).strftime("%H:%M")
+    rule = store.add("R", due_time, "start_all")
+
+    def run_once():
+        assert store.claim_due(rule["id"], now, 60, "tok") is not None
+        assert store.complete_claim(rule["id"], "tok", today)
+
+    run_once()
+    assert store.list()[0]["last_run_date"] == today
+
+    # Đổi tên/bật-tắt không phải lịch mới -> giữ dấu đã chạy.
+    store.update(rule["id"], name="R2", enabled=True)
+    assert store.list()[0]["last_run_date"] == today
+
+    # Đổi giờ (vẫn trong catch-up) -> lịch mới chưa chạy hôm nay.
+    store.update(rule["id"], time=(now - timedelta(minutes=2)).strftime("%H:%M"))
+    assert store.list()[0]["last_run_date"] is None
+
+    run_once()
+    assert store.list()[0]["last_run_date"] == today
+
+    # Đổi action -> hành động mới chưa chạy hôm nay.
+    store.update(rule["id"], action="stop_all")
+    assert store.list()[0]["last_run_date"] is None
+
+
+def test_runtime_auth_atomic_write_uses_unique_temp_fsync_and_retry(
+    tmp_path, monkeypatch
+):
+    """runtime.dpapi/api_token.dpapi: temp duy nhất, fsync, replace có retry."""
+    import re
+    import antidetect.runtime_auth as ra
+    from antidetect import storage as storage_mod
+
+    monkeypatch.setattr(ra, "RUNTIME_FILE", tmp_path / "runtime.dpapi")
+    monkeypatch.setattr(ra, "API_TOKEN_FILE", tmp_path / "api_token.dpapi")
+
+    real_retry = storage_mod._replace_with_retry
+    replaced = []
+
+    def spy(src, dst, attempts=6):
+        assert re.search(r"\.tmp\.\d+\.[0-9a-f]{8}$", str(src))
+        assert os.path.exists(str(src))
+        replaced.append(str(dst))
+        real_retry(src, dst, attempts)
+
+    monkeypatch.setattr(storage_mod, "_replace_with_retry", spy)
+    synced = []
+    monkeypatch.setattr(ra.os, "fsync", lambda fd: synced.append(fd))
+
+    ra.write_runtime({"port": 9333})
+    ra.write_api_token_hash("abc123hash")
+
+    assert len(synced) == 2
+    assert any(name.endswith("runtime.dpapi") for name in replaced)
+    assert any(name.endswith("api_token.dpapi") for name in replaced)
+    assert ra.read_runtime() == {"port": 9333}
+    assert ra.read_api_token_hash() == "abc123hash"
+    assert not list(tmp_path.glob("*.tmp.*"))
+
+
+# --- Review 2026-10-27: proxy credentials không lưu plaintext / không qua argv ---
+
+def test_proxy_auth_uses_cdp_only():
+    """CDP Fetch.authRequired là đường xác thực proxy duy nhất.
+
+    Extension MV3 cũ ghi mật khẩu plaintext vào thư mục profile và
+    --load-extension đã bị Chrome 137+ bỏ — không được quay lại đường đó.
+    """
+    launcher_src = open(
+        os.path.join(BASE_DIR, "antidetect", "launcher.py"), encoding="utf-8"
+    ).read()
+    proxy_src = open(
+        os.path.join(BASE_DIR, "antidetect", "proxy.py"), encoding="utf-8"
+    ).read()
+    assert "Fetch.authRequired" in launcher_src
+    assert '"handleAuthRequests": True' in launcher_src
+    assert "create_proxy_auth_extension" not in launcher_src
+    assert "--load-extension=" not in launcher_src
+    assert "create_proxy_auth_extension" not in proxy_src
+    assert "background.js" not in proxy_src
+    # Dọn thư mục extension cũ vẫn giữ để profile cũ không sót secret.
+    assert "proxy_auth_extension" in launcher_src
+
+
+def test_cli_rejects_inline_proxy_password(monkeypatch, capsys):
+    import cli
+    from antidetect.models import ProxyConfig
+
+    monkeypatch.setenv("ANTIDETECT_PROXY_PASSWORD", "env-secret")
+    proxy = ProxyConfig(
+        enabled=True, protocol="http", host="1.2.3.4", port=8080,
+        username="alice", password="inline-secret",
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli._apply_secure_proxy_password(proxy)
+    assert exc.value.code == 1
+    assert "không nhập mật khẩu proxy" in capsys.readouterr().err
+
+
+def test_cli_proxy_password_from_env(monkeypatch):
+    import cli
+    from antidetect.models import ProxyConfig
+
+    monkeypatch.setenv("ANTIDETECT_PROXY_PASSWORD", "env-secret")
+    proxy = ProxyConfig(
+        enabled=True, protocol="http", host="1.2.3.4", port=8080,
+        username="alice",
+    )
+    cli._apply_secure_proxy_password(proxy)
+    assert proxy.password == "env-secret"
+
+
+def test_cli_proxy_password_prompt_and_non_tty(monkeypatch):
+    import cli
+    from antidetect.models import ProxyConfig
+
+    class _Stdin:
+        def __init__(self, tty):
+            self._tty = tty
+
+        def isatty(self):
+            return self._tty
+
+    monkeypatch.delenv("ANTIDETECT_PROXY_PASSWORD", raising=False)
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin(False))
+    with pytest.raises(SystemExit) as exc:
+        cli._apply_secure_proxy_password(
+            ProxyConfig(enabled=True, host="1.2.3.4", port=8080, username="bob")
+        )
+    assert exc.value.code == 1
+
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin(True))
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": "prompt-secret")
+    proxy = ProxyConfig(enabled=True, host="1.2.3.4", port=8080, username="bob")
+    cli._apply_secure_proxy_password(proxy)
+    assert proxy.password == "prompt-secret"
+
+
+def test_cli_set_proxy_rejects_inline_password(monkeypatch):
+    import cli
+    from antidetect.models import ProxyConfig
+    from types import SimpleNamespace
+
+    class _Manager:
+        def __init__(self):
+            self.updated = []
+
+        def get_profile(self, pid):
+            return SimpleNamespace(id=pid, name="P", proxy=ProxyConfig())
+
+        def update_profile(self, profile):
+            self.updated.append(profile)
+            return profile
+
+    manager = _Manager()
+    monkeypatch.setattr(cli, "ProfileManager", lambda: manager)
+    monkeypatch.setattr(cli, "BrowserLauncher", lambda m: None)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["cli.py", "set-proxy", "pid",
+         "--proxy", "http://alice:inline-secret@1.2.3.4:8080"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    assert manager.updated == []
+
+
+def test_cli_create_reads_proxy_password_from_env_not_argv(monkeypatch):
+    import cli
+    from types import SimpleNamespace
+
+    captured = {}
+
+    class _Manager:
+        def create_profile(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(id="fake-id")
+
+    class _Launcher:
+        def __init__(self, manager):
+            pass
+
+    monkeypatch.setattr(cli, "ProfileManager", lambda: _Manager())
+    monkeypatch.setattr(cli, "BrowserLauncher", _Launcher)
+    monkeypatch.setenv("ANTIDETECT_PROXY_PASSWORD", "env-secret")
+    monkeypatch.setattr(
+        sys, "argv",
+        ["cli.py", "create", "--name", "P", "--os", "windows",
+         "--proxy", "http://alice@10.1.2.3:8080"],
+    )
+    cli.main()
+    proxy = captured["proxy"]
+    assert (proxy.host, proxy.port, proxy.username) == ("10.1.2.3", 8080, "alice")
+    assert proxy.password == "env-secret"
+
+
+# --- Bridge cho Fanpage Hub: không lộ/ghi đè mật khẩu proxy ---
+
+def test_bridge_update_keeps_stored_password_for_same_endpoint():
+    import antidetect_bridge as bridge
+    from antidetect.models import ProxyConfig, REDACTED_SECRET
+
+    m = ProfileManager()
+    p = m.create_profile(
+        "bridge-password-test",
+        proxy=ProxyConfig(
+            enabled=True,
+            protocol="http",
+            host="10.20.30.40",
+            port=8080,
+            username="alice",
+            password="bridge-secret",
+        ),
+    )
+    try:
+        identity = p.proxy.identity_key()
+        assert get_proxy_password(p.id, identity=identity) == "bridge-secret"
+
+        # Hub list trả password đã che; form cũ gửi lại nguyên chuỗi đó.
+        res = bridge.action_update(m, None, p.id, {
+            "id": p.id,
+            "proxy": {
+                "enabled": True,
+                "protocol": "http",
+                "host": "10.20.30.40",
+                "port": 8080,
+                "username": "alice",
+                "password": REDACTED_SECRET,
+            },
+        })
+        assert res["success"] is True, res
+        assert get_proxy_password(p.id, identity=identity) == "bridge-secret"
+        assert "bridge-secret" not in json.dumps(res)
+
+        # Form mới để trống password cũng phải giữ secret.
+        res = bridge.action_update(m, None, p.id, {
+            "id": p.id,
+            "proxy": {
+                "enabled": True,
+                "protocol": "http",
+                "host": "10.20.30.40",
+                "port": 8080,
+                "username": "alice",
+                "password": None,
+            },
+        })
+        assert res["success"] is True, res
+        assert get_proxy_password(p.id, identity=identity) == "bridge-secret"
+    finally:
+        m.delete_profile(p.id)
+
+
+def test_bridge_update_changed_endpoint_drops_old_password():
+    import antidetect_bridge as bridge
+    from antidetect.models import ProxyConfig, REDACTED_SECRET
+
+    m = ProfileManager()
+    p = m.create_profile(
+        "bridge-endpoint-change-test",
+        proxy=ProxyConfig(
+            enabled=True,
+            protocol="http",
+            host="10.20.30.40",
+            port=8080,
+            username="alice",
+            password="endpoint-secret",
+        ),
+    )
+    try:
+        old_identity = p.proxy.identity_key()
+        res = bridge.action_update(m, None, p.id, {
+            "id": p.id,
+            "proxy": {
+                "enabled": True,
+                "protocol": "http",
+                "host": "10.20.30.41",
+                "port": 8080,
+                "username": "alice",
+                "password": REDACTED_SECRET,
+            },
+        })
+        assert res["success"] is True, res
+        fresh = m.get_profile(p.id)
+        assert fresh.proxy.password in (None, "")
+        assert get_proxy_password(p.id, identity=old_identity) is None
+        assert get_proxy_password(p.id, identity=fresh.proxy.identity_key()) is None
+    finally:
+        m.delete_profile(p.id)
+
+
+def test_bridge_reads_payload_from_stdin_and_redacts_password():
+    from antidetect.models import ProxyConfig, REDACTED_SECRET
+
+    m = ProfileManager()
+    p = m.create_profile(
+        "bridge-stdin-test",
+        proxy=ProxyConfig(
+            enabled=True,
+            protocol="socks5",
+            host="10.9.8.7",
+            port=1080,
+            username="stdin-user",
+            password="stdin-secret",
+        ),
+    )
+    try:
+        env = dict(os.environ)
+        env["ANTIDETECT_DATA_DIR"] = storage_module.DATA_DIR
+        env["PYTHONIOENCODING"] = "utf-8"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(BASE_DIR, "antidetect_bridge.py"),
+                "--action", "list",
+                "--payload-stdin",
+            ],
+            input=json.dumps({"id": p.id}),
+            cwd=BASE_DIR,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip().startswith("{")]
+        assert lines, proc.stdout
+        data = json.loads(lines[-1])
+        assert data["success"] is True, data
+        dumped = json.dumps(data)
+        assert "stdin-secret" not in dumped
+        assert REDACTED_SECRET in dumped
+    finally:
+        m.delete_profile(p.id)
