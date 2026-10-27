@@ -13,6 +13,11 @@ from antidetect.storage import ProfileManager
 from antidetect.launcher import BrowserLauncher
 from antidetect.fingerprint import generate_fingerprint
 from antidetect.applog import setup_logging
+from antidetect.launch_gate import (
+    evaluate_profile as evaluate_launch_gate,
+    evaluate_profiles as evaluate_launch_gates,
+    get_mode as get_launch_gate_mode,
+)
 
 if sys.platform == "win32":
     try:
@@ -20,6 +25,21 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
+
+
+def _resolve_gate_browser_paths(launcher, profiles):
+    return {p.id: launcher._resolve_browser_path(p) for p in profiles}
+
+
+def _print_gate_block(gate):
+    print("Cổng fingerprint chặn khởi chạy:")
+    for issue in gate.issues:
+        if issue.get("severity") == "critical":
+            print(f" - {issue.get('title')}: {issue.get('detail')}")
+    print(
+        "Sửa trong Fingerprint Health Center hoặc thêm --force "
+        "để mở cho riêng lần này."
+    )
 
 
 def main():
@@ -51,6 +71,7 @@ def main():
     start_parser.add_argument("id", help="ID của profile cần khởi chạy")
     start_parser.add_argument("--url", help="Đường dẫn URL cần mở ngay sau khi bật")
     start_parser.add_argument("--detach", action="store_true", help="Chạy profile ở chế độ nền và thoát CLI mà không tắt trình duyệt")
+    start_parser.add_argument("--force", action="store_true", help="Bỏ qua cổng fingerprint cho riêng lần mở này")
 
     # Lệnh: start-all
     start_all_parser = subparsers.add_parser("start-all", help="Khởi chạy toàn bộ profile cùng lúc")
@@ -63,6 +84,7 @@ def main():
         help="Số profile mở đồng thời tối đa; 0 = không giới hạn (mặc định: 8)",
     )
     start_all_parser.add_argument("--detach", action="store_true", help="Chạy toàn bộ profile ở chế độ nền và thoát CLI mà không tắt trình duyệt")
+    start_all_parser.add_argument("--force", action="store_true", help="Bỏ qua cổng fingerprint cho toàn bộ lần mở này")
 
     # Lệnh: stop
     stop_parser = subparsers.add_parser("stop", help="Dừng profile đang chạy")
@@ -138,6 +160,21 @@ def main():
             if not (u.startswith("http://") or u.startswith("https://")):
                 print("Lỗi: URL phải bắt đầu bằng http:// hoặc https://")
                 sys.exit(1)
+        profile = manager.get_profile(args.id)
+        if profile is not None:
+            all_profiles = manager.list_profiles()
+            gate = evaluate_launch_gate(
+                profile,
+                all_profiles,
+                _resolve_gate_browser_paths(launcher, all_profiles),
+                get_launch_gate_mode(),
+                force=getattr(args, "force", False),
+            )
+            if not gate.allowed:
+                _print_gate_block(gate)
+                sys.exit(2)
+            if gate.checked and gate.status != "healthy":
+                print(f"Cổng fingerprint: {gate.message}")
         res = launcher.launch(args.id, open_url=clean_url)
         if res.get("success"):
             print(f"Khởi chạy profile thành công!")
@@ -169,8 +206,41 @@ def main():
             if not (u.startswith("http://") or u.startswith("https://")):
                 print("Lỗi: URL phải bắt đầu bằng http:// hoặc https://")
                 sys.exit(1)
+        profiles = manager.list_profiles()
+        gate_mode = get_launch_gate_mode()
+        blocked = []
+        launch_ids = None
+        if gate_mode != "off" and not getattr(args, "force", False):
+            to_start = [p for p in profiles if not launcher.is_running(p.id)]
+            gates = evaluate_launch_gates(
+                to_start,
+                _resolve_gate_browser_paths(launcher, profiles),
+                gate_mode,
+            )
+            blocked = [result for result in gates.values() if not result.allowed]
+            if to_start and len(blocked) == len(to_start):
+                for gate in blocked:
+                    print(
+                        f" - {gate.profile_name}: "
+                        f"{gate.critical_count} lỗi nghiêm trọng"
+                    )
+                print(
+                    "Toàn bộ profile cần mở đều bị cổng fingerprint chặn. "
+                    "Sửa trong Fingerprint Health Center hoặc thêm --force."
+                )
+                sys.exit(2)
+            if blocked:
+                blocked_ids = {result.profile_id for result in blocked}
+                launch_ids = [p.id for p in profiles if p.id not in blocked_ids]
+                for gate in blocked:
+                    print(f" - Bỏ qua {gate.profile_name}: {gate.message}")
         print("Đang khởi chạy toàn bộ profile...")
-        res = launcher.launch_all(delay=args.delay, open_url=clean_url, max_concurrent=args.max_concurrent)
+        res = launcher.launch_all(
+            delay=args.delay,
+            open_url=clean_url,
+            max_concurrent=args.max_concurrent,
+            profile_ids=launch_ids,
+        )
         print(f"Đã kích hoạt {len(res)} profile:")
         running_ids = []
         for r in res:

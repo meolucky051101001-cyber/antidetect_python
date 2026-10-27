@@ -793,12 +793,20 @@
                 const res = await fetch('/api/profiles/start-all', { method: 'POST' });
                 const data = await res.json().catch(() => ({}));
                 if (res.ok && data.success) {
-                    showToast(data.message, 'success');
+                    const blocked = data.blocked || [];
+                    if (blocked.length) {
+                        showToast(data.message + ' Mở Fingerprint Health Center để sửa các profile bị chặn.', 'warning');
+                    } else {
+                        showToast(data.message, 'success');
+                    }
                     pollStartAllQueue();
                     setTimeout(refreshProfiles, 1200);
                     setTimeout(refreshProfiles, 3000);
                     setTimeout(refreshProfiles, 6000);
                     setTimeout(refreshProfiles, 10000);
+                } else if (res.status === 409 && data.blocked && data.blocked.length) {
+                    showToast(data.detail || 'Cổng fingerprint chặn toàn bộ profile trong danh sách.', 'error');
+                    openAuditModal();
                 } else {
                     const msg = typeof data.detail === 'object' ? (data.detail.message || JSON.stringify(data.detail)) : (data.detail || data.error || 'Lỗi khi mở toàn bộ profile');
                     showToast(msg, 'error');
@@ -908,13 +916,16 @@
             }
         }
 
-        async function startProfile(id) {
+        async function startProfile(id, force = false) {
             showToast('Đang khởi chạy trình duyệt...', 'info');
             try {
-                const res = await fetch(`/api/profiles/${id}/start`, { method: 'POST' });
+                const res = await fetch(`/api/profiles/${id}/start${force ? '?force=true' : ''}`, { method: 'POST' });
                 const data = await res.json().catch(() => ({}));
+                if (handleLaunchGateBlock(data, id, null)) return;
                 if (res.ok && data.success) {
-                    if (data.cdp_ready === false) {
+                    if (showLaunchGateResult(data)) {
+                        // Gate warning/override already surfaced with the issue summary.
+                    } else if (data.cdp_ready === false) {
                         showToast(data.warning || 'Chrome đã mở nhưng CDP chưa xác nhận khởi tạo.', 'warning');
                     } else if (data.warnings && data.warnings.length) {
                         showToast('Đã khởi chạy, nhưng có điều chỉnh: ' + data.warnings.join(' '), 'warning');
@@ -947,12 +958,16 @@
             }
         }
 
-        async function testFingerprint(id) {
+        async function testFingerprint(id, force = false) {
+            const testUrl = 'https://browserleaks.com/canvas';
             try {
-                const res = await fetch(`/api/profiles/${id}/start?url=https://browserleaks.com/canvas`, { method: 'POST' });
+                const res = await fetch(`/api/profiles/${id}/start?url=${encodeURIComponent(testUrl)}${force ? '&force=true' : ''}`, { method: 'POST' });
                 const data = await res.json().catch(() => ({}));
+                if (handleLaunchGateBlock(data, id, testUrl)) return;
                 if (res.ok && data.success) {
-                    if (data.cdp_ready === false) {
+                    if (showLaunchGateResult(data)) {
+                        // Gate warning/override already surfaced with the issue summary.
+                    } else if (data.cdp_ready === false) {
                         showToast(data.warning || 'Chrome đã mở nhưng CDP chưa xác nhận khởi tạo.', 'warning');
                     } else if (data.warnings && data.warnings.length) {
                         showToast('Đang mở trang kiểm tra. Lưu ý: ' + data.warnings.join(' '), 'warning');
@@ -1156,9 +1171,16 @@
                 });
                 const data = await res.json().catch(() => ({}));
                 if (res.ok && data.success) {
-                    showToast(data.message, 'success');
+                    if ((data.blocked || []).length) {
+                        showToast(data.message + ' Mở Fingerprint Health Center để sửa các profile bị chặn.', 'warning');
+                    } else {
+                        showToast(data.message, 'success');
+                    }
                     pollStartAllQueue();
                     setTimeout(refreshProfiles, 1500);
+                } else if (res.status === 409 && data.blocked && data.blocked.length) {
+                    showToast(data.detail || 'Cổng fingerprint chặn toàn bộ profile đã chọn.', 'error');
+                    openAuditModal();
                 } else {
                     const msg = typeof data.detail === 'object' ? (data.detail.message || JSON.stringify(data.detail)) : (data.detail || data.error || 'Lỗi');
                     showToast(msg, 'error');
@@ -1424,6 +1446,327 @@
                 showToast(data.message || 'Đã thu hồi token.', res.ok ? 'success' : 'error');
                 document.getElementById('token-display').classList.add('hidden');
             } catch (e) { showToast('Lỗi: ' + e, 'error'); }
+        }
+
+        // --- Fingerprint Health Center (audit tĩnh) ---
+        let lastAuditReport = null;
+        let auditBusy = false;
+        let pendingGate = null;
+
+        const AUDIT_STATUS_STYLE = {
+            critical: { label: 'Rủi ro cao', badge: 'bg-red-500/15 text-red-300 border-red-500/30' },
+            warning: { label: 'Cần chú ý', badge: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+            healthy: { label: 'An toàn', badge: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
+        };
+        const AUDIT_SEVERITY_STYLE = {
+            critical: { icon: 'alert-octagon', text: 'text-red-400' },
+            warning: { icon: 'alert-triangle', text: 'text-amber-400' },
+            info: { icon: 'info', text: 'text-sky-400' },
+        };
+
+        function openAuditModal() {
+            document.getElementById('auditModal').classList.remove('hidden');
+            safeCreateIcons();
+            loadLaunchGateSettings();
+            loadAuditReport();
+        }
+
+        function closeAuditModal() {
+            document.getElementById('auditModal').classList.add('hidden');
+        }
+
+        async function loadLaunchGateSettings() {
+            const select = document.getElementById('launch-gate-mode');
+            if (!select) return;
+            try {
+                const res = await fetch('/api/settings/launch-gate', { cache: 'no-store' });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.mode) select.value = data.mode;
+                select.disabled = !!data.env_override;
+                select.title = data.env_override
+                    ? 'Đang bị ghi đè bởi biến môi trường ANTIDETECT_LAUNCH_GATE'
+                    : ((data.descriptions && data.descriptions[data.mode]) || '');
+            } catch (e) {}
+        }
+
+        async function setLaunchGateMode(mode) {
+            try {
+                const res = await fetch('/api/settings/launch-gate', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+                showToast(data.message || 'Đã lưu chế độ cổng fingerprint.', 'success');
+            } catch (err) {
+                showToast('Không lưu được chế độ cổng: ' + (err && err.message ? err.message : err), 'error');
+                loadLaunchGateSettings();
+            }
+        }
+
+        function handleLaunchGateBlock(data, id, url) {
+            if (data && data.gate && data.gate.status === 'blocked') {
+                openLaunchGateModal(data.gate, id, url);
+                return true;
+            }
+            return false;
+        }
+
+        function showLaunchGateResult(data) {
+            const gate = data && data.gate;
+            if (!gate || gate.status === 'healthy' || gate.status === 'off') return false;
+            if (gate.status === 'warning' || gate.status === 'overridden' || gate.status === 'unverified') {
+                showToast(gate.message || 'Cổng fingerprint có cảnh báo.', 'warning');
+                return true;
+            }
+            return false;
+        }
+
+        function openLaunchGateModal(gate, id, url) {
+            pendingGate = { id, url: url || null };
+            const nameEl = document.getElementById('launch-gate-profile-name');
+            if (nameEl) {
+                nameEl.innerText = `${gate.profile_name || id} · ${Number(gate.critical_count || 0)} lỗi nghiêm trọng`;
+            }
+            const issues = (gate.issues || []).map(issue => {
+                const sev = AUDIT_SEVERITY_STYLE[issue.severity] || AUDIT_SEVERITY_STYLE.warning;
+                return `
+                    <div class="flex items-start gap-2 py-2 border-t border-borderBg/60 first:border-t-0">
+                        <i data-lucide="${sev.icon}" class="w-3.5 h-3.5 mt-0.5 ${sev.text} shrink-0"></i>
+                        <div class="min-w-0">
+                            <div class="text-xs text-slate-200 font-medium">${escapeHtml(issue.title || '')}</div>
+                            <div class="text-[11px] text-slate-500">${escapeHtml(issue.detail || '')}</div>
+                        </div>
+                    </div>`;
+            }).join('');
+            const body = document.getElementById('launch-gate-body');
+            if (body) {
+                body.innerHTML = `
+                    <div class="grid grid-cols-2 gap-2">
+                        <div class="bg-red-500/10 border border-red-500/25 rounded-xl px-3 py-2.5">
+                            <div class="text-lg font-bold text-red-400">${Number(gate.critical_count || 0)}</div>
+                            <div class="text-[10px] text-slate-500 uppercase tracking-wide">Lỗi nghiêm trọng</div>
+                        </div>
+                        <div class="bg-amber-500/10 border border-amber-500/25 rounded-xl px-3 py-2.5">
+                            <div class="text-lg font-bold text-amber-400">${Number(gate.warning_count || 0)}</div>
+                            <div class="text-[10px] text-slate-500 uppercase tracking-wide">Cảnh báo</div>
+                        </div>
+                    </div>
+                    <div class="text-[11px] text-slate-400">${escapeHtml(gate.message || '')}</div>
+                    <div class="border border-borderBg rounded-xl bg-slate-900/30 px-3.5 py-2">
+                        ${issues || '<div class="text-xs text-slate-500 py-1">Không có chi tiết.</div>'}
+                    </div>
+                    <div class="text-[11px] text-slate-500">Sửa trong Fingerprint Health Center để lần mở sau không còn bị chặn.</div>`;
+            }
+            document.getElementById('launchGateModal').classList.remove('hidden');
+            safeCreateIcons();
+        }
+
+        function closeLaunchGateModal() {
+            pendingGate = null;
+            document.getElementById('launchGateModal').classList.add('hidden');
+        }
+
+        async function forceLaunchGate() {
+            const pending = pendingGate;
+            closeLaunchGateModal();
+            if (!pending) return;
+            if (pending.url) {
+                await testFingerprint(pending.id, true);
+            } else {
+                await startProfile(pending.id, true);
+            }
+        }
+
+        function setAuditBusy(busy) {
+            auditBusy = busy;
+            const btn = document.getElementById('audit-fix-all');
+            if (btn) {
+                btn.disabled = busy;
+                btn.classList.toggle('opacity-50', busy);
+                btn.classList.toggle('cursor-not-allowed', busy);
+            }
+        }
+
+        function formatAuditValue(value) {
+            if (Array.isArray(value)) return value.length ? value.join(', ') : '(trống)';
+            if (value === null || value === undefined || value === '') return '(trống)';
+            return String(value);
+        }
+
+        function auditScoreClass(score) {
+            if (score >= 90) return 'text-emerald-400 border-emerald-500/30';
+            if (score >= 70) return 'text-amber-400 border-amber-500/30';
+            return 'text-red-400 border-red-500/30';
+        }
+
+        function auditSummaryCard(label, value, color) {
+            return `
+                <div class="bg-slate-900/60 border border-borderBg rounded-xl px-3 py-2.5">
+                    <div class="text-lg font-bold ${color}">${escapeHtml(String(value))}</div>
+                    <div class="text-[10px] text-slate-500 uppercase tracking-wide">${escapeHtml(label)}</div>
+                </div>`;
+        }
+
+        function renderAuditProfile(item) {
+            const statusStyle = AUDIT_STATUS_STYLE[item.status] || AUDIT_STATUS_STYLE.warning;
+            const scoreStyle = auditScoreClass(Number(item.score || 0));
+            const summary = item.fingerprint_summary || {};
+            const issues = (item.issues || []).map(issue => {
+                const sev = AUDIT_SEVERITY_STYLE[issue.severity] || AUDIT_SEVERITY_STYLE.info;
+                return `
+                    <div class="flex items-start gap-2 py-1.5 border-t border-borderBg/60 first:border-t-0">
+                        <i data-lucide="${sev.icon}" class="w-3.5 h-3.5 mt-0.5 ${sev.text} shrink-0"></i>
+                        <div class="min-w-0">
+                            <div class="text-xs text-slate-200 font-medium">
+                                ${escapeHtml(issue.title)}
+                                ${issue.fixable ? '<span class="ml-1 text-[9px] px-1 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">auto-fix</span>' : ''}
+                            </div>
+                            <div class="text-[11px] text-slate-500">${escapeHtml(issue.detail)}</div>
+                        </div>
+                    </div>`;
+            }).join('');
+            const fixButton = item.can_fix
+                ? `<button onclick="fixAuditProfile('${escapeHtml(item.profile_id)}')" class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 rounded-lg text-[11px] font-semibold transition">Sửa an toàn (${item.fix_preview ? item.fix_preview.length : 0})</button>`
+                : '';
+            return `
+                <div class="border border-borderBg rounded-xl overflow-hidden bg-slate-900/30">
+                    <div class="px-3.5 py-3 flex flex-wrap items-center gap-3 bg-slate-900/50">
+                        <div class="w-12 h-12 rounded-xl border ${scoreStyle} flex flex-col items-center justify-center shrink-0 bg-slate-950/40">
+                            <span class="text-sm font-bold ${scoreStyle.split(' ')[0]}">${Number(item.score || 0)}</span>
+                            <span class="text-[8px] uppercase text-slate-500">score</span>
+                        </div>
+                        <div class="min-w-0 flex-1">
+                            <div class="text-sm font-semibold text-white truncate">${escapeHtml(item.name || '')}</div>
+                            <div class="text-[10px] text-slate-500 truncate">
+                                ${escapeHtml(String(item.os || '').toUpperCase())} · ${escapeHtml(summary.browser || '—')} · ${escapeHtml(summary.screen || '—')} · ${escapeHtml(summary.hardware || '—')} · ${escapeHtml(summary.proxy || '—')}
+                            </div>
+                        </div>
+                        <span class="px-2 py-0.5 rounded-full border text-[10px] font-semibold ${statusStyle.badge}">${statusStyle.label}</span>
+                        ${fixButton}
+                    </div>
+                    <div class="px-3.5 py-2">
+                        ${issues || '<div class="text-xs text-emerald-400 py-1">Không phát hiện vấn đề.</div>'}
+                    </div>
+                </div>`;
+        }
+
+        function renderAuditReport(report) {
+            const summary = report.summary || {};
+            const issues = summary.issues || {};
+            const average = Number(summary.average_score === undefined ? 100 : summary.average_score);
+            document.getElementById('audit-summary').innerHTML = `
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
+                    ${auditSummaryCard('Điểm TB', average.toFixed(1), auditScoreClass(average).split(' ')[0])}
+                    ${auditSummaryCard('An toàn', summary.healthy || 0, 'text-emerald-400')}
+                    ${auditSummaryCard('Cần chú ý', summary.warning || 0, 'text-amber-400')}
+                    ${auditSummaryCard('Rủi ro cao', summary.critical || 0, 'text-red-400')}
+                    ${auditSummaryCard('Sửa được', summary.fixable_profiles || 0, 'text-sky-400')}
+                </div>
+                <div class="mt-2 text-[11px] text-slate-500">
+                    ${Number(summary.total || 0)} profile · ${Number(issues.critical || 0)} lỗi nghiêm trọng · ${Number(issues.warning || 0)} cảnh báo · ${Number(summary.without_proxy || 0)} chưa gắn proxy
+                </div>`;
+            const profiles = report.profiles || [];
+            document.getElementById('audit-list').innerHTML = profiles.length
+                ? profiles.map(renderAuditProfile).join('')
+                : '<div class="text-xs text-slate-500 text-center py-8">Chưa có profile nào để kiểm tra.</div>';
+            const fixable = profiles.filter(item => item.can_fix).length;
+            const fixAll = document.getElementById('audit-fix-all');
+            fixAll.innerText = fixable ? `Sửa an toàn ${fixable} profile` : 'Không có gì để sửa';
+            fixAll.disabled = !fixable || auditBusy;
+            fixAll.classList.toggle('opacity-50', !fixable || auditBusy);
+            fixAll.classList.toggle('cursor-not-allowed', !fixable || auditBusy);
+            safeCreateIcons();
+        }
+
+        async function loadAuditReport() {
+            const loading = document.getElementById('audit-loading');
+            const content = document.getElementById('audit-content');
+            const errorBox = document.getElementById('audit-error');
+            loading.classList.remove('hidden');
+            content.classList.add('hidden');
+            errorBox.classList.add('hidden');
+            try {
+                const res = await fetch('/api/profiles/audit', { cache: 'no-store' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+                lastAuditReport = data;
+                renderAuditReport(data);
+                loading.classList.add('hidden');
+                content.classList.remove('hidden');
+                safeCreateIcons();
+            } catch (err) {
+                loading.classList.add('hidden');
+                errorBox.classList.remove('hidden');
+                errorBox.innerText = 'Lỗi audit: ' + (err && err.message ? err.message : err);
+            }
+        }
+
+        async function fixAuditProfile(id) {
+            if (auditBusy || !lastAuditReport) return;
+            const item = (lastAuditReport.profiles || []).find(p => p.profile_id === id);
+            if (!item || !item.can_fix) return;
+            const preview = (item.fix_preview || []).slice(0, 12).map(change =>
+                `• ${change.label}: ${formatAuditValue(change.before)} → ${formatAuditValue(change.after)}`
+            );
+            if ((item.fix_preview || []).length > 12) {
+                preview.push(`… và ${item.fix_preview.length - 12} thay đổi khác`);
+            }
+            if (!confirm(`Sửa an toàn fingerprint cho "${item.name}"?\n\n${preview.join('\n')}\n\nKhông thay proxy, vị trí, múi giờ hay mật khẩu.`)) return;
+            await applyAuditFix([id]);
+        }
+
+        async function fixAllAudit() {
+            if (auditBusy || !lastAuditReport) return;
+            const ids = (lastAuditReport.profiles || []).filter(item => item.can_fix).map(item => item.profile_id);
+            if (!ids.length) {
+                showToast('Không có profile nào cần sửa an toàn.', 'info');
+                return;
+            }
+            if (!confirm(`Sửa an toàn fingerprint cho ${ids.length} profile?\n\nChỉ chuẩn hoá fingerprint; không thay proxy, vị trí, múi giờ hay mật khẩu.`)) return;
+            await applyAuditFix(ids);
+        }
+
+        async function applyAuditFix(ids) {
+            setAuditBusy(true);
+            try {
+                const revisions = {};
+                (lastAuditReport.profiles || []).forEach(item => {
+                    if (ids.includes(item.profile_id)) revisions[item.profile_id] = item.revision;
+                });
+                const res = await fetch('/api/profiles/audit/fix', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profile_ids: ids, dry_run: false, expected_revisions: revisions })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    const msg = typeof data.detail === 'object' ? (data.detail.message || JSON.stringify(data.detail)) : (data.detail || 'Không sửa được fingerprint.');
+                    showToast(msg, 'error');
+                    return;
+                }
+                showToast(data.message || 'Đã sửa an toàn.', (data.changed && data.changed.length) ? 'success' : 'info');
+                if (data.report) {
+                    lastAuditReport = data.report;
+                    renderAuditReport(data.report);
+                } else {
+                    await loadAuditReport();
+                }
+                refreshProfiles();
+            } catch (err) {
+                showToast('Lỗi kết nối: ' + err, 'error');
+            } finally {
+                setAuditBusy(false);
+                const fixable = ((lastAuditReport || {}).profiles || []).filter(item => item.can_fix).length;
+                const fixAll = document.getElementById('audit-fix-all');
+                if (fixAll) {
+                    fixAll.disabled = !fixable;
+                    fixAll.classList.toggle('opacity-50', !fixable);
+                    fixAll.classList.toggle('cursor-not-allowed', !fixable);
+                }
+            }
         }
 
         // --- Fanpage Facebook của profile ---

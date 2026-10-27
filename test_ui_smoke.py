@@ -287,7 +287,12 @@ def test_dashboard_ui_smoke(live_server):
             import_payload = import_response.value.json() or {}
             assert import_payload.get("imported_count") == 1, import_payload
             page.locator("#import-result").filter(has_text="Đã import 1").wait_for()
-            page.locator("tr[data-profile-id]").filter(has_text=imported_name).wait_for()
+            imported_row = (
+                page.locator("tr[data-profile-id]").filter(has_text=imported_name).first
+            )
+            imported_row.wait_for()
+            imported_id = imported_row.get_attribute("data-profile-id")
+            assert imported_id, "Không lấy được id profile import"
             page.click("#importModal button[onclick='closeImportModal()']")
 
             # --- Lịch tự động: tạo + tắt qua checkbox ---
@@ -317,6 +322,48 @@ def test_dashboard_ui_smoke(live_server):
             ours = [rule for rule in rules if rule.get("name") == "UI Smoke Schedule"]
             assert ours and ours[0]["enabled"] is False, ours
             page.click("#schedulesModal button[onclick='closeSchedulesModal()']")
+
+            # --- Fingerprint Health Center: audit tĩnh + sửa an toàn qua UI ---
+            with page.expect_response(
+                lambda r: r.url.rstrip("/").endswith("/api/profiles/audit")
+                and r.request.method == "GET"
+            ) as audit_response:
+                page.click("button[onclick='openAuditModal()']")
+            assert audit_response.value.status == 200, "Audit qua UI thất bại"
+            audit_payload = audit_response.value.json() or {}
+            assert audit_payload.get("summary", {}).get("total") == 2, audit_payload
+            page.wait_for_selector("#audit-content:not(.hidden)")
+            page.locator("#audit-list").filter(has_text=edited_name).wait_for()
+            page.locator("#audit-list").filter(has_text=imported_name).wait_for()
+
+            fix_button = page.locator(
+                f"#audit-list button[onclick=\"fixAuditProfile('{imported_id}')\"]"
+            )
+            if not fix_button.count():
+                fix_button = page.locator(
+                    f"#audit-list button[onclick=\"fixAuditProfile('{profile_id}')\"]"
+                )
+            assert fix_button.count(), "Không có nút sửa an toàn dù có profile trùng dấu vân tay"
+            page.once("dialog", lambda dialog: dialog.accept())
+            with page.expect_response(
+                lambda r: r.url.rstrip("/").endswith("/api/profiles/audit/fix")
+                and r.request.method == "POST"
+            ) as fix_response:
+                fix_button.first.click()
+            assert fix_response.value.status == 200, "Sửa an toàn qua UI thất bại"
+            fix_payload = fix_response.value.json() or {}
+            assert fix_payload.get("dry_run") is False, fix_payload
+            assert fix_payload.get("changed"), fix_payload
+            assert fix_payload.get("report", {}).get("summary", {}).get("total") == 2, fix_payload
+
+            fresh_audit = page.evaluate(
+                "async () => await (await fetch('/api/profiles/audit')).json()"
+            )
+            for item in fresh_audit.get("profiles", []):
+                codes = {issue.get("code") for issue in item.get("issues", [])}
+                assert "duplicate_canvas_seed" not in codes, item
+                assert "duplicate_audio_seed" not in codes, item
+            page.click("#auditModal button[onclick='closeAuditModal()']")
 
             # --- Start/stop browser thật qua nút trong bảng ---
             row = _profile_row(page, profile_id)

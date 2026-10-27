@@ -6,7 +6,7 @@ import time
 import threading
 import re
 import uuid
-from typing import List, Optional
+from typing import Dict, List, Optional
 from .models import Profile, FingerprintConfig, ProxyConfig
 from .fingerprint import generate_fingerprint
 from .applog import get_logger
@@ -470,6 +470,125 @@ class ProfileManager:
             if updated_ids:
                 self.save_profiles(list(by_id.values()))
             return updated_ids
+
+    def _write_fingerprint_updates(
+        self,
+        updates: Dict[str, FingerprintConfig],
+        expected_revisions: Optional[Dict[str, int]] = None,
+    ) -> List[str]:
+        """Ghi riêng fingerprint, không đi qua save_profiles.
+
+        save_profiles() gọi migrate_plaintext_passwords(), có thể ghi lại
+        secrets.dpapi từ password đang nằm trong bộ nhớ. Các bản vá fingerprint
+        (audit) không được có tác dụng phụ đó, nên đọc/ghi raw JSON dưới cùng
+        IPC lock và giữ nguyên mọi field proxy/secret khác.
+        """
+        if not updates:
+            return []
+        for profile_id in updates:
+            self._validate_profile_id(profile_id)
+        with self._lock, self._ipc_lock:
+            self._cache = None
+            if self._corrupted:
+                raise RuntimeError(
+                    "Không thể sửa fingerprint: profiles.json đang bị hỏng. "
+                    "Khôi phục file backup thủ công trước."
+                )
+            if not os.path.exists(PROFILES_JSON):
+                return []
+            try:
+                with open(PROFILES_JSON, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (ValueError, UnicodeError) as e:
+                self._corrupted = True
+                raise RuntimeError(
+                    "profiles.json bị hỏng; không ghi đè để tránh mất dữ liệu."
+                ) from e
+            if not isinstance(data, list):
+                raise RuntimeError("profiles.json sai cấu trúc (root phải là list).")
+
+            by_id = {
+                item.get("id"): item
+                for item in data
+                if isinstance(item, dict) and item.get("id")
+            }
+            conflicts = []
+            for profile_id, item in by_id.items():
+                if profile_id not in updates:
+                    continue
+                current_rev = int(item.get("revision") or 1)
+                expected = (expected_revisions or {}).get(profile_id)
+                if expected is not None and current_rev != expected:
+                    conflicts.append((profile_id, current_rev, expected))
+            if conflicts:
+                detail = ", ".join(
+                    f"{pid[:8]} (hiện tại {current}, yêu cầu {expected})"
+                    for pid, current, expected in conflicts
+                )
+                raise RuntimeError(
+                    f"Conflict: Profile đã bị sửa đổi bởi phiên khác: {detail}"
+                )
+
+            now = int(time.time())
+            changed: List[str] = []
+            for index, item in enumerate(data):
+                if not isinstance(item, dict):
+                    continue
+                profile_id = item.get("id")
+                new_fp = updates.get(profile_id)
+                if new_fp is None:
+                    continue
+                current_rev = int(item.get("revision") or 1)
+                merged = dict(item)
+                merged["fingerprint"] = new_fp.model_dump()
+                merged["revision"] = current_rev + 1
+                merged["updated_at"] = now
+                # Validate toàn bộ record trước khi ghi để không đẩy file vào
+                # trạng thái mà list_profiles() sẽ coi là hỏng.
+                Profile.model_validate(merged)
+                data[index] = merged
+                changed.append(profile_id)
+
+            if not changed:
+                return []
+            self._create_timestamped_backup()
+            temp_file = f"{PROFILES_JSON}.tmp.{uuid.uuid4().hex}"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            _replace_with_retry(temp_file, PROFILES_JSON)
+            self._corrupted = False
+            self._cache = None
+            self._cache_mtime = 0.0
+            return changed
+
+    def update_fingerprint_only(
+        self,
+        profile_id: str,
+        fingerprint: FingerprintConfig,
+        expected_revision: Optional[int] = None,
+    ) -> Optional[Profile]:
+        expected = (
+            {profile_id: expected_revision}
+            if expected_revision is not None
+            else None
+        )
+        changed = self._write_fingerprint_updates(
+            {profile_id: fingerprint}, expected_revisions=expected
+        )
+        if not changed:
+            return None
+        return self.get_profile(profile_id)
+
+    def update_fingerprints_batch(
+        self,
+        updates: Dict[str, FingerprintConfig],
+        expected_revisions: Optional[Dict[str, int]] = None,
+    ) -> List[str]:
+        return self._write_fingerprint_updates(
+            updates, expected_revisions=expected_revisions
+        )
 
     def delete_profile(self, profile_id: str) -> bool:
         """Delete a profile with retryable, secret-safe ordering.

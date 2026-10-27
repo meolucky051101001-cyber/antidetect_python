@@ -7,7 +7,7 @@ import asyncio
 import threading
 import secrets
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,14 @@ from antidetect.fingerprint import (
     locale_for_country,
     detect_browser_brand,
 )
+from antidetect.profile_audit import audit_profiles, build_fix_plan
+from antidetect.launch_gate import (
+    evaluate_profile as _evaluate_launch_gate,
+    evaluate_profiles as _evaluate_launch_gates,
+    get_mode as _launch_gate_mode,
+    set_mode as _set_launch_gate_mode,
+    settings_snapshot as _launch_gate_settings,
+)
 from antidetect.launcher import BrowserLauncher
 from antidetect.proxy import check_proxy
 from antidetect.scheduler import ScheduleStoreCorruption
@@ -38,11 +46,13 @@ from antidetect.applog import get_logger, setup_logging
 from antidetect import metrics
 
 from .schemas import (
+    AuditFixRequest,
     BulkCreateRequest,
     CheckProxyRequest,
     CreateProfileRequest,
     ImportCookiesRequest,
     ImportProfilesRequest,
+    LaunchGateSettingsRequest,
     ProfileRuntime,
     ScheduleCreateRequest,
     ScheduleUpdateRequest,
@@ -517,6 +527,46 @@ async def start_all_profiles(
         if not profiles:
             raise HTTPException(status_code=404, detail="Không profile nào trong danh sách chọn tồn tại.")
 
+    to_start = [p for p in profiles if p.status != "running"]
+    gate_mode = _launch_gate_mode()
+    blocked = []
+    allowed_to_start = to_start
+    launch_ids: Optional[List[str]] = (
+        list(selected_ids) if selected_ids is not None else None
+    )
+    if gate_mode != "off":
+        browser_paths = await asyncio.to_thread(_resolve_browser_paths, profiles)
+        gate_by_id = await asyncio.to_thread(
+            _evaluate_launch_gates, profiles, browser_paths, gate_mode
+        )
+        blocked = [
+            gate_by_id[p.id]
+            for p in to_start
+            if p.id in gate_by_id and not gate_by_id[p.id].allowed
+        ]
+        blocked_ids = {item.profile_id for item in blocked}
+        allowed_to_start = [p for p in to_start if p.id not in blocked_ids]
+        if to_start and not allowed_to_start:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "detail": (
+                        f"Cổng fingerprint chặn toàn bộ {len(blocked)} profile "
+                        "trong danh sách. Sửa trong Health Center hoặc đổi chế độ cổng."
+                    ),
+                    "blocked": [item.as_dict() for item in blocked],
+                    "gate_mode": gate_mode,
+                },
+            )
+        if blocked_ids:
+            base_ids = (
+                list(selected_ids)
+                if selected_ids is not None
+                else [p.id for p in profiles]
+            )
+            launch_ids = [pid for pid in base_ids if pid not in blocked_ids]
+
     # Lock order: _bulk_launch_lock -> _start_all_lock -> bulk job IPC lock.
     # The bulk thread holds the process lock for its whole lifetime, so a
     # failure to acquire it means another local bulk launch is alive. A second
@@ -533,7 +583,6 @@ async def start_all_profiles(
                     status_code=409,
                     detail=f"Đang có tác vụ Start-All ({_active_start_all_job.get('job_id')}) đang xử lý. Hãy đợi hoặc hủy tác vụ hiện tại."
                 )
-            to_start = [p for p in profiles if p.status != "running"]
             job_id = str(uuid.uuid4())
             cancel_event = threading.Event()
         try:
@@ -542,7 +591,7 @@ async def start_all_profiles(
                 owner_instance=app.state.instance_id,
                 kind="start_all",
                 total=len(profiles),
-                starting_count=len(to_start),
+                starting_count=len(allowed_to_start),
                 max_concurrent=max_concurrent,
             )
         except BulkJobStoreCorruption as exc:
@@ -574,7 +623,9 @@ async def start_all_profiles(
                 "status": "running",
                 "owner_instance": app.state.instance_id,
                 "total": len(profiles),
-                "starting_count": len(to_start),
+                "starting_count": len(allowed_to_start),
+                "blocked_count": len(blocked),
+                "gate_mode": gate_mode,
                 "completed_count": 0,
                 "failed_count": 0,
                 "max_concurrent": max_concurrent,
@@ -601,7 +652,7 @@ async def start_all_profiles(
                 max_concurrent=max_concurrent,
                 cancel_event=cancel_event,
                 progress_callback=on_progress,
-                profile_ids=list(selected_ids) if selected_ids is not None else None,
+                profile_ids=launch_ids,
             )
             if cancel_event.is_set():
                 status = "cancelled"
@@ -626,13 +677,19 @@ async def start_all_profiles(
     limit_label = (
         "không giới hạn" if max_concurrent <= 0 else f"tối đa {max_concurrent}"
     )
+    start_count = len(allowed_to_start) if gate_mode != "off" else len(to_start)
+    message = f"Đang khởi chạy {start_count} profile ({limit_label} cùng lúc)..."
+    if blocked:
+        message += f" Bỏ qua {len(blocked)} profile bị cổng fingerprint chặn."
     return {
         "success": True,
-        "message": f"Đang khởi chạy {len(to_start)} profile ({limit_label} cùng lúc)...",
+        "message": message,
         "job_id": job_id,
         "total": len(profiles),
-        "starting_count": len(to_start),
+        "starting_count": start_count,
         "max_concurrent": max_concurrent,
+        "blocked": [item.as_dict() for item in blocked],
+        "gate_mode": gate_mode,
     }
 
 
@@ -758,6 +815,136 @@ async def export_profiles(request: Request):
             "Cache-Control": "no-store",
         },
     )
+
+
+def _resolve_browser_paths(profiles: List[Profile]) -> Dict[str, Optional[str]]:
+    """Resolve the exact browser binary per profile without launching it."""
+    return {p.id: launcher._resolve_browser_path(p) for p in profiles}
+
+
+@app.get("/api/profiles/audit")
+async def audit_profiles_endpoint():
+    """Fingerprint Health Center: static audit, no browser launched."""
+    profiles = await asyncio.to_thread(profile_manager.list_profiles)
+    browser_paths = await asyncio.to_thread(_resolve_browser_paths, profiles)
+    return await asyncio.to_thread(audit_profiles, profiles, browser_paths)
+
+
+@app.post("/api/profiles/audit/fix")
+async def fix_profiles_endpoint(req: AuditFixRequest):
+    """Apply safe fingerprint repairs (dry_run by default)."""
+    profiles = await asyncio.to_thread(profile_manager.list_profiles)
+    selected_ids: Optional[Set[str]] = None
+    if req.profile_ids is not None:
+        if not req.profile_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Danh sách profile được chọn trống. Bỏ profile_ids để kiểm tra toàn bộ.",
+            )
+        wanted = set(req.profile_ids)
+        existing = {p.id for p in profiles}
+        missing = sorted(wanted - existing)
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Không tìm thấy profile: {', '.join(missing[:5])}",
+            )
+        selected_ids = wanted
+
+    browser_paths = await asyncio.to_thread(_resolve_browser_paths, profiles)
+    # Cross-profile rules need the full set; the selection only scopes the
+    # updates and decides whose seeds are reassigned.
+    plan = await asyncio.to_thread(
+        build_fix_plan, profiles, browser_paths, selected_ids
+    )
+    scoped = (
+        [p for p in profiles if p.id in selected_ids]
+        if selected_ids is not None
+        else profiles
+    )
+    if selected_ids is not None:
+        plan = [item for item in plan if item["profile_id"] in selected_ids]
+    summary = {
+        "profiles": len(scoped),
+        "fixable_profiles": len(plan),
+        "field_changes": sum(len(item["changes"]) for item in plan),
+    }
+    if req.dry_run:
+        return {
+            "dry_run": True,
+            "changed": [],
+            "changes": plan,
+            "summary": summary,
+            "message": (
+                f"{len(plan)} profile có thể sửa an toàn; chưa ghi thay đổi nào."
+                if plan
+                else "Không có thay đổi an toàn nào cần áp dụng."
+            ),
+        }
+
+    updates = {
+        item["profile_id"]: FingerprintConfig.model_validate(item["fingerprint"])
+        for item in plan
+    }
+    if not updates:
+        report = await asyncio.to_thread(audit_profiles, profiles, browser_paths)
+        return {
+            "dry_run": False,
+            "changed": [],
+            "changes": [],
+            "summary": summary,
+            "report": report,
+            "message": "Không có thay đổi an toàn nào cần áp dụng.",
+        }
+
+    expected = req.expected_revisions or {
+        p.id: int(p.revision or 1) for p in profiles
+    }
+    try:
+        changed = await asyncio.to_thread(
+            profile_manager.update_fingerprints_batch, updates, expected
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    fresh_profiles = await asyncio.to_thread(profile_manager.list_profiles)
+    fresh_browser_paths = await asyncio.to_thread(
+        _resolve_browser_paths, fresh_profiles
+    )
+    report = await asyncio.to_thread(
+        audit_profiles, fresh_profiles, fresh_browser_paths
+    )
+    return {
+        "dry_run": False,
+        "changed": changed,
+        "changes": plan,
+        "summary": summary,
+        "report": report,
+        "message": f"Đã sửa an toàn fingerprint cho {len(changed)} profile.",
+    }
+
+
+@app.get("/api/settings/launch-gate")
+async def get_launch_gate_settings():
+    """Static pre-launch gate configuration (no profile is launched)."""
+    return _launch_gate_settings()
+
+
+@app.put("/api/settings/launch-gate")
+async def update_launch_gate_settings(req: LaunchGateSettingsRequest):
+    try:
+        await asyncio.to_thread(_set_launch_gate_mode, req.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    snapshot = _launch_gate_settings()
+    snapshot["message"] = (
+        f"Đã đặt cổng fingerprint: {snapshot['labels'].get(snapshot['mode'], snapshot['mode'])}."
+    )
+    if snapshot.get("env_override"):
+        snapshot["message"] += (
+            " Biến môi trường ANTIDETECT_LAUNCH_GATE đang ghi đè cấu hình này."
+        )
+    return snapshot
 
 
 @app.get("/api/profiles/{profile_id}", response_model=Profile)
@@ -955,6 +1142,41 @@ def _scheduler_start_all(profile_ids=None):
             wanted = set(profile_ids)
             profiles = [p for p in profiles if p.id in wanted]
         to_start = [p for p in profiles if p.status != "running"]
+        gate_mode = _launch_gate_mode()
+        blocked = []
+        allowed_to_start = to_start
+        launch_ids = profile_ids
+        if gate_mode != "off":
+            browser_paths = _resolve_browser_paths(profiles)
+            gate_by_id = _evaluate_launch_gates(
+                profiles, browser_paths, gate_mode
+            )
+            blocked = [
+                gate_by_id[p.id]
+                for p in to_start
+                if p.id in gate_by_id and not gate_by_id[p.id].allowed
+            ]
+            blocked_ids = {item.profile_id for item in blocked}
+            allowed_to_start = [p for p in to_start if p.id not in blocked_ids]
+            if to_start and not allowed_to_start:
+                metrics.inc("scheduler_start_all_gate_blocked")
+                log.warning(
+                    "Bỏ qua Start-All theo lịch: cổng fingerprint chặn %d profile.",
+                    len(blocked),
+                )
+                return {
+                    "success": False,
+                    "skipped": True,
+                    "reason": "launch_gate_blocked",
+                    "blocked": [item.as_dict() for item in blocked],
+                }
+            if blocked_ids:
+                base_ids = (
+                    list(profile_ids)
+                    if profile_ids is not None
+                    else [p.id for p in profiles]
+                )
+                launch_ids = [pid for pid in base_ids if pid not in blocked_ids]
         with _start_all_lock:
             if _active_start_all_job is not None and _active_start_all_job.get(
                 "status"
@@ -971,7 +1193,7 @@ def _scheduler_start_all(profile_ids=None):
                 owner_instance=app.state.instance_id,
                 kind="scheduled_start_all",
                 total=len(profiles),
-                starting_count=len(to_start),
+                starting_count=len(allowed_to_start),
             )
         except (BulkJobStoreCorruption, TimeoutError) as exc:
             raise RuntimeError(f"bulk job state: {exc}") from exc
@@ -995,7 +1217,9 @@ def _scheduler_start_all(profile_ids=None):
                 "status": "running",
                 "owner_instance": app.state.instance_id,
                 "total": len(profiles),
-                "starting_count": len(to_start),
+                "starting_count": len(allowed_to_start),
+                "blocked_count": len(blocked),
+                "gate_mode": gate_mode,
                 "completed_count": 0,
                 "failed_count": 0,
                 "max_concurrent": 0,
@@ -1017,7 +1241,7 @@ def _scheduler_start_all(profile_ids=None):
                 progress_callback=lambda p_id, res: _record_bulk_progress(
                     job_id, p_id, res
                 ),
-                profile_ids=profile_ids,
+                profile_ids=launch_ids,
             )
             if cancel_event.is_set():
                 status = "cancelled"
@@ -1026,6 +1250,8 @@ def _scheduler_start_all(profile_ids=None):
                 "job_id": job_id,
                 "status": status,
                 "results": results,
+                "blocked": [item.as_dict() for item in blocked],
+                "gate_mode": gate_mode,
             }
         except Exception as exc:
             status = "failed"
@@ -1599,7 +1825,7 @@ async def bulk_create_profiles(req: BulkCreateRequest):
 
 
 @app.post("/api/profiles/{profile_id}/start")
-async def start_profile(profile_id: str, url: Optional[str] = None):
+async def start_profile(profile_id: str, url: Optional[str] = None, force: bool = False):
     p = profile_manager.get_profile(profile_id)
     if not p:
         raise HTTPException(status_code=404, detail="Profile không tồn tại")
@@ -1608,10 +1834,38 @@ async def start_profile(profile_id: str, url: Optional[str] = None):
         url = url.strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(status_code=400, detail="URL không hợp lệ: chỉ chấp nhận http:// hoặc https://")
+
+    gate = None
+    gate_mode = _launch_gate_mode()
+    if gate_mode != "off":
+        try:
+            already_running = await asyncio.to_thread(launcher.is_running, profile_id)
+        except Exception:
+            already_running = False
+        # Opening a tab in a browser that is already running cannot change the
+        # fingerprint presented at spawn, so the gate only applies to a launch.
+        if not already_running:
+            profiles = await asyncio.to_thread(profile_manager.list_profiles)
+            browser_paths = await asyncio.to_thread(_resolve_browser_paths, profiles)
+            gate = await asyncio.to_thread(
+                _evaluate_launch_gate, p, profiles, browser_paths, gate_mode, force
+            )
+            if not gate.allowed:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "success": False,
+                        "detail": gate.message,
+                        "gate": gate.as_dict(),
+                    },
+                )
+
     res = await asyncio.to_thread(launcher.launch, profile_id, open_url=url)
     if not res.get("success"):
         status_code = 409 if res.get("recovery_required") else 500
         raise HTTPException(status_code=status_code, detail=res.get("error", "Lỗi khởi chạy"))
+    if gate and gate.status in ("warning", "overridden", "unverified"):
+        res["gate"] = gate.as_dict()
     return res
 
 

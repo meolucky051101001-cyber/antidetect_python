@@ -12,6 +12,11 @@ if BASE_DIR not in sys.path:
 from antidetect.models import Profile, ProxyConfig, FingerprintConfig
 from antidetect.storage import ProfileManager
 from antidetect.launcher import BrowserLauncher
+from antidetect.launch_gate import (
+    evaluate_profile as evaluate_launch_gate,
+    evaluate_profiles as evaluate_launch_gates,
+    get_mode as get_launch_gate_mode,
+)
 from antidetect.fingerprint import (
     generate_fingerprint,
     get_location_coordinates,
@@ -48,7 +53,11 @@ def action_list(manager: ProfileManager, launcher: BrowserLauncher) -> Dict[str,
     return {"success": True, "profiles": res}
 
 
-def action_start(manager: ProfileManager, launcher: BrowserLauncher, profile_id: str, url: Optional[str] = None) -> Dict[str, Any]:
+def _resolve_gate_browser_paths(launcher: BrowserLauncher, profiles) -> Dict[str, Optional[str]]:
+    return {p.id: launcher._resolve_browser_path(p) for p in profiles}
+
+
+def action_start(manager: ProfileManager, launcher: BrowserLauncher, profile_id: str, url: Optional[str] = None, force: bool = False) -> Dict[str, Any]:
     clean_url = url.strip() if url else None
     if clean_url and not (clean_url.startswith("http://") or clean_url.startswith("https://")):
         clean_url = "https://" + clean_url
@@ -70,8 +79,30 @@ def action_start(manager: ProfileManager, launcher: BrowserLauncher, profile_id:
             "message": "Profile đã đang chạy"
         }
 
+    profile = manager.get_profile(profile_id)
+    gate = None
+    if profile is not None:
+        profiles = manager.list_profiles()
+        gate = evaluate_launch_gate(
+            profile,
+            profiles,
+            _resolve_gate_browser_paths(launcher, profiles),
+            get_launch_gate_mode(),
+            force=force,
+        )
+        if not gate.allowed:
+            return {
+                "success": False,
+                "blocked": True,
+                "error": gate.message,
+                "gate": gate.as_dict(),
+            }
+
     res = launcher.launch(profile_id, open_url=clean_url)
     launcher.unregister_cleanup()  # Keep browser running independently
+    if gate is not None and gate.checked and gate.status != "healthy":
+        res = dict(res)
+        res["gate"] = gate.as_dict()
     return res
 
 
@@ -80,11 +111,38 @@ def action_stop(manager: ProfileManager, launcher: BrowserLauncher, profile_id: 
     return res
 
 
-def action_start_all(manager: ProfileManager, launcher: BrowserLauncher, url: Optional[str] = None) -> Dict[str, Any]:
+def action_start_all(manager: ProfileManager, launcher: BrowserLauncher, url: Optional[str] = None, force: bool = False) -> Dict[str, Any]:
     clean_url = url.strip() if url else None
-    res = launcher.launch_all(delay=1.0, open_url=clean_url)
+    profiles = manager.list_profiles()
+    gate_mode = get_launch_gate_mode()
+    blocked = []
+    launch_ids = None
+    if gate_mode != "off" and not force:
+        to_start = [p for p in profiles if not launcher.is_running(p.id)]
+        gates = evaluate_launch_gates(
+            to_start,
+            _resolve_gate_browser_paths(launcher, profiles),
+            gate_mode,
+        )
+        blocked = [result for result in gates.values() if not result.allowed]
+        if to_start and len(blocked) == len(to_start):
+            return {
+                "success": False,
+                "blocked": [result.as_dict() for result in blocked],
+                "gate_mode": gate_mode,
+                "error": "Cổng fingerprint chặn toàn bộ profile cần mở.",
+            }
+        if blocked:
+            blocked_ids = {result.profile_id for result in blocked}
+            launch_ids = [p.id for p in profiles if p.id not in blocked_ids]
+    res = launcher.launch_all(delay=1.0, open_url=clean_url, profile_ids=launch_ids)
     launcher.unregister_cleanup()
-    return {"success": True, "results": res}
+    return {
+        "success": True,
+        "results": res,
+        "blocked": [result.as_dict() for result in blocked],
+        "gate_mode": gate_mode,
+    }
 
 
 def action_stop_all(manager: ProfileManager, launcher: BrowserLauncher) -> Dict[str, Any]:
@@ -214,11 +272,22 @@ def main():
         if action == "list":
             result = action_list(manager, launcher)
         elif action == "start":
-            result = action_start(manager, launcher, payload.get("id") or payload.get("profile_id"), payload.get("url"))
+            result = action_start(
+                manager,
+                launcher,
+                payload.get("id") or payload.get("profile_id"),
+                payload.get("url"),
+                force=bool(payload.get("force")),
+            )
         elif action == "stop":
             result = action_stop(manager, launcher, payload.get("id") or payload.get("profile_id"))
         elif action == "start_all":
-            result = action_start_all(manager, launcher, payload.get("url"))
+            result = action_start_all(
+                manager,
+                launcher,
+                payload.get("url"),
+                force=bool(payload.get("force")),
+            )
         elif action == "stop_all":
             result = action_stop_all(manager, launcher)
         elif action == "create":

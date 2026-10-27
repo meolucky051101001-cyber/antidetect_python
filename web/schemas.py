@@ -97,3 +97,14 @@ class BulkCreateRequest(BaseModel):
     name_prefix: str = "Profile"
     cpu: Optional[int] = None
     proxies: List[str] = []
+
+
+class AuditFixRequest(BaseModel):
+    profile_ids: Optional[List[str]] = None
+    dry_run: bool = True
+    # Revision client đã thấy lúc mở audit; bỏ trống thì dùng bản mới nhất.
+    expected_revisions: Optional[Dict[str, int]] = None
+
+
+class LaunchGateSettingsRequest(BaseModel):
+    mode: str
