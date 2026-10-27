@@ -130,39 +130,42 @@ Lịch sử gần nhất:
   test; `fetch_facebook_pages` dùng `merge_page_details` từ `facebook.py`.
 - `web/app.py` vẫn giữ route + singleton `profile_manager`/`launcher`/
   `_scheduler` để tương thích test; chưa phải router split hoàn chỉnh.
+- **Leak audit proxy thật trên build 1.1.0 (2026-10-26): PASS** — profile tạm
+  + proxy HTTP VNPT `160.250.166.89:23951`: egress
+  `113.185.44.5`/`113.185.48.131`, WebRTC 0 candidate, DNS `CLEAN`
+  (resolver `AS45899`), JA3/JA4 đo được, cleanup OK. Không suy diễn PASS này
+  cho SOCKS5/Proxy #2/soak; bằng chứng ở
+  `%TEMP%\opencode\ad-live-r4\leak_proxy_2026-10-26.json`.
 
 ## 6. Chưa verify / việc có thể làm tiếp
 
-1. **Leak audit với proxy thật trên HEAD hiện tại** — lần đo gần nhất là trên
-   build trước loạt hardening; chưa chạy lại `leak_audit.py` qua proxy
-   `160.250.166.89:23951` trên code này (cần credentials trong chat).
-2. **Fanpage deep sync với page Facebook thật** (`?refresh=1&deep=1`) — chỉ
+1. **Fanpage deep sync với page Facebook thật** (`?refresh=1&deep=1`) — chỉ
    verify đến redirect login; heuristic DOM/parse ngày có thể lệch khi FB đổi
    giao diện. Raw text được giữ để đối chiếu.
-3. **Soak 24h / >20 profile đồng thời / SOCKS5 thật / DataDome+Turnstile
+2. **Soak 24h / >20 profile đồng thời / SOCKS5 thật / DataDome+Turnstile
    thật** — chưa test; CI chỉ chạy unit + E2E smoke ngắn.
-4. **Refactor còn lại (P1 đã làm một phần):** launcher launch/stop/CDP core
+3. **Refactor còn lại (P1 đã làm một phần):** launcher launch/stop/CDP core
    vẫn ~1.9k dòng; `web/app.py` ~1.4k dòng còn route + singleton; `index.html`
    còn ~68 inline handler; CSP chưa bỏ được `script-src-attr 'unsafe-inline'`.
    Coverage thấp ở `launcher.py` (29%) vì cần Chrome/CDP thật; `facebook.py`
    đã lên 57% và `server_control.py` 67% nhờ test CDP/PowerShell giả lập,
    `cookies.py` 97%.
-5. **Playwright UI smoke không chạy trong CI** (Playwright không nằm trong
+4. **Playwright UI smoke không chạy trong CI** (Playwright không nằm trong
    requirements-dev) nhưng **bắt buộc trong checklist pre-release** khi thay
    đổi UI. CI vẫn chỉ unit + coverage; phải chạy tay trước phát hành. P2 còn
    residual: bulk job là single-slot cục bộ (không distributed lock nhiều máy);
    updater không auto-download/auto-update, không ký Authenticode bắt buộc,
    server guard best-effort; chưa build release thật ngoài bản test trong
    `%TEMP%`.
-6. UI bolt-on: chọn profile scope cho scheduler rule qua UI (API đã có
+5. UI bolt-on: chọn profile scope cho scheduler rule qua UI (API đã có
    `profile_ids`), hiển thị browser pin + `recent_runs` trong dashboard (API
    đã trả về).
-7. **Commit đợt roadmap P0 + P1 + P2** (CI, constraints, ruff, scheduler
+6. **Commit đợt roadmap P0 + P1 + P2** (CI, constraints, ruff, scheduler
    heartbeat + history + run_id idempotency, logging/metrics, tách module/assets,
    UI `expected_revision`, Playwright smoke, bulk job xuyên instance, signed
    upgrade/rollback, test nhiễu cookies/facebook/updater/bulk-job) — hiện còn
    uncommitted; chỉ commit khi user yêu cầu.
-8. **Fork Chromium** — roadmap dài hạn (chỉ khi detector thương mại chặn thật;
+7. **Fork Chromium** — roadmap dài hạn (chỉ khi detector thương mại chặn thật;
    source ~100GB, dự án riêng).
 
 ## 7. Lệnh mẫu

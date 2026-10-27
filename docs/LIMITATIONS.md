@@ -239,10 +239,15 @@ Chi tiết và bằng chứng: `docs/VERIFICATION_2026-10-24.md`.
   pre-release** khi thay đổi UI. Test này đã bắt được một regression thật: CSP
   `script-src 'self'` chặn inline script `/unlock`; đã chuyển sang
   `/static/js/unlock.js` và thêm test chống tái phát.
-- **Leak audit bằng proxy thật chưa chạy lại trên code hiện tại** — lần đo
-  proxy HTTP #1/#2 là 2026-10-23, trước loạt hardening. Không suy diễn kết quả
-  cũ cho build này; chạy lại `leak_audit.py --dns --strict` trước khi dùng
-  profile giá trị cao.
+- **Leak audit proxy thật trên code hiện tại (2026-10-26): PASS** — profile tạm
+  + proxy HTTP #1 (`160.250.166.89:23951`, egress VNPT `AS45899`):
+  `leak_audit.py --dns --strict` trả 1 PASS/0 WARN/0 FAIL; browser IP
+  `113.185.44.5`/`113.185.48.131` khác host direct `42.112.46.175`; WebRTC
+  0 candidate; bash.ws `DNS is not leaking`, resolver `AS45899`; JA3/JA4 đo
+  được; cleanup xác nhận browser dừng. Bằng chứng cục bộ:
+  `%TEMP%\opencode\ad-live-r4\leak_proxy_2026-10-26.json` + screenshot
+  `R4_live_dns.png`. Đây là **một run trên một endpoint**; chưa đại diện cho
+  SOCKS5, Proxy #2 (DNS lệch ASN) hay soak dài.
 - **Chưa soak 24h**, chưa test >20 profile đồng thời, SOCKS5 thật,
   DataDome/Turnstile thật.
 - Multi-instance bulk job + nâng cấp/rollback có chữ ký đã có từ 2026-10-26

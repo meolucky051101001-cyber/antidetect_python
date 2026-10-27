@@ -86,6 +86,33 @@ Khuyến nghị:
 - Với authentic, chạy `python tools\verify_live.py --profile <id>` sau khi đổi —
   nếu sai GPU, check `webgl_renderer` sẽ FAIL và chỉ cho giá trị thật của host.
 
+### 4.0. Cổng fingerprint trước khi mở profile (mặc định: chặn lỗi nghiêm trọng)
+
+Mọi đường mở profile — dashboard (`/start`, start-all), scheduler, CLI
+(`start`, `start-all`) và bridge (`start`, `start_all`) — đều chạy audit tĩnh
+trước khi spawn browser. Gate không tự sửa fingerprint và không gọi mạng.
+
+| Chế độ | Hành vi |
+|---|---|
+| `block` (mặc định) | Có lỗi `critical` thì không mở; cảnh báo vẫn mở |
+| `warn` | Trả danh sách lỗi nhưng vẫn mở |
+| `off` | Bỏ qua audit trước khi mở |
+
+Đổi chế độ tại footer **Fingerprint Health Center**, hoặc
+`GET/PUT /api/settings/launch-gate`. Biến môi trường
+`ANTIDETECT_LAUNCH_GATE=off|warn|block` ghi đè file `data/launch_gate.json`
+(khi đó ô chọn trong UI bị khóa).
+
+- Mở một lần bất chấp cảnh báo: nút **Vẫn mở profile** trong modal, API
+  `POST /api/profiles/{id}/start?force=true`, CLI `--force`, hoặc payload
+  bridge `"force": true`. Override chỉ có hiệu lực cho lần mở đó.
+- Start-all/scheduler/CLI/bridge kiểm tra một lượt: profile bị chặn được bỏ
+  qua và trả về trong `blocked`; nếu toàn bộ bị chặn thì không mở profile nào.
+- Audit lỗi (ví dụ thiếu browser pinned) trả `unverified` và vẫn cho mở, nhưng
+  không được coi là đã qua kiểm tra.
+- Profile đang chạy không bị gate lại khi chỉ mở thêm tab — fingerprint đã được
+  quyết định lúc spawn.
+
 ## 4.1. Vận hành quy mô ~20 profile
 
 Từ 2026-10-24, start-all chạy các launch **song song theo batch** (ThreadPoolExecutor):
@@ -173,8 +200,10 @@ Chrome sạch của máy** (đo 1 lần, ghi lại — không so với 0%).
    → CreepJS `0% headless/stealth`; Pixelscan `masking not detected` (chế độ
    authentic) hoặc chấp nhận `detected` (chế độ unique).
 4. `python tools\leak_audit.py --profile <id> --dns --strict` → với proxy thật;
-   DNS `CLEAN` phụ thuộc resolver của nhà cung cấp proxy (xem LIMITATIONS.md
-   mục 3). DNS `LEAK` do lệch ASN resolver **chưa chắc** là rò rỉ thật.
+   kết quả build hiện tại (2026-10-26, Proxy #1): **PASS** — egress VNPT
+   `AS45899`, WebRTC 0 candidate, DNS `CLEAN`. DNS `CLEAN`/`LEAK` phụ thuộc
+   resolver của nhà cung cấp proxy (xem LIMITATIONS.md mục 3); `LEAK` do lệch
+   ASN resolver **chưa chắc** là rò rỉ thật.
 5. Đọc response của `/api/profiles/{id}/start`: `degraded` phải `false`.
    `degraded=true` → browser mở nhưng fingerprint chưa được che: đóng và thử
    lại, không dùng phiên đó để đăng nhập.
