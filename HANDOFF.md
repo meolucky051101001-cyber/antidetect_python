@@ -43,23 +43,30 @@ Lịch sử gần nhất:
 | `5599514` | **model 2**: scheduler mutation atomic + fail-closed xuyên process, **leased claims** chống chạy callback trùng, browser recovered chỉ hiển thị/stop được — phải restart trước khi dùng lại |
 | `3ff038a` | docs handoff sau đợt hardening |
 
-## 3. Dữ liệu thật `data/` — đã kiểm tra toàn vẹn (2026-10-25)
+## 3. Dữ liệu thật `data/` — đã kiểm tra toàn vẹn (cập nhật 2026-11-01)
 
-- **7 profile đủ**, id/name/fingerprint/notes/proxy **không đổi** so với backup
-  gần nhất (`data/backups/profiles_20261025_135651_*.json`).
-- Hash `profiles.json` ĐÃ ĐỔI so với baseline cũ (EF69A75A…) — **chỉ vì schema
-  thêm field** (stealth_disable, facebook_pages, browser_path…) khi tool lưu;
-  nội dung ngữ nghĩa nguyên vẹn. **Hash baseline mới:**
-  `8CFC56C4AD8BF9C0102C24280C707DB70B46D8F61397AAB38F0242AB727ABCA5`
+- **7 profile đủ**, 7/7 id khớp backup mới nhất
+  `data/backups/profiles_20261029_134012_513075.json`. So với backup đó, một
+  profile (`da7555ad…`) khác `fingerprint`/`revision`/`updated_at` — dấu vết
+  của lần lưu sau backup, không phải test của đợt này.
+- Hash `profiles.json` ĐÃ ĐỔI so với baseline cũ (`8CFC56C4…ABCA5`). Giá trị
+  hiện tại (đo 2026-11-01):
+  `23E81C476B9D53B98F29942BA3C77596A50F647DE929DC3D72449D43F2712F35`.
+  Drift **hợp lệ về ngữ nghĩa**, không phải test ghi nhầm: chủ tool đã dùng
+  dashboard từ 2026-10-26 đến 2026-10-29 và tool tạo backup trước mỗi lần lưu;
+  backup mới nhất khớp đủ 7 id. **Đây là baseline mới** để so các lần sau; mọi
+  thay đổi hash phải giải thích được vì sao.
 - `secrets.dpapi` + `runtime.dpapi` còn nguyên; `api_token.dpapi` /
   `schedules.json` chưa tồn tại (tính năng chưa dùng — bình thường).
 - `browser_runtime.json` rỗng (không browser nào đang chạy).
 - 10 backup profiles + 5 backup secrets trong `data/backups/`.
 - Đợt P1 (2026-10-26): pytest, Playwright UI smoke và E2E chỉ dùng data tạm;
-  kiểm tra lại sau test, `profiles.json` vẫn giữ baseline `8CFC56C4…ABCA5`.
+  sau đợt test đó `profiles.json` vẫn giữ baseline cũ `8CFC56C4…ABCA5`.
+  Baseline đổi tiếp trong các ngày 26–29/10 khi chủ tool dùng dashboard (xem
+  ghi chú drift ở trên).
 - Đợt P2 (2026-10-26): test bulk job/updater dùng data tạm + bản cài tạm; CLI
   apply/rollback E2E chỉ chạy trên bản copy trong `%TEMP%`. `data/updates/`
-  **không** được tạo trên repo thật (đã kiểm tra); hash baseline không đổi.
+  **không** được tạo trên repo thật (đã kiểm tra); hash không đổi trong đợt test đó.
 
 ## 4. Quy tắc an toàn (BẮT BUỘC)
 
