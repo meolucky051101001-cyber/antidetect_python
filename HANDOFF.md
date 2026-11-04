@@ -1,4 +1,4 @@
-# HANDOFF — Antidetect Python (2026-10-26, sau đợt triển khai roadmap P0 + P1 + P2)
+# HANDOFF — Antidetect Python (cập nhật 2026-11-04; roadmap P0 + P1 + P2 đã commit)
 
 Điểm bắt đầu cho model/người tiếp nhận. Mô tả **trạng thái thật hiện tại**.
 Đọc hết mục "Quy tắc an toàn" trước khi sửa code.
@@ -7,12 +7,17 @@
 
 ## 1. Trạng thái một câu
 
-Tool hoàn chỉnh ở mức production-ready có điều kiện: **HEAD `3ff038a`
-(docs handoff), working tree có thay đổi roadmap P0 + P1 + P2 CHƯA COMMIT**,
-**255 pytest passed + 1 skipped** (Playwright UI smoke chưa bật trong lần chạy
-này), coverage **68.15%** (gate CI 58%), ruff/compileall sạch, E2E smoke
-**24/24** và Playwright UI smoke **1/1** trên code hiện tại (Chrome thật, data
-tạm, không proxy).
+Tool hoàn chỉnh ở mức production-ready có điều kiện: **HEAD `42e61e8`** trên
+nhánh `master`, working tree sạch tại thời điểm kiểm tra (sau đó chỉ
+`HANDOFF.md` này được cập nhật), `origin/master` trùng HEAD (đã push
+2026-11-04). Đo trên code hiện tại (2026-11-04): **301 pytest passed + 1
+skipped** (Playwright UI smoke skip vì chưa đặt `ANTIDETECT_RUN_UI_SMOKE=1`),
+coverage **71%** (gate CI 58%), ruff sạch. **E2E smoke 24/24 và Playwright UI
+smoke 1/1 chưa chạy lại trên HEAD này** — số gần nhất đo 2026-10-26 trên code
+trước đó; `compileall` cũng chưa chạy lại.
+Roadmap P0 + P1 + P2 đã commit (`61ab5ec`); sau đó bổ sung fingerprint health
+center + pre-launch gate (`8093392`), hardening proxy/launch (`51bb963`), fix
+CI httpx2 (`313faab`) và fix scrape Fanpage (`0390ee8`).
 Fingerprint đạt "không phân biệt được khỏi Chrome thật trên máy" trong phạm vi
 đã đo (CreepJS/Iphey bằng baseline clean; Pixelscan masking detected chỉ ở chế
 độ Unique — đúng thiết kế). Dashboard quản lý đầy đủ; scheduler có lease
@@ -25,8 +30,8 @@ update).
 ## 2. Git & lịch sử
 
 ```text
-HEAD:  3ff038a docs: refresh handoff after second-model hardening round
-Tree:  CÓ thay đổi chưa commit của đợt roadmap P0 + P1 + P2 (2026-10-26)
+HEAD:  42e61e8 docs: update handoff data integrity snapshot (2026-11-01)
+Tree:  sạch; origin/master = HEAD (313faab..42e61e8 đã push 2026-11-04)
 ```
 
 Lịch sử gần nhất:
@@ -42,31 +47,42 @@ Lịch sử gần nhất:
 | `d94f58f` | **model 2**: profiles.json create/save trong IPC lock + retry `os.replace` khi AV giữ file; HumanInput gửi đúng key code/VK/modifiers + Enter text-less; mouse release `buttons=0`; tải Chrome-for-Testing **verify md5 GCS** trước khi giải nén |
 | `5599514` | **model 2**: scheduler mutation atomic + fail-closed xuyên process, **leased claims** chống chạy callback trùng, browser recovered chỉ hiển thị/stop được — phải restart trước khi dùng lại |
 | `3ff038a` | docs handoff sau đợt hardening |
+| `61ab5ec` | hoàn tất roadmap P0/P1/P2 (v1.1.0) — commit chính thức |
+| `9d033ba` | docs refresh handoff/operations/security v1.1.0 |
+| `b66ec7c` | parse legacy numeric `server.pid` + mở rộng coverage |
+| `e1e6155` | docs baseline 255 test/68.15% + detector audit |
+| `8093392` | fingerprint health center + pre-launch gate |
+| `e390381` | docs proxy leak audit + fingerprint gate |
+| `51bb963` | harden proxy credentials, launch verification, state races |
+| `313faab` | fix CI: cài httpx2 cho Starlette TestClient |
+| `0390ee8` | fix(facebook): `profile.php` URL, prefix avatar, parse ngày tạo VI/EN |
+| `42e61e8` | docs handoff data snapshot 2026-11-01 |
 
-## 3. Dữ liệu thật `data/` — đã kiểm tra toàn vẹn (cập nhật 2026-11-01)
+## 3. Dữ liệu thật `data/` — đã kiểm tra toàn vẹn (cập nhật 2026-11-04)
 
-- **7 profile đủ**, 7/7 id khớp backup mới nhất
-  `data/backups/profiles_20261029_134012_513075.json`. So với backup đó, một
-  profile (`da7555ad…`) khác `fingerprint`/`revision`/`updated_at` — dấu vết
-  của lần lưu sau backup, không phải test của đợt này.
-- Hash `profiles.json` ĐÃ ĐỔI so với baseline cũ (`8CFC56C4…ABCA5`). Giá trị
-  hiện tại (đo 2026-11-01):
-  `23E81C476B9D53B98F29942BA3C77596A50F647DE929DC3D72449D43F2712F35`.
-  Drift **hợp lệ về ngữ nghĩa**, không phải test ghi nhầm: chủ tool đã dùng
-  dashboard từ 2026-10-26 đến 2026-10-29 và tool tạo backup trước mỗi lần lưu;
-  backup mới nhất khớp đủ 7 id. **Đây là baseline mới** để so các lần sau; mọi
-  thay đổi hash phải giải thích được vì sao.
-- `secrets.dpapi` + `runtime.dpapi` còn nguyên; `api_token.dpapi` /
-  `schedules.json` chưa tồn tại (tính năng chưa dùng — bình thường).
-- `browser_runtime.json` rỗng (không browser nào đang chạy).
+- **9 profile đủ**, 9/9 id khớp backup mới nhất
+  `data/backups/profiles_20261102_010106_870f5c.json` (tạo 2026-11-02
+  01:01:06). So với backup đó, một profile (`4978808c…`) khác
+  `fingerprint`/`revision`/`updated_at` — dấu vết của lần lưu ngay sau backup,
+  không phải test ghi nhầm.
+- Hash `profiles.json` hiện tại (đo 2026-11-04):
+  `B26426E4E9945CEEB81D163637D589D25F7D98789D031D6DA21CD252410B8ABA`.
+  Baseline trước (2026-11-01) là `23E81C47…12F35`. Drift **hợp lệ về ngữ
+  nghĩa**: thêm 2 profile (7 → 9) và đổi fingerprint profile `4978808c…`;
+  backup-before-save có mặt và id khớp 9/9. **Đây là baseline mới** để so các
+  lần sau; mọi thay đổi hash phải giải thích được vì sao.
+- `secrets.dpapi` còn nguyên (hash `2B9965…71DB`); `runtime.dpapi` hiện
+  `470760…FBFB` (thay đổi khi dashboard chạy là bình thường). `api_token.dpapi`
+  / `schedules.json` chưa tồn tại (tính năng chưa dùng — bình thường).
+- `browser_runtime.json` = `{}` (không browser nào đang chạy).
 - 10 backup profiles + 5 backup secrets trong `data/backups/`.
-- Đợt P1 (2026-10-26): pytest, Playwright UI smoke và E2E chỉ dùng data tạm;
-  sau đợt test đó `profiles.json` vẫn giữ baseline cũ `8CFC56C4…ABCA5`.
-  Baseline đổi tiếp trong các ngày 26–29/10 khi chủ tool dùng dashboard (xem
-  ghi chú drift ở trên).
-- Đợt P2 (2026-10-26): test bulk job/updater dùng data tạm + bản cài tạm; CLI
-  apply/rollback E2E chỉ chạy trên bản copy trong `%TEMP%`. `data/updates/`
-  **không** được tạo trên repo thật (đã kiểm tra); hash không đổi trong đợt test đó.
+- 3 file `data/profiles.json.tmp.*` sót từ 2026-11-01 21:39–21:40 (lần lưu bị
+  gián đoạn/AV giữ file) — không ảnh hưởng `profiles.json`; có thể dọn khi
+  dashboard không chạy.
+- `data/updates/` **không** tồn tại trên repo thật.
+- Test ngày 2026-11-04 (pytest + coverage) chỉ dùng data tạm — hash
+  `profiles.json` trước/sau không đổi. Các đợt P1/P2 (2026-10-26) cũng chỉ
+  dùng data tạm + bản cài trong `%TEMP%`.
 
 ## 4. Quy tắc an toàn (BẮT BUỘC)
 
@@ -76,7 +92,7 @@ Lịch sử gần nhất:
 - **Không sửa** `data/profiles.json`, `data/profiles/*`, `secrets.dpapi`,
   `runtime.dpapi`, `api_token.dpapi`, `data/backups/*`.
 - Hash baseline mới (mục 3) — đổi hash phải giải thích được vì sao.
-- **Không push**; commit chỉ khi user yêu cầu.
+- **Không tự ý commit/push**; chỉ commit/push khi user yêu cầu.
 - **Playwright UI smoke** (`test_ui_smoke.py`) chỉ chạy khi đặt
   `ANTIDETECT_RUN_UI_SMOKE=1`; test tự tạo data tạm và mở Chrome thật
   (start/stop) — không trỏ `ANTIDETECT_DATA_DIR` vào `data/` thật.
@@ -146,48 +162,46 @@ Lịch sử gần nhất:
 
 ## 6. Chưa verify / việc có thể làm tiếp
 
-1. **Fanpage deep sync với page Facebook thật** (`?refresh=1&deep=1`) — chỉ
-   verify đến redirect login; heuristic DOM/parse ngày có thể lệch khi FB đổi
-   giao diện. Raw text được giữ để đối chiếu.
+1. **Fanpage deep sync với page Facebook thật** (`?refresh=1&deep=1`) — code đã
+   cải thiện (`0390ee8`: URL `profile.php`, bỏ prefix "Ảnh đại diện của", parse
+   ngày tạo từ `about_profile_transparency` + HTML `creation_date`, định dạng
+   VI/EN) nhưng **chưa verify với page thật**; heuristic DOM/parse ngày có thể
+   lệch khi FB đổi giao diện. Raw text được giữ để đối chiếu.
 2. **Soak 24h / >20 profile đồng thời / SOCKS5 thật / DataDome+Turnstile
-   thật** — chưa test; CI chỉ chạy unit + E2E smoke ngắn.
+   thật** — chưa test; CI chỉ chạy unit + coverage, không chạy E2E/soak.
 3. **Refactor còn lại (P1 đã làm một phần):** launcher launch/stop/CDP core
    vẫn ~1.9k dòng; `web/app.py` ~1.4k dòng còn route + singleton; `index.html`
    còn ~68 inline handler; CSP chưa bỏ được `script-src-attr 'unsafe-inline'`.
-   Coverage thấp ở `launcher.py` (29%) vì cần Chrome/CDP thật; `facebook.py`
-   đã lên 57% và `server_control.py` 67% nhờ test CDP/PowerShell giả lập,
-   `cookies.py` 97%.
+   Coverage thấp ở `launcher.py` (35%), `proxy.py` (28%) vì cần Chrome/CDP/
+   proxy thật; `facebook.py` 57%, `server_control.py` 67%, `cookies.py` 97%;
+   total 71% (gate 58%).
 4. **Playwright UI smoke không chạy trong CI** (Playwright không nằm trong
    requirements-dev) nhưng **bắt buộc trong checklist pre-release** khi thay
    đổi UI. CI vẫn chỉ unit + coverage; phải chạy tay trước phát hành. P2 còn
    residual: bulk job là single-slot cục bộ (không distributed lock nhiều máy);
    updater không auto-download/auto-update, không ký Authenticode bắt buộc,
    server guard best-effort; chưa build release thật ngoài bản test trong
-   `%TEMP%`.
+   `%TEMP%`. **Chưa chạy lại E2E smoke + UI smoke trên HEAD `42e61e8`** — phải
+   chạy tay trước phát hành.
 5. UI bolt-on: chọn profile scope cho scheduler rule qua UI (API đã có
    `profile_ids`), hiển thị browser pin + `recent_runs` trong dashboard (API
    đã trả về).
-6. **Commit đợt roadmap P0 + P1 + P2** (CI, constraints, ruff, scheduler
-   heartbeat + history + run_id idempotency, logging/metrics, tách module/assets,
-   UI `expected_revision`, Playwright smoke, bulk job xuyên instance, signed
-   upgrade/rollback, test nhiễu cookies/facebook/updater/bulk-job) — hiện còn
-   uncommitted; chỉ commit khi user yêu cầu.
-7. **Fork Chromium** — roadmap dài hạn (chỉ khi detector thương mại chặn thật;
+6. **Fork Chromium** — roadmap dài hạn (chỉ khi detector thương mại chặn thật;
    source ~100GB, dự án riêng).
 
 ## 7. Lệnh mẫu
 
 ```powershell
-cd C:\Users\admin\Documents\antigravity\blissful-maxwell\antidetect_python
-python -m pytest -q                                        # 255 passed + 1 skipped
+cd C:\Projects\Tools\Antidetect Python
+python -m pytest -q                                        # 301 passed + 1 skipped
 python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing
-                                                           # coverage 68.15%, gate CI 58%
+                                                           # coverage 71%, gate CI 58%
 python -m ruff check .                                     # correctness-only, sạch
-python -m compileall -q antidetect web tools run.py        # sạch
+python -m compileall -q antidetect web tools run.py        # sạch (lần cuối 2026-10-26)
 $env:ANTIDETECT_RUN_UI_SMOKE = "1"
-python -m pytest test_ui_smoke.py -q                       # 1 passed (Chrome thật, data tạm)
+python -m pytest test_ui_smoke.py -q                       # 1 passed (lần cuối 2026-10-26; Chrome thật, data tạm)
 $env:ANTIDETECT_DATA_DIR = "$env:TEMP\opencode\ad-live-r4"
-python tools\e2e_smoke.py                                  # 24/24 (tự chặn data/ thật)
+python tools\e2e_smoke.py                                  # 24/24 (lần cuối 2026-10-26; tự chặn data/ thật)
 python tools\verify_live.py --profile 9a636166-8668-46c7-86ba-6d193071d05d
 python tools\detector_audit.py --profile 9a636166-8668-46c7-86ba-6d193071d05d --wait 14
 python tools\leak_audit.py --profile 9a636166-8668-46c7-86ba-6d193071d05d --no-dns
