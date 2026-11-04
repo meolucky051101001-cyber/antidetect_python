@@ -48,6 +48,7 @@ _FB_SCRAPE_JS = r"""
         for (const a of anchors) {
             let text = (a.getAttribute('aria-label') || a.textContent || '')
                 .trim().replace(/\s+/g, ' ');
+            text = text.replace(/^(Ảnh đại diện của|Profile picture of)\s+/i, '').trim();
             if (!text || text.length < 2 || text.length > 100) continue;
             const href = a.href || '';
             if (!href) continue;
@@ -83,7 +84,7 @@ _FB_SCRAPE_JS = r"""
             }
             out.pages.push({
                 name: text,
-                url: u.origin + path + (id ? '' : (u.search || '')),
+                url: (path === '/profile.php' && id) ? (u.origin + '/' + id) : (u.origin + path + (id ? '' : (u.search || ''))),
                 id: id,
                 _score: score
             });
@@ -168,6 +169,15 @@ _FB_PAGE_METRICS_JS = r"""
             const txt = document.body ? (document.body.innerText || '') : '';
             const m = txt.match(new RegExp(CREATED_LABEL.source + '[^\\n]{0,100}', 'i'));
             if (m) out.createdRaw = m[0].slice(0, 140);
+            if (!out.createdRaw) {
+                const html = document.documentElement ? (document.documentElement.outerHTML || '') : '';
+                const idx = html.indexOf('"field_type":"creation_date"');
+                if (idx !== -1) {
+                    const snippet = html.slice(Math.max(0, idx - 220), idx + 120);
+                    const matches = Array.from(snippet.matchAll(/"text":"([^"]+)"/g));
+                    if (matches.length > 0) out.createdRaw = matches[matches.length - 1][1];
+                }
+            }
         } catch (e) {}
         return out;
     };
@@ -220,6 +230,15 @@ def parse_fb_created_date(raw: Optional[str]) -> Optional[datetime.date]:
         )
         if m:
             return datetime.date(int(m.group(3)), _FB_MONTHS_EN[m.group(1)], int(m.group(2)))
+        m = re.search(
+            r"(\d{1,2})\s+(" + "|".join(_FB_MONTHS_EN) + r")(?:,?\s+(\d{4}))?", text
+        )
+        if m:
+            yr = int(m.group(3)) if m.group(3) else datetime.date.today().year
+            return datetime.date(yr, _FB_MONTHS_EN[m.group(2)], int(m.group(1)))
+        m = re.search(r"(\d{1,2})\s+tháng\s+(\d{1,2})$", text.strip())
+        if m:
+            return datetime.date(datetime.date.today().year, int(m.group(2)), int(m.group(1)))
         m = re.search(r"(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})", text)
         if m:
             a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -503,8 +522,8 @@ async def fetch_pages_deep_cdp(
                     if main_metrics:
                         entry["times"] = main_metrics.get("times") or []
                         entry["title"] = main_metrics.get("title")
-                    # 2) Trang about: nhãn ngày tạo trang.
-                    about_url = page_url.rstrip("/") + "/about"
+                    # 2) Trang about_profile_transparency: nhãn ngày tạo trang.
+                    about_url = page_url.rstrip("/") + "/about_profile_transparency"
                     msg_id += 1
                     await ws.send(json.dumps({
                         "id": msg_id,
