@@ -163,6 +163,7 @@ def main():
             body.get("degraded") is False,
             f"cdp_ready={body.get('cdp_ready')}, verified={body.get('configuration_verified')}",
         )
+        launch_port = body.get("port")
 
         status, body = _request("GET", "/api/profiles", token=token)
         entry = next((p for p in body if p["id"] == pid_new), {})
@@ -173,7 +174,11 @@ def main():
         )
         check(
             "start lặp lại khi đang chạy → không spawn thêm",
-            status == 200 and body.get("success") and "đang chạy" in (body.get("message") or ""),
+            status == 200
+            and body.get("success")
+            and body.get("launched_now") is False
+            and body.get("port") == launch_port,
+            f"launched_now={body.get('launched_now')}, port={body.get('port')}",
         )
 
         status, body = _request(
