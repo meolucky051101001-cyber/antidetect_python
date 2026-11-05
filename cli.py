@@ -153,8 +153,24 @@ def main():
         profiles = manager.list_profiles()
         print(f"\n{'ID':<38} {'Tên':<20} {'Hệ điều hành':<12} {'Trạng thái'}")
         print("-" * 80)
+        health_labels = {
+            "starting": "đang khởi tạo",
+            "healthy": "khỏe",
+            "degraded": "mất kết nối",
+            "recovery_required": "cần khởi chạy lại",
+            "stopping": "đang dừng",
+        }
         for p in profiles:
-            status = "Đang chạy" if launcher.is_running(p.id) else "Đã dừng"
+            if launcher.is_running(p.id):
+                health = launcher.cdp_health_snapshot(p.id, running=True)
+                state = health.get("state") or "unknown"
+                detail = health_labels.get(state, state)
+                reason = health.get("reason")
+                if reason and state != "healthy":
+                    detail += f" · {reason}"
+                status = f"Đang chạy · CDP {detail}"
+            else:
+                status = "Đã dừng"
             print(f"{p.id:<38} {p.name:<20} {p.fingerprint.os:<12} {status}")
         print(f"\nTổng cộng: {len(profiles)} profile.\n")
 
@@ -218,6 +234,12 @@ def main():
             print(f"Remote Debugging Port: {res.get('port')}")
             print(f"CDP Endpoint: {res.get('ws_endpoint')}")
             if getattr(args, "detach", False):
+                if res.get("launched_now"):
+                    launcher.mark_detached(args.id)
+                    print(
+                        "CẢNH BÁO: phiên detached không còn CDP — API/dashboard "
+                        "sẽ yêu cầu dừng và mở lại profile trước khi thao tác."
+                    )
                 launcher.unregister_cleanup()
                 print("Profile đang chạy ở chế độ nền (detached).")
             else:
@@ -233,7 +255,10 @@ def main():
                     launcher.stop(args.id)
                     print(f"Đã dừng profile thành công.")
         else:
-            print(f"Lỗi khởi chạy: {res.get('error')}")
+            code = res.get("code")
+            suffix = f" [{code}]" if code else ""
+            print(f"Lỗi khởi chạy: {res.get('error')}{suffix}")
+            sys.exit(1)
 
     elif args.command == "start-all":
         clean_url = None
@@ -280,14 +305,37 @@ def main():
         )
         print(f"Đã kích hoạt {len(res)} profile:")
         running_ids = []
+        launched_now_ids = []
         for r in res:
             sub_res = r["result"]
-            status_text = "Thành công" if sub_res.get("success") else f"Thất bại ({sub_res.get('error')})"
+            health_state = (sub_res.get("cdp_health") or {}).get("state")
+            cdp_failed = (
+                sub_res.get("success")
+                and (sub_res.get("cdp_ready") is False
+                     or (health_state and health_state != "healthy"))
+            )
+            if sub_res.get("success") and not cdp_failed:
+                status_text = "Thành công"
+            elif sub_res.get("success"):
+                status_text = (
+                    f"Thất bại CDP ({sub_res.get('code') or health_state})"
+                )
+            else:
+                status_text = f"Thất bại ({sub_res.get('error')})"
             print(f" - {r['name']} ({r['profile_id'][:8]}...): {status_text}")
             if sub_res.get("success"):
                 running_ids.append(r["profile_id"])
+                if sub_res.get("launched_now"):
+                    launched_now_ids.append(r["profile_id"])
 
         if getattr(args, "detach", False):
+            for profile_id in launched_now_ids:
+                launcher.mark_detached(profile_id)
+            if launched_now_ids:
+                print(
+                    "CẢNH BÁO: các profile detached không còn CDP — API/dashboard "
+                    "sẽ yêu cầu dừng và mở lại trước khi thao tác."
+                )
             launcher.unregister_cleanup()
             print("\nToàn bộ profile đang chạy ở chế độ nền (detached).")
         elif running_ids:

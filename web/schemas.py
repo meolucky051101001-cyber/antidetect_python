@@ -10,10 +10,24 @@ from pydantic import BaseModel, Field
 from antidetect.models import Profile, FingerprintConfig, ProxyConfig
 
 
+class CdpHealth(BaseModel):
+    state: str
+    reason: Optional[str] = None
+    checked_at: Optional[str] = None
+    restart_required: bool = False
+    launch_id: Optional[str] = None
+    owner_instance: Optional[str] = None
+    pid: Optional[int] = None
+    verified_at: Optional[str] = None
+    last_heartbeat_at: Optional[str] = None
+    changed_at: Optional[str] = None
+
+
 class ProfileRuntime(Profile):
-    """Profile + trạng thái runtime chỉ đọc (uptime/RAM) cho GET /api/profiles."""
+    """Profile + trạng thái runtime chỉ đọc (uptime/RAM/CDP) cho GET /api/profiles."""
     uptime_seconds: Optional[int] = None
     ram_mb: Optional[float] = None
+    cdp_health: Optional[CdpHealth] = None
 
 
 class CreateProfileRequest(BaseModel):

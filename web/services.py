@@ -8,7 +8,12 @@ import time
 import zoneinfo
 from typing import Any, Callable, Dict, List
 
-from antidetect.facebook import classify_facebook_page
+from antidetect.facebook import (
+    DEFAULT_DISPLAY_TIMEZONE,
+    STALE_AFTER_HOURS,
+    classify_facebook_page,
+    normalize_last_post_fields,
+)
 from antidetect.fingerprint import get_host_device_memory, locale_for_country
 
 try:
@@ -154,9 +159,49 @@ def sanitize_facebook_pages(raw: Any) -> List[Dict[str, Any]]:
     return pages
 
 
-def enrich_facebook_pages(raw: Any) -> List[Dict[str, Any]]:
+def enrich_facebook_pages(
+    raw: Any,
+    *,
+    now: Any = None,
+    timezone: Any = None,
+    stale_after_hours: int = STALE_AFTER_HOURS,
+) -> List[Dict[str, Any]]:
+    """Chuẩn hóa timestamp + trạng thái hoạt động tại thời điểm trả response.
+
+    Legacy ``last_post_days`` được quy đổi thành khoảng UTC từ
+    ``detail_synced_at`` (ngày local) thay vì dùng số đã đóng băng; nhờ vậy
+    tuổi bài tự tăng theo thời gian và dữ liệu cũ không còn báo "đang đăng".
+    """
     pages = sanitize_facebook_pages(raw)
-    return [{**entry, **classify_facebook_page(entry)} for entry in pages]
+    result: List[Dict[str, Any]] = []
+    for entry in pages:
+        normalized = normalize_last_post_fields(
+            entry, display_tz=timezone, now=now
+        )
+        normalized.update(
+            classify_facebook_page(
+                normalized,
+                now=now,
+                timezone=timezone,
+                stale_after_hours=stale_after_hours,
+            )
+        )
+        result.append(normalized)
+    return result
+
+
+def profile_display_timezone(profile: Any) -> str:
+    fingerprint = getattr(profile, "fingerprint", None)
+    return str(getattr(fingerprint, "timezone", "") or DEFAULT_DISPLAY_TIMEZONE)
+
+
+def fanpage_stale_after_hours() -> int:
+    """Ngưỡng stale cấu hình được; mặc định 48 giờ theo QĐ-4."""
+    try:
+        value = int(os.environ.get("ANTIDETECT_FANPAGE_STALE_HOURS", "48"))
+    except (TypeError, ValueError):
+        return STALE_AFTER_HOURS
+    return value if value > 0 else STALE_AFTER_HOURS
 
 
 def host_gpu_strings() -> tuple:

@@ -286,6 +286,34 @@ Chi tiết và bằng chứng: `docs/VERIFICATION_2026-10-24.md`.
 - **Không chống kẻ có quyền admin.** Kẻ tấn công same-user/admin có thể sửa
   binary/Python sau khi cài; chữ ký chỉ bảo vệ lúc apply, không bảo vệ runtime.
 
+### 6.6. Đợt sửa ổn định F1–F4 — giới hạn còn lại (2026-11-05)
+
+Đợt này **chưa commit**; bằng chứng tự động là 407 passed + 1 skipped, ruff và
+`compileall` sạch. Các giới hạn dưới đây vẫn đúng:
+
+- **CDP health (F1):** trạng thái `degraded`/`recovery_required` mới được kiểm
+  chứng bằng unit/API, chưa ngắt socket CDP thật hoặc restart server thật khi
+  Chrome còn mở. Không có tự reconnect; phục hồi bằng stop → relaunch. Phiên
+  `--detach` được định nghĩa là **không có CDP owner**, không dùng cho
+  collector/deep scan/cookie automation.
+- **Copy profile (F2):** staging/journal/lifecycle lock là file lock trên một
+  ổ cục bộ, không phải distributed lock nhiều máy. Chưa copy nhiều GB với
+  antivirus/Windows Defender giữ file; chưa kill process thật tại từng mốc
+  journal. Recovery chỉ xử lý operation có owner đã chết và lấy được khóa.
+- **Fanpage F3:** quy tắc tuổi bài dựa trên mốc quan sát; dữ liệu legacy thiếu
+  mốc sẽ là `unknown`, không được suy thành “hôm nay”. Chưa verify parser với
+  feed/DOM Facebook thật; Facebook đổi giao diện có thể làm deep scan trả
+  unknown thay vì đoán sai.
+- **Fanpage F4:** chỉ `complete` khi có `TOTAL_MATCH`/`END_MARKER`/
+  `EMPTY_CONFIRMED`; 3 vòng ổn định vẫn là `partial` + `NO_END_SIGNAL`. Giới
+  hạn 60s/500 page/50 vòng cuộn là giới hạn tài nguyên của tool, không phải
+  cam kết Facebook trả đủ. Chưa chạy với danh sách >100 page thật, DOM ảo hóa
+  thật, logout/đổi tài khoản giữa lượt.
+- **UI/E2E/soak:** Playwright UI smoke, E2E browser thật và soak 24–72h chưa
+  chạy lại trên working tree này. UI mới (CDP banner, partial/stale, xóa cache,
+  copy lỗi) mới được test qua API/chuỗi tĩnh, chưa thao tác tay trên trình
+  duyệt thật. Không suy diễn PASS phát hành từ các test này.
+
 ## 7. Bảo mật & vận hành
 
 - DPAPI bảo vệ secret theo tài khoản Windows; cùng user có thể giải mã.
@@ -326,19 +354,25 @@ Chi tiết và bằng chứng: `docs/VERIFICATION_2026-10-24.md`.
   phạm vi enumerateDevices hook. CreepJS baseline desktop là 25% like-headless
   (cả Chrome sạch) — so tool với CHROME SẠCH CÙNG MÁY, không so với con số
   0% của thời điểm heuristic cũ.
-- **Liệt kê fanpage Facebook (2026-10-24)** đọc DOM trang
-  `facebook.com/bookmarks/pages` bằng heuristic link/aria-label. Facebook đổi
-  giao diện thường xuyên nên danh sách có thể thiếu/sai mục; mỗi mục hiển thị
-  kèm link để kiểm tra bằng mắt. Thu thập chỉ đọc, không thao tác nào lên tài khoản.
-- **Tuổi + trạng thái đăng bài của fanpage (deep sync, 2026-10-24)**: quét từng
-  page (feed + about) để lấy bài gần nhất và ngày tạo. (a) Feed chỉ hiện một số
-  bài gần đây — "bài cuối" đúng với những page còn bài hiển thị; page khóa
-  feed/cũ sâu có thể trả "Không rõ". (b) Ngày tạo parse từ text "Ngày tạo
-  trang" best-effort (dd/mm ưu tiên VN, tháng tiếng Anh, ISO); parse fail →
-  hiển thị raw text, tuổi/sẵn sàng để trống. (c) "Sẵn sàng" chỉ căn tuổi ≥ 30
-  ngày, chưa xét chất lượng nội dung. Đường này **chưa verify với page thật**
-  (không dùng dữ liệu thật để test) — lần đầu chạy trên profile thật cần đối
-  chiếu vài page bằng mắt.
+- **Liệt kê fanpage Facebook (2026-10-24; hợp đồng F4 2026-11-05)** đọc DOM
+  trang `facebook.com/bookmarks/pages` bằng heuristic link/aria-label. Từ
+  2026-11-05, kết quả có `discovery_status`/`completion_reason`/
+  `observed_count`/`retained_count`; chỉ `complete` khi có bằng chứng
+  (`TOTAL_MATCH`/`END_MARKER`/`EMPTY_CONFIRMED`). Facebook đổi giao diện
+  thường xuyên nên danh sách vẫn có thể partial/sai; mỗi mục hiển thị kèm link
+  để kiểm tra bằng mắt. Thu thập chỉ đọc, không thao tác nào lên tài khoản.
+  Chi tiết giới hạn ở 6.6.
+- **Tuổi + trạng thái đăng bài của fanpage (deep sync, 2026-10-24; F3
+  2026-11-05)**: quét từng page (feed + about) để lấy bài gần nhất và ngày
+  tạo. (a) Feed chỉ hiện một số bài gần đây — "bài cuối" đúng với những page
+  còn bài hiển thị; page khóa feed/cũ sâu có thể trả `unknown`. (b) Ngày tạo
+  parse từ text "Ngày tạo trang" best-effort (dd/mm ưu tiên VN, tháng tiếng
+  Anh, ISO); parse fail → hiển thị raw text, tuổi/sẵn sàng để trống. (c) Từ
+  F3, tuổi bài tính theo khoảng + mốc quan sát, legacy
+  `last_post_days` không còn là kết luận hiện tại; `stale` mặc định 48h.
+  (d) "Sẵn sàng" chỉ căn tuổi ≥ 30 ngày, chưa xét chất lượng nội dung. Đường
+  này **chưa verify với page thật** (không dùng dữ liệu thật để test) — lần
+  đầu chạy trên profile thật cần đối chiếu vài page bằng mắt.
 
 ---
 

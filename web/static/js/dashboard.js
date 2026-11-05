@@ -605,6 +605,31 @@
                     ? `<div class="text-[10px] text-slate-500 font-mono mt-0.5">${[uptimeText && '⏱ ' + uptimeText, ramText && '💾 ' + ramText].filter(Boolean).join(' · ')}</div>`
                     : '';
 
+                // CDP health tách khỏi "Chrome còn sống": Chrome có thể mở nhưng
+                // control channel đã mất (detached/degraded) — thao tác CDP sẽ bị chặn.
+                const health = p.cdp_health || null;
+                const healthState = health && health.state
+                    ? health.state : (isRunning ? 'unknown' : 'stopped');
+                const healthReason = health && health.reason ? String(health.reason) : '';
+                const healthReasonText = escapeHtml(healthReason.replace(/_/g, ' '));
+                const healthChecked = health && health.checked_at ? new Date(health.checked_at) : null;
+                const healthCheckedText = healthChecked && !isNaN(healthChecked.getTime())
+                    ? healthChecked.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+                    : '';
+                const healthIsDetached = healthReason === 'DETACHED_OWNER_EXITED';
+                let healthLabel = 'CDP mất kết nối';
+                if (healthState === 'unknown') healthLabel = 'Chưa xác minh CDP';
+                if (healthState === 'recovery_required') {
+                    healthLabel = healthIsDetached
+                        ? 'Không có CDP (detached)'
+                        : 'Cần khởi chạy lại';
+                }
+                const healthHint = healthState === 'degraded' || healthState === 'recovery_required'
+                    ? (healthIsDetached
+                        ? 'Phiên detached — dừng rồi mở lại từ dashboard để có CDP.'
+                        : 'Dừng rồi khởi chạy lại profile.')
+                    : '';
+
                 // P2-06: Nhãn phân định Target OS Assurance
                 const osBadge = p.fingerprint.os === 'windows'
                     ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30" title="Host-Native Windows: Độ tin cậy tối đa, đồng nhất phần cứng và driver">Native</span>'
@@ -686,16 +711,35 @@
                     </td>
 
                     <td class="py-3 px-4">
-                        ${isRunning ? `
+                        ${!isRunning ? `
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-700/30 text-slate-400 border border-slate-700">
+                                Đã dừng
+                            </span>
+                        ` : healthState === 'healthy' ? `
                             <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                                 <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse mr-1.5"></span>
                                 Port: ${escapeHtml(p.port || 'CDP')}
                             </span>
                             ${runtimeLine}
-                        ` : `
-                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-700/30 text-slate-400 border border-slate-700">
-                                Đã dừng
+                        ` : healthState === 'starting' ? `
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse mr-1.5"></span>
+                                CDP đang khởi tạo
                             </span>
+                            <div class="text-[10px] text-slate-500 mt-0.5">Chrome đã mở, đang chờ xác minh CDP…</div>
+                            ${runtimeLine}
+                        ` : healthState === 'stopping' ? `
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-600/20 text-slate-300 border border-slate-600">
+                                Đang dừng…
+                            </span>
+                        ` : `
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-red-500/10 text-red-400 border border-red-500/25">
+                                <span class="w-1.5 h-1.5 rounded-full bg-red-400 mr-1.5"></span>
+                                Chrome đang mở · ${healthLabel}
+                            </span>
+                            ${healthReason ? `<div class="text-[10px] text-red-300/80 font-mono mt-0.5" title="${healthReasonText}">${healthReasonText}${healthCheckedText ? ' · ' + healthCheckedText : ''}</div>` : ''}
+                            ${healthHint ? `<div class="text-[10px] text-slate-500 mt-0.5">${healthHint}</div>` : ''}
+                            ${runtimeLine}
                         `}
                     </td>
 
@@ -733,7 +777,7 @@
                                 <i data-lucide="flag" class="w-4 h-4"></i>
                             </button>
 
-                            <button onclick="duplicateProfile('${safeId}')" title="Nhân bản" class="p-1 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition">
+                            <button onclick="duplicateProfile('${safeId}')" data-duplicate-id="${safeId}" title="Nhân bản" class="p-1 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition">
                                 <i data-lucide="copy" class="w-4 h-4"></i>
                             </button>
 
@@ -1011,19 +1055,63 @@
             }
         }
 
+        // Giữ Idempotency-Key khi lỗi mạng để bấm lại không tạo bản sao thứ hai.
+        const pendingDuplicateKeys = new Map();
+        const duplicateErrorMessages = {
+            SOURCE_RUNNING: 'Hãy đóng profile trước khi sao chép dữ liệu phiên.',
+            PROFILE_BUSY: 'Profile đang được thao tác ở nơi khác. Hãy thử lại sau.',
+            COPY_NO_SPACE: 'Không đủ dung lượng đĩa để sao chép dữ liệu phiên.',
+            COPY_OPERATION_CONFLICT: 'Mã thao tác đã được dùng cho profile khác.',
+            CLEANUP_PENDING: 'Bản sao chưa hoàn tất và chưa dọn được dữ liệu dở dang.',
+            COMMIT_FAILED: 'Chưa công bố được bản sao. Profile nguồn không bị thay đổi.',
+            COPY_FAILED: 'Sao chép dữ liệu phiên thất bại. Profile nguồn không bị thay đổi.',
+        };
+
         async function duplicateProfile(id) {
             const copyData = confirm('Bạn có muốn sao chép toàn bộ phiên đăng nhập (Cookies, Session) sang bản sao mới không?\n- Bấm OK: Sao chép cả dữ liệu phiên đăng nhập\n- Bấm Cancel: Chỉ nhân bản cấu hình dấu vân tay');
+            let operationKey = pendingDuplicateKeys.get(id);
+            if (!operationKey) {
+                operationKey = (window.crypto && crypto.randomUUID)
+                    ? 'dup-' + crypto.randomUUID().replace(/-/g, '')
+                    : 'dup-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+                pendingDuplicateKeys.set(id, operationKey);
+            }
+            const buttons = Array.from(document.querySelectorAll(`[data-duplicate-id="${id}"]`));
+            buttons.forEach(btn => {
+                btn.disabled = true;
+                btn.classList.add('opacity-50', 'pointer-events-none');
+            });
+            const url = `/api/profiles/${encodeURIComponent(id)}/duplicate?copy_data=${copyData ? 'true' : 'false'}`;
             try {
-                const res = await fetch(`/api/profiles/${id}/duplicate?copy_data=${copyData ? 'true' : 'false'}`, { method: 'POST' });
-                const data = await res.json().catch(() => ({}));
-                if (res.ok) {
-                    showToast('Nhân bản profile thành công!', 'success');
-                    refreshProfiles();
-                } else {
-                    showToast(data.detail || 'Lỗi nhân bản profile', 'error');
+                let lastError = null;
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        const res = await fetch(url, {
+                            method: 'POST',
+                            headers: { 'Idempotency-Key': operationKey },
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        pendingDuplicateKeys.delete(id);
+                        if (res.ok) {
+                            showToast('Nhân bản profile thành công!', 'success');
+                            refreshProfiles();
+                        } else {
+                            showToast(
+                                duplicateErrorMessages[data.code] || data.detail || 'Lỗi nhân bản profile',
+                                'error'
+                            );
+                        }
+                        return;
+                    } catch (err) {
+                        lastError = err;
+                    }
                 }
-            } catch (err) {
-                showToast('Lỗi nhân bản: ' + err, 'error');
+                showToast('Lỗi mạng khi nhân bản; bấm lại để thử tiếp cùng thao tác. ' + lastError, 'error');
+            } finally {
+                buttons.forEach(btn => {
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50', 'pointer-events-none');
+                });
             }
         }
 
@@ -1890,6 +1978,27 @@
             await loadFanpages(true, deep);
         }
 
+        async function clearFanpageCache() {
+            const id = document.getElementById('fanpages-profile-id').value;
+            if (!id) return;
+            if (!confirm('Xóa toàn bộ cache fanpage của profile này? Thao tác không thể hoàn tác.')) return;
+            const listEl = document.getElementById('fanpages-list');
+            const metaEl = document.getElementById('fanpages-meta');
+            try {
+                const res = await fetch(`/api/profiles/${id}/facebook/pages`, { method: 'DELETE' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    showToast(data.detail || 'Không xóa được cache fanpage.', 'warning');
+                    return;
+                }
+                listEl.innerHTML = '';
+                metaEl.innerText = data.detail || 'Đã xóa cache fanpage.';
+                showToast(data.detail || 'Đã xóa cache fanpage.', 'success');
+            } catch (e) {
+                showToast('Lỗi kết nối: ' + e, 'error');
+            }
+        }
+
         async function loadFanpages(refresh, deep) {
             const id = document.getElementById('fanpages-profile-id').value;
             if (!id) return;
@@ -1903,12 +2012,16 @@
                 const res = await fetch(`/api/profiles/${id}/facebook/pages${qs}`);
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) {
-                    listEl.innerHTML = '';
-                    metaEl.innerText = 'Không tải được danh sách';
+                    metaEl.innerText = 'Không tải được danh sách — vẫn hiển thị dữ liệu cũ';
+                    if (!listEl.children.length) {
+                        listEl.innerHTML = `<div class="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3.5 py-2.5">${escapeHtml(data.detail || 'Không tải được danh sách fanpage.')}</div>`;
+                    }
                     showToast(data.detail || 'Không tải được danh sách fanpage.', 'warning');
                     return;
                 }
-                if (!data.logged_in) {
+                // Cache khi profile đóng không xác minh phiên đăng nhập:
+                // login_status="unknown" phải giữ danh sách, chỉ false mới xóa.
+                if (data.login_status === false) {
                     listEl.innerHTML = '';
                     metaEl.innerText = 'Chưa đăng nhập Facebook';
                     showToast(data.detail || 'Profile chưa đăng nhập Facebook.', 'warning');
@@ -1916,8 +2029,25 @@
                 }
                 const pages = data.pages || [];
                 const when = data.synced_at ? new Date(data.synced_at * 1000).toLocaleString('vi-VN') : '';
+                const scanStatus = ['complete', 'partial', 'failed'].includes(data.discovery_status)
+                    ? data.discovery_status : 'unknown';
+                const statusLabel = {
+                    complete: 'đã xác nhận đầy đủ',
+                    partial: 'chưa xác nhận đầy đủ',
+                    failed: 'lượt quét lỗi',
+                    unknown: 'chưa có lượt quét đầy đủ'
+                }[scanStatus];
+                const observed = Number.isFinite(data.observed_count) ? data.observed_count : null;
+                const retained = Number.isFinite(data.retained_count) ? data.retained_count : null;
+                const scanBits = [];
+                if (observed != null) scanBits.push(`đọc ${observed} page trong lượt này`);
+                if (retained) scanBits.push(`giữ ${retained} page từ cache`);
+                scanBits.push(statusLabel);
+                const flags = [data.source === 'live' ? 'đọc trực tiếp' : 'đã lưu'];
+                if (data.login_status === 'unknown') flags.push('chưa kiểm tra đăng nhập');
+                if (data.stale) flags.push('dữ liệu cũ, cần đồng bộ');
                 metaEl.innerText = pages.length
-                    ? `${pages.length} fanpage · ${data.stale ? 'giữ dữ liệu cũ' : (data.source === 'live' ? 'đọc trực tiếp' : 'đã lưu')}${when ? ' · ' + when : ''}`
+                    ? `${pages.length} fanpage trong cache · ${scanBits.join(' · ')} · ${flags.join(' · ')}${when ? ' · đồng bộ ' + when : ''}`
                     : (data.detail || 'Chưa có fanpage nào được ghi nhận');
 
                 const ageText = (pg) => {
@@ -1926,46 +2056,111 @@
                     if (pg.age_days >= 30) return `${Math.floor(pg.age_days / 30)} tháng ${pg.age_days % 30} ngày`;
                     return `${pg.age_days} ngày`;
                 };
+                const durationText = (ms) => {
+                    if (!Number.isFinite(ms)) return null;
+                    if (ms < 60 * 1000) return 'vừa xong';
+                    const mins = Math.floor(ms / 60000);
+                    if (mins < 60) return `${mins} phút trước`;
+                    const hours = Math.floor(mins / 60);
+                    if (hours < 24) return `${hours} giờ trước`;
+                    return `${Math.floor(hours / 24)} ngày trước`;
+                };
+                const postAgeText = (pg) => {
+                    const minTs = pg.last_post_at_min ? new Date(pg.last_post_at_min) : null;
+                    const maxTs = pg.last_post_at_max ? new Date(pg.last_post_at_max) : null;
+                    if (minTs && maxTs && !Number.isNaN(minTs.getTime()) && !Number.isNaN(maxTs.getTime())) {
+                        const now = Date.now();
+                        const youngest = durationText(Math.max(0, now - maxTs.getTime()));
+                        const oldest = durationText(Math.max(0, now - minTs.getTime()));
+                        if (!youngest || !oldest) return null;
+                        return youngest === oldest ? youngest : `khoảng ${youngest}–${oldest}`;
+                    }
+                    if (pg.last_post_age_min_days != null && pg.last_post_age_max_days != null) {
+                        const a = `${pg.last_post_age_min_days} ngày trước`;
+                        const b = `${pg.last_post_age_max_days} ngày trước`;
+                        return a === b ? a : `khoảng ${a}–${b}`;
+                    }
+                    return null;
+                };
+                const checkedText = (pg) => {
+                    const iso = pg.activity_checked_at || pg.last_post_observed_at;
+                    if (!iso) return '';
+                    const dt = new Date(iso);
+                    return Number.isNaN(dt.getTime()) ? '' : dt.toLocaleString('vi-VN');
+                };
                 const badgeStatus = (pg) => {
                     if (pg.status === 'active') return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">Đang đăng</span>';
-                    if (pg.status === 'stopped') return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-500/15 text-red-400 border border-red-500/30">Dừng</span>';
-                    if (pg.status === 'unknown') return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-500/15 text-slate-400 border border-slate-500/30">Không rõ</span>';
+                    if (pg.status === 'long_absent') return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-500/15 text-slate-300 border border-slate-500/30" title="Không thấy bài mới trong 7 ngày gần nhất">Lâu chưa thấy bài mới</span>';
+                    if (pg.status === 'uncertain') return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Khoảng thời gian ước lượng cắt qua ngưỡng 7 ngày">Chưa đủ chắc chắn</span>';
+                    if (pg.status === 'unknown') return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-500/15 text-slate-400 border border-slate-500/30">Chưa xác minh</span>';
                     return '<span class="px-1.5 py-0.5 rounded text-[10px] text-slate-500 border border-slate-600/50" title="Bấm Cập nhật chi tiết để biết trạng thái">Chưa quét</span>';
+                };
+                const badgeQuality = (pg) => {
+                    if (pg.activity_quality === 'incomplete') return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Feed chưa tải đủ hoặc chưa tìm thấy bài của page — bấm Cập nhật chi tiết">Chưa đủ phạm vi</span>';
+                    if (pg.activity_stale) return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Quan sát cũ hơn ngưỡng — bấm Cập nhật chi tiết">Dữ liệu cũ, cần đồng bộ</span>';
+                    if (pg.activity_quality === 'legacy' || pg.last_post_legacy) return '<span class="px-1.5 py-0.5 rounded text-[10px] text-slate-400 border border-slate-600/50" title="Dữ liệu cũ được quy đổi theo ngày quan sát">Ước lượng cũ</span>';
+                    if (pg.activity_quality === 'approximate') return '<span class="px-1.5 py-0.5 rounded text-[10px] text-slate-400 border border-slate-600/50" title="Nhãn tương đối nên thời gian là khoảng">Ước lượng</span>';
+                    return '';
                 };
                 const badgeReady = (pg) => pg.ready
                     ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30" title="Đã ngâm đủ 1 tháng tuổi">Sẵn sàng</span>'
                     : (pg.age_days != null
                         ? `<span class="px-1.5 py-0.5 rounded text-[10px] text-slate-400 border border-slate-600/50" title="Cần ngâm đủ 30 ngày">Chưa (${pg.age_days}/30 ngày)</span>`
                         : '');
+                const badgeNotSeen = (pg) => {
+                    if (!data.scan_id) return '';
+                    if (!['complete', 'partial'].includes(scanStatus)) return '';
+                    if (!pg.seen_in_scan_id || pg.seen_in_scan_id === data.scan_id) return '';
+                    const lastSeen = pg.last_seen_at
+                        ? new Date(pg.last_seen_at).toLocaleString('vi-VN') : '';
+                    return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Page còn trong cache nhưng không thấy trong lượt quét gần nhất">Chưa thấy lượt này${lastSeen ? ' · lần cuối ' + escapeHtml(lastSeen) : ''}</span>`;
+                };
+                const lastSeenText = (pg) => {
+                    if (!pg.last_seen_at) return '';
+                    const dt = new Date(pg.last_seen_at);
+                    return Number.isNaN(dt.getTime()) ? '' : dt.toLocaleString('vi-VN');
+                };
 
-                listEl.innerHTML = pages.map(pg => `
+                listEl.innerHTML = pages.map(pg => {
+                    const postAge = postAgeText(pg);
+                    const checked = checkedText(pg);
+                    return `
                     <div class="bg-slate-900/50 border border-borderBg rounded-xl px-3.5 py-2.5 space-y-1.5">
                         <div class="flex items-center justify-between gap-3">
-                            <div class="min-w-0 flex items-center gap-2">
+                            <div class="min-w-0 flex flex-wrap items-center gap-1.5">
                                 <span class="text-sm text-slate-200 font-medium truncate">${escapeHtml(pg.name || '(không tên)')}</span>
                                 ${badgeStatus(pg)}
+                                ${badgeQuality(pg)}
                                 ${badgeReady(pg)}
+                                ${badgeNotSeen(pg)}
                             </div>
                             <a href="${escapeHtml(safeHref(pg.url))}" target="_blank" rel="noopener noreferrer"
                                class="shrink-0 px-2.5 py-1 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white rounded-lg text-xs font-medium transition">Mở</a>
                         </div>
                         <div class="flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-slate-500">
                             <span>ID: ${escapeHtml(pg.id || '—')}</span>
-                            <span title="${escapeHtml(pg.created_raw || '')}">Tuổi: ${pg.created_date ? escapeHtml(ageText(pg)) : '—'}</span>
-                            <span>Bài cuối: ${escapeHtml(pg.last_post_raw || (pg.last_post_days != null ? pg.last_post_days + ' ngày' : '—'))}</span>
+                            <span title="${escapeHtml(pg.created_raw || '')}">Tuổi page: ${pg.created_date ? escapeHtml(ageText(pg)) : '—'}</span>
+                            <span>Bài đã ghi nhận: ${postAge ? escapeHtml(postAge) : '—'}</span>
+                            ${lastSeenText(pg) ? `<span>Thấy trong danh sách: ${escapeHtml(lastSeenText(pg))}</span>` : ''}
+                            ${checked ? `<span>Kiểm tra lần cuối: ${escapeHtml(checked)}</span>` : ''}
                         </div>
-                    </div>
-                `).join('');
+                    </div>`;
+                }).join('');
                 safeCreateIcons();
                 if (refresh) {
-                    if (data.stale) {
-                        showToast(data.detail || 'Facebook trả về 0 fanpage — đang giữ dữ liệu cũ.', 'warning');
+                    if (data.stale || scanStatus === 'partial' || scanStatus === 'failed') {
+                        showToast(data.detail || 'Dữ liệu cũ — cần đồng bộ lại fanpage.', 'warning');
                     } else {
-                        showToast(deep ? 'Đã cập nhật chi tiết fanpage.' : `Đã làm mới: ${pages.length} fanpage.`, 'success');
+                        showToast(
+                            data.detail || (deep
+                                ? 'Đã cập nhật chi tiết fanpage.'
+                                : `Đã làm mới: ${pages.length} fanpage.`),
+                            'success'
+                        );
                     }
                 }
             } catch (e) {
-                metaEl.innerText = 'Lỗi kết nối máy chủ';
+                metaEl.innerText = 'Lỗi kết nối máy chủ — vẫn hiển thị dữ liệu cũ';
                 showToast('Lỗi kết nối: ' + e, 'error');
             }
         }

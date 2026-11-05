@@ -63,10 +63,21 @@ def action_start(manager: ProfileManager, launcher: BrowserLauncher, profile_id:
         clean_url = "https://" + clean_url
 
     if launcher.is_running(profile_id):
+        guard = launcher.cdp_guard(profile_id, running=True)
+        if not guard["ok"]:
+            return {
+                "success": False,
+                "already_running": True,
+                "code": guard["code"],
+                "error": guard["message"],
+                "cdp_health": guard["health"],
+                "recovery_required": guard["code"]
+                in ("RECOVERY_REQUIRED", "DETACHED_NO_CDP"),
+            }
         if clean_url:
             success = launcher.open_tab(profile_id, clean_url)
             return {
-                "success": True,
+                "success": success,
                 "already_running": True,
                 "tab_opened": success,
                 "port": launcher.active_ports.get(profile_id),

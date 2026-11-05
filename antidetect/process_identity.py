@@ -105,3 +105,61 @@ def read_browser_identity(pid, user_data_dir):
                          'created': str(record.get('CreationDate', ''))})
     except Exception:
         return {'state': 'unknown'}
+
+
+def browser_pids_using_dir(user_data_dir, exclude_pids=None):
+    """Best-effort Chromium PIDs whose --user-data-dir matches ``user_data_dir``.
+
+    Returns None when the process table cannot be queried (callers must not
+    treat that as proof the directory is free). Never terminates anything.
+    """
+    if sys.platform != 'win32' or not user_data_dir:
+        return set()
+    try:
+        command = (
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+            "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR "
+            "Name='msedge.exe' OR Name='chromium.exe'\" -ErrorAction Stop | "
+            "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+        )
+        result = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=8, creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if result.returncode:
+            return None
+        payload = json.loads(result.stdout) if result.stdout.strip() else []
+        if isinstance(payload, dict):
+            payload = [payload]
+        if not isinstance(payload, list):
+            return None
+        expected = os.path.normcase(os.path.realpath(user_data_dir))
+        excluded = {int(pid) for pid in (exclude_pids or [])}
+        pids = set()
+        for record in payload:
+            if not isinstance(record, dict):
+                continue
+            try:
+                pid = int(record.get('ProcessId'))
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0 or pid in excluded:
+                continue
+            command_line = record.get('CommandLine') or ''
+            if not command_line:
+                continue
+            try:
+                args = windows_argv(command_line)
+            except Exception:
+                continue
+            actual = ''
+            for arg in args:
+                if arg.startswith('--user-data-dir='):
+                    actual = arg.split('=', 1)[1]
+                    break
+            if actual and os.path.normcase(os.path.realpath(actual)) == expected:
+                pids.add(pid)
+        return pids
+    except Exception:
+        return None

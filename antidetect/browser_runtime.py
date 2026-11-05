@@ -112,6 +112,52 @@ class BrowserRuntimeStore:
             self._write()
             return dict(record)
 
+    def upsert_if_owner(
+        self,
+        profile_id: str,
+        *,
+        launch_id: Optional[str] = None,
+        pid: Optional[int] = None,
+        owner_instance: Optional[str] = None,
+        **fields: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Update a record only if it still belongs to the expected launch.
+
+        A late callback from an old CDP session must not overwrite the record
+        of a newer launch. Returns None when the ownership precondition fails
+        or the record no longer exists.
+        """
+        if launch_id is None and pid is None:
+            raise ValueError("upsert_if_owner requires launch_id and/or pid")
+        with self._lock, self._ipc_lock:
+            self._load()
+            key = str(profile_id)
+            record = self._states.get(key)
+            if not record:
+                return None
+            if launch_id is not None and str(record.get("launch_id") or "") != str(
+                launch_id
+            ):
+                return None
+            if pid is not None:
+                try:
+                    actual_pid = int(record.get("pid") or 0)
+                except (TypeError, ValueError):
+                    actual_pid = 0
+                if actual_pid != int(pid):
+                    return None
+            if owner_instance is not None and str(
+                record.get("owner_instance") or ""
+            ) != str(owner_instance):
+                return None
+            merged = dict(record)
+            merged.update(fields)
+            merged["profile_id"] = key
+            merged["updated_at"] = int(time.time())
+            self._states[key] = merged
+            self._write()
+            return dict(merged)
+
     def remove(self, profile_id: str) -> None:
         with self._lock, self._ipc_lock:
             self._load()  # Không xóa record process khác đã ghi thêm.

@@ -448,6 +448,7 @@ def test_facebook_pages_endpoint(monkeypatch):
         assert r.status_code == 200
         body = r.json()
         assert body["source"] == "cache" and body["pages"] == []
+        assert body["login_status"] == "unknown" and body["logged_in"] is None
         assert body["detail"]
 
         # 2. Idle + refresh → 409 (cần profile đang chạy).
@@ -472,6 +473,7 @@ def test_facebook_pages_endpoint(monkeypatch):
         assert r.status_code == 200
         body = r.json()
         assert body["success"] and body["source"] == "live"
+        assert body["login_status"] is True and body["logged_in"] is True
         # Endpoint enrich thêm status/ready/age_days cho từng page.
         for orig, got in zip(fake_pages, body["pages"]):
             assert all(got.get(k) == v for k, v in orig.items())
@@ -485,6 +487,7 @@ def test_facebook_pages_endpoint(monkeypatch):
         r = client.get(f"/api/profiles/{p['id']}/facebook/pages")
         body = r.json()
         assert body["source"] == "cache"
+        assert body["login_status"] == "unknown" and body["logged_in"] is None
         for orig, got in zip(fake_pages, body["pages"]):
             assert all(got.get(k) == v for k, v in orig.items())
 
@@ -502,6 +505,7 @@ def test_facebook_pages_endpoint(monkeypatch):
         assert r.status_code == 200
         body = r.json()
         assert body["logged_in"] is False and body["pages"] == []
+        assert body["login_status"] is False
         assert "đăng nhập" in body["detail"]
     finally:
         client.delete(f"/api/profiles/{p['id']}")
@@ -561,6 +565,7 @@ def test_facebook_pages_ui_and_scraper_present():
     assert "fanpagesModal" in html
     assert "openFanpagesModal" in dashboard_js
     assert "refreshFanpages" in dashboard_js
+    assert "clearFanpageCache" in dashboard_js and "Xóa cache" in html
 
     src = open(
         os.path.join(root, "antidetect", "launcher.py"), encoding="utf-8"
@@ -776,6 +781,209 @@ def test_fanpage_refresh_keeps_cache_when_live_result_empty():
             assert data2["stale"] is False
             assert data2["pages"] == []
         assert app_module.profile_manager.get_profile(profile.id).facebook_pages == []
+    finally:
+        app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_fanpage_partial_scan_keeps_cache_and_reports_counts(monkeypatch):
+    """F4: partial chỉ cập nhật page thấy lại, giữ page vắng mặt + chi tiết cũ."""
+    login()
+    profile = app_module.profile_manager.create_profile(name="Fanpage Partial Test")
+    kept = {
+        "name": "Kept Page",
+        "url": "https://www.facebook.com/keptpage",
+        "id": "555555",
+        "created_date": "2020-01-01",
+        "detail_synced": True,
+    }
+    seen_before = {
+        "name": "Seen Before",
+        "url": "https://www.facebook.com/seenbefore",
+        "id": "666666",
+    }
+    profile.facebook_pages = [seen_before, kept]
+    profile.facebook_pages_synced_at = 1700000000
+    app_module.profile_manager.update_profile(profile)
+    try:
+        monkeypatch.setattr(
+            app_module.launcher, "is_running", lambda pid: True, raising=False
+        )
+        monkeypatch.setattr(
+            app_module.launcher,
+            "fetch_facebook_pages",
+            lambda pid, timeout=90.0, deep=False: {
+                "logged_in": True,
+                "pages": [
+                    {
+                        "name": "Seen Before Renamed",
+                        "url": "https://www.facebook.com/seenbefore",
+                        "id": "666666",
+                    }
+                ],
+            },
+            raising=False,
+        )
+        r = client.get(f"/api/profiles/{profile.id}/facebook/pages?refresh=1")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["discovery_status"] == "partial"
+        assert body["completion_reason"] == "NO_END_SIGNAL"
+        assert body["observed_count"] == 1
+        assert body["retained_count"] == 1
+        assert body["scan_id"] and body["collector_version"]
+        assert len(body["pages"]) == 2
+        kept_after = next(p for p in body["pages"] if p["id"] == "555555")
+        assert kept_after["created_date"] == "2020-01-01"
+        assert kept_after["detail_synced"] is True
+        assert kept_after.get("seen_in_scan_id") != body["scan_id"]
+        seen_after = next(p for p in body["pages"] if p["id"] == "666666")
+        assert seen_after["name"] == "Seen Before Renamed"
+        assert seen_after["seen_in_scan_id"] == body["scan_id"]
+        assert "Đã đọc 1 page trong lượt này" in body["detail"]
+        assert "còn giữ 1 page từ cache" in body["detail"]
+
+        # Cache (không refresh) vẫn báo đúng trạng thái lượt quét gần nhất.
+        monkeypatch.setattr(
+            app_module.launcher, "is_running", lambda pid: False, raising=False
+        )
+        cache = client.get(f"/api/profiles/{profile.id}/facebook/pages").json()
+        assert cache["source"] == "cache"
+        assert cache["login_status"] == "unknown"
+        assert cache["discovery_status"] == "partial"
+        assert cache["observed_count"] == 1 and cache["retained_count"] == 1
+    finally:
+        app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_fanpage_identity_mismatch_keeps_cache(monkeypatch):
+    login()
+    profile = app_module.profile_manager.create_profile(name="Fanpage Identity Test")
+    profile.facebook_pages = [{
+        "name": "Cached Page",
+        "url": "https://www.facebook.com/cachedpage",
+        "id": "888888",
+    }]
+    app_module.profile_manager.update_profile(profile)
+    try:
+        monkeypatch.setattr(
+            app_module.launcher, "is_running", lambda pid: True, raising=False
+        )
+        monkeypatch.setattr(
+            app_module.launcher,
+            "fetch_facebook_pages",
+            lambda pid, timeout=90.0, deep=False: {
+                "logged_in": True,
+                "pages": [],
+                "discovery_status": "failed",
+                "completion_reason": "LOGIN_IDENTITY_MISMATCH",
+                "stability": "stable",
+                "observed_count": 0,
+                "retained_count": None,
+                "total_pages_in_source": None,
+                "started_at": "2026-11-05T09:59:00Z",
+                "finished_at": "2026-11-05T10:00:00Z",
+                "login_status": True,
+                "identity_status": "verified",
+                "account_id_observed": "999999",
+                "collector_version": "f4-test",
+                "scan_id": "scan-mismatch",
+            },
+            raising=False,
+        )
+        r = client.get(f"/api/profiles/{profile.id}/facebook/pages?refresh=1")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["discovery_status"] == "failed"
+        assert body["completion_reason"] == "LOGIN_IDENTITY_MISMATCH"
+        assert [p["id"] for p in body["pages"]] == ["888888"]
+        assert body["stale"] is True
+        assert "khác lần quét trước" in body["detail"]
+    finally:
+        app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_fanpage_complete_empty_never_deletes_cache(monkeypatch):
+    login()
+    profile = app_module.profile_manager.create_profile(name="Fanpage Empty Proof")
+    profile.facebook_pages = [{
+        "name": "History Page",
+        "url": "https://www.facebook.com/historypage",
+        "id": "999999",
+    }]
+    app_module.profile_manager.update_profile(profile)
+    try:
+        monkeypatch.setattr(
+            app_module.launcher, "is_running", lambda pid: True, raising=False
+        )
+        monkeypatch.setattr(
+            app_module.launcher,
+            "fetch_facebook_pages",
+            lambda pid, timeout=90.0, deep=False: {
+                "logged_in": True,
+                "pages": [],
+                "discovery_status": "complete",
+                "completion_reason": "EMPTY_CONFIRMED",
+                "stability": "stable",
+                "observed_count": 0,
+                "retained_count": None,
+                "total_pages_in_source": 0,
+                "started_at": "2026-11-05T09:59:00Z",
+                "finished_at": "2026-11-05T10:00:00Z",
+                "login_status": True,
+                "identity_status": "unknown",
+                "account_id_observed": None,
+                "collector_version": "f4-test",
+                "scan_id": "scan-empty",
+            },
+            raising=False,
+        )
+        r = client.get(f"/api/profiles/{profile.id}/facebook/pages?refresh=1")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["discovery_status"] == "complete"
+        assert [p["id"] for p in body["pages"]] == ["999999"]
+        assert "Xóa cache" in body["detail"]
+        saved = app_module.profile_manager.get_profile(profile.id)
+        assert [p["id"] for p in saved.facebook_pages] == ["999999"]
+    finally:
+        app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_delete_fanpage_cache_endpoint(monkeypatch):
+    """Xóa cache là hành động riêng, không xảy ra khi refresh thông thường."""
+    login()
+    profile = app_module.profile_manager.create_profile(name="Fanpage Clear Test")
+    profile.facebook_pages = [{
+        "name": "Old Page",
+        "url": "https://www.facebook.com/oldpage",
+        "id": "777777",
+    }]
+    app_module.profile_manager.update_profile(profile)
+    try:
+        r = client.delete(f"/api/profiles/{profile.id}/facebook/pages")
+        assert r.status_code == 200, r.text
+        assert r.json()["pages"] == []
+        assert app_module.profile_manager.get_profile(profile.id).facebook_pages == []
+        assert client.delete(
+            "/api/profiles/does-not-exist/facebook/pages"
+        ).status_code == 404
+    finally:
+        app_module.profile_manager.delete_profile(profile.id)
+
+
+def test_fanpage_scan_conflict_when_another_scan_runs(monkeypatch):
+    login()
+    profile = app_module.profile_manager.create_profile(name="Fanpage Busy Test")
+    try:
+        monkeypatch.setattr(
+            app_module.launcher, "is_running", lambda pid: True, raising=False
+        )
+        with app_module.profile_manager.scan_lock(profile.id, timeout=0.5):
+            r = client.get(
+                f"/api/profiles/{profile.id}/facebook/pages?refresh=1"
+            )
+        assert r.status_code == 409, r.text
+        assert "lượt quét" in r.json()["detail"]
     finally:
         app_module.profile_manager.delete_profile(profile.id)
 

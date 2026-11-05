@@ -3,6 +3,7 @@ import re
 import sys
 import json
 import time
+import uuid
 import datetime
 import socket
 import shutil
@@ -16,8 +17,36 @@ from typing import Optional, Dict, Any, List, Set
 from .models import Profile
 from .storage import ProfileManager, DATA_DIR, PROFILES_DATA_DIR
 from .browser_runtime import BrowserRuntimeStore
+from .cdp_health import (
+    HEARTBEAT_INTERVAL_SECONDS,
+    HEARTBEAT_TIMEOUT_SECONDS,
+    REASON_DETACHED_OWNER_EXITED,
+    REASON_HANDSHAKE_FAILED,
+    REASON_HEARTBEAT_TIMEOUT,
+    REASON_LEGACY_OWNERSHIP,
+    REASON_OWNER_UNKNOWN,
+    REASON_OWNED_BY_OTHER_INSTANCE,
+    REASON_READER_TIMEOUT,
+    REASON_RUNTIME_PERSIST_FAILED,
+    REASON_SERVER_RESTART,
+    REASON_SOCKET_CLOSED,
+    REASON_SOCKET_SEND_FAILED,
+    REASON_STOP_FAILED,
+    REASON_TARGET_CONFIG_FAILED,
+    REASON_USER_STOP,
+    REASON_VERIFICATION_FAILED,
+    STATE_DEGRADED,
+    STATE_HEALTHY,
+    STATE_RECOVERY_REQUIRED,
+    STATE_STARTING,
+    STATE_STOPPED,
+    STATE_STOPPING,
+    CdpHealthRegistry,
+    CdpUnavailable,
+)
 from .stealth import get_stealth_script, get_worker_stealth_script, get_webgl_limits
-from .process_identity import read_browser_identity
+from .process_identity import browser_pids_using_dir, read_browser_identity
+from .profile_locks import ProfileLockTimeout, ProfileLocks
 from .applog import get_logger
 from . import metrics
 from .fingerprint import (
@@ -34,6 +63,7 @@ from .browser_env import (
 )
 from .cookies import fetch_cookies_cdp, normalize_cookies, set_cookies_cdp
 from .facebook import (
+    ScanAborted,
     classify_facebook_page,
     fb_unit_to_days as _fb_unit_to_days,
     fetch_pages_cdp,
@@ -120,9 +150,19 @@ class BrowserLauncher:
         self._requested_ports: Dict[str, int] = {}
         self._proxy_credentials: Dict[str, tuple] = {}
         self._recovery_required: Set[str] = set()
+        # Each launcher instance is a distinct CDP owner. A record written
+        # by another instance cannot be trusted as a controllable channel.
+        self.instance_id = f"launcher:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._runtime_store = BrowserRuntimeStore(
             os.path.join(DATA_DIR, "browser_runtime.json")
         )
+        self.cdp_health = CdpHealthRegistry(on_change=self._queue_health_change)
+        self._health_persist_cond = threading.Condition(threading.Lock())
+        self._health_persist_pending: Dict[str, tuple] = {}
+        self._health_persist_thread: Optional[threading.Thread] = None
+        self._health_persist_stop = False
+        self._health_persist_last: Dict[str, float] = {}
+        self._health_persist_warned: Set[str] = set()
         try:
             self.browser_path = find_browser_executable()
         except FileNotFoundError:
@@ -131,6 +171,8 @@ class BrowserLauncher:
             self.browser_path = None
         # C12: Lock per-profile để tránh 2 luồng launch/stop cùng profile
         self._launch_locks = collections.defaultdict(threading.RLock)
+        # QĐ-6: lifecycle lock dùng chung với copy/delete ở process khác.
+        self._lifecycle_locks = ProfileLocks(DATA_DIR)
         # H5: Event để CDP thread báo hiệu đã inject stealth thành công
         self._cdp_ready_events: Dict[str, threading.Event] = {}
         # R4: page configuration is split into two phases. The CDP thread
@@ -175,6 +217,275 @@ class BrowserLauncher:
             except Exception:
                 pass
 
+    # ------------------------------------------------------------------
+    # CDP health plumbing
+    # ------------------------------------------------------------------
+    def _queue_health_change(self, profile_id, launch_id, snapshot, event):
+        """Coalesce health writes off the CDP thread.
+
+        State transitions are persisted promptly; heartbeats are throttled to
+        one write per 30s per profile so a 10s heartbeat cannot fsync forever.
+        """
+        if not launch_id:
+            return
+        with self._health_persist_cond:
+            if event == "heartbeat":
+                last = self._health_persist_last.get(str(profile_id), 0.0)
+                if time.monotonic() - last < 30.0:
+                    return
+            self._health_persist_pending[str(profile_id)] = (
+                launch_id,
+                snapshot,
+                event,
+            )
+            if (
+                self._health_persist_thread is None
+                or not self._health_persist_thread.is_alive()
+            ):
+                self._health_persist_thread = threading.Thread(
+                    target=self._health_persist_loop,
+                    name="cdp-health-persist",
+                    daemon=True,
+                )
+                self._health_persist_thread.start()
+            self._health_persist_cond.notify_all()
+
+    def _health_persist_loop(self):
+        while True:
+            with self._health_persist_cond:
+                while not self._health_persist_pending and not self._health_persist_stop:
+                    self._health_persist_cond.wait(timeout=5.0)
+                if self._health_persist_stop:
+                    return
+                items = list(self._health_persist_pending.items())
+                self._health_persist_pending.clear()
+            for profile_id, (launch_id, snapshot, _event) in items:
+                self._persist_health_now(profile_id, launch_id, snapshot)
+                with self._health_persist_cond:
+                    self._health_persist_last[profile_id] = time.monotonic()
+
+    def _persist_health_now(
+        self,
+        profile_id: str,
+        launch_id: Optional[str],
+        snapshot: Dict[str, Any],
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if not launch_id or not snapshot:
+            return False
+        if snapshot.get("state") == STATE_STOPPED:
+            return False
+        owner = snapshot.get("owner_instance")
+        if owner and owner != self.instance_id:
+            # Never write into another launcher instance's record.
+            return False
+        fields = {
+            "cdp_health": {
+                key: snapshot.get(key)
+                for key in (
+                    "launch_id",
+                    "owner_instance",
+                    "pid",
+                    "state",
+                    "reason",
+                    "verified_at",
+                    "last_heartbeat_at",
+                    "changed_at",
+                    "checked_at",
+                    "restart_required",
+                )
+            }
+        }
+        if extra:
+            fields.update(extra)
+        try:
+            self._runtime_store.upsert_if_owner(
+                str(profile_id),
+                launch_id=launch_id,
+                pid=snapshot.get("pid"),
+                owner_instance=self.instance_id,
+                **fields,
+            )
+            return True
+        except Exception as exc:
+            key = f"{profile_id}:{type(exc).__name__}"
+            if key not in self._health_persist_warned:
+                self._health_persist_warned.add(key)
+                log.warning(
+                    "[Launcher] Không ghi được cdp_health vào runtime: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            return False
+
+    def _cdp_process_alive(self, profile_id: str) -> bool:
+        """Liveness check safe to call from the CDP thread (no metadata I/O)."""
+        proc = self.active_processes.get(str(profile_id))
+        return bool(proc and proc.poll() is None)
+
+    def cdp_health_snapshot(
+        self, profile_id: str, running: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        if running is None:
+            running = self.is_running(profile_id)
+        if not running:
+            snapshot = self.cdp_health.snapshot(profile_id)
+            if snapshot.get("state") in (
+                STATE_STARTING,
+                STATE_HEALTHY,
+                STATE_DEGRADED,
+                STATE_RECOVERY_REQUIRED,
+                STATE_STOPPING,
+            ):
+                self.cdp_health.mark_stopped(profile_id)
+                snapshot = self.cdp_health.snapshot(profile_id)
+            return snapshot
+        snapshot = self.cdp_health.snapshot(profile_id)
+        if snapshot.get("state") == STATE_STOPPED:
+            record = self._runtime_store.get(profile_id) or {}
+            launch_id = record.get("launch_id")
+            reason = (
+                REASON_OWNER_UNKNOWN if launch_id else REASON_LEGACY_OWNERSHIP
+            )
+            self._recovery_required.add(str(profile_id))
+            self.cdp_health.mark_recovery_required(
+                str(profile_id),
+                reason,
+                owner_instance=self.instance_id,
+                pid=record.get("pid"),
+                launch_id=launch_id,
+            )
+            snapshot = self.cdp_health.snapshot(profile_id)
+        return snapshot
+
+    def cdp_guard(
+        self, profile_id: str, *, running: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        """Single guard for every CDP-dependent operation."""
+        if running is None:
+            running = self.is_running(profile_id)
+        if not running:
+            return {
+                "ok": False,
+                "code": "NOT_RUNNING",
+                "message": "Profile chưa chạy.",
+                "health": self.cdp_health_snapshot(profile_id, running=False),
+            }
+        snapshot = self.cdp_health_snapshot(profile_id, running=True)
+        state = snapshot.get("state")
+        if state == STATE_HEALTHY and snapshot.get("owner_instance") == self.instance_id:
+            self._recovery_required.discard(str(profile_id))
+            return {"ok": True, "code": None, "message": "", "health": snapshot}
+        if state == STATE_RECOVERY_REQUIRED or profile_id in self._recovery_required:
+            if snapshot.get("reason") == REASON_DETACHED_OWNER_EXITED:
+                code = "DETACHED_NO_CDP"
+                message = (
+                    "Chrome đang mở nhưng chạy detached nên không có CDP. "
+                    "Hãy dừng profile rồi mở lại từ server để dùng thao tác này."
+                )
+            else:
+                code = "RECOVERY_REQUIRED"
+                message = (
+                    "CDP của phiên này chưa được xác minh quyền điều khiển. "
+                    "Hãy dừng profile rồi khởi chạy lại."
+                )
+            return {"ok": False, "code": code, "message": message, "health": snapshot}
+        if state == STATE_STARTING:
+            return {
+                "ok": False,
+                "code": "CDP_STARTING",
+                "message": "CDP đang khởi tạo; hãy thử lại sau vài giây.",
+                "health": snapshot,
+            }
+        if state == STATE_HEALTHY:
+            self._recovery_required.add(str(profile_id))
+            return {
+                "ok": False,
+                "code": "RECOVERY_REQUIRED",
+                "message": (
+                    "Chrome đang được điều khiển bởi một tiến trình khác. "
+                    "Hãy dừng profile rồi mở lại từ tiến trình hiện tại."
+                ),
+                "health": snapshot,
+            }
+        detail = snapshot.get("reason") or state
+        return {
+            "ok": False,
+            "code": "CDP_UNHEALTHY",
+            "message": (
+                f"Chrome đang mở nhưng CDP không khỏe ({detail}). "
+                "Hãy dừng rồi khởi chạy lại profile."
+            ),
+            "health": snapshot,
+        }
+
+    def require_cdp(self, profile_id: str) -> Dict[str, Any]:
+        guard = self.cdp_guard(profile_id)
+        if not guard["ok"]:
+            raise CdpUnavailable(guard["code"], guard["message"], guard["health"])
+        return guard["health"]
+
+    def _running_launch_result(
+        self, profile_id: str, open_url: Optional[str] = None
+    ) -> Dict[str, Any]:
+        guard = self.cdp_guard(profile_id, running=True)
+        if not guard["ok"]:
+            result = {
+                "success": False,
+                "code": guard["code"],
+                "error": guard["message"],
+                "cdp_health": guard["health"],
+                "launched_now": False,
+            }
+            if guard["code"] in ("RECOVERY_REQUIRED", "DETACHED_NO_CDP"):
+                result["recovery_required"] = True
+            return result
+        port = self.active_ports.get(profile_id)
+        if open_url:
+            if not self._open_tab_impl(profile_id, open_url):
+                return {
+                    "success": False,
+                    "code": "CDP_UNHEALTHY",
+                    "error": "Chrome đang chạy nhưng không thể mở tab mới.",
+                    "cdp_health": guard["health"],
+                    "launched_now": False,
+                }
+            return {
+                "success": True,
+                "message": "Profile đang chạy, đã mở trong tab mới",
+                "port": port,
+                "cdp_health": guard["health"],
+                "launched_now": False,
+            }
+        return {
+            "success": True,
+            "message": "Đang chạy",
+            "port": port,
+            "cdp_health": guard["health"],
+            "launched_now": False,
+        }
+
+    def mark_detached(self, profile_id: str) -> Dict[str, Any]:
+        """Persist the detached (no-CDP-owner) state before the CLI exits."""
+        record = self._runtime_store.get(profile_id) or {}
+        launch_id = self.cdp_health.current_launch_id(profile_id) or record.get(
+            "launch_id"
+        )
+        pid = record.get("pid")
+        self._recovery_required.add(str(profile_id))
+        self.cdp_health.mark_recovery_required(
+            str(profile_id),
+            REASON_DETACHED_OWNER_EXITED,
+            owner_instance=self.instance_id,
+            pid=pid,
+            launch_id=launch_id,
+            force=True,
+        )
+        snapshot = self.cdp_health.snapshot(profile_id)
+        self._persist_health_now(
+            str(profile_id), launch_id, snapshot, extra={"detached": True}
+        )
+        return snapshot
+
     def _identity_for(self, pid, user_data_dir):
         """Verify ownership for either a live Popen PID or a recovered record."""
         if not pid:
@@ -204,6 +515,7 @@ class BrowserLauncher:
         active = self.active_ports.pop(profile_id, None) or record.get("port")
         self.active_processes.pop(profile_id, None)
         self._recovery_required.discard(profile_id)
+        self.cdp_health.mark_stopped(profile_id)
         self._proxy_credentials.pop(profile_id, None)
         self._cdp_ready_events.pop(profile_id, None)
         self._core_verified_events.pop(profile_id, None)
@@ -233,16 +545,14 @@ class BrowserLauncher:
     def _recover_runtime(self, profile_id: str):
         """Return a persisted launch record after verifying process ownership.
 
+        A record from another process (or from a previous server life) proves
+        the browser exists, never that this process owns a usable CDP channel.
         Returns None when the record is stale or was removed. On query failure
         the record is preserved, matching stop()'s refusal to kill blind.
         """
         record = self._runtime_store.get(profile_id)
         if not record:
             return None
-        if profile_id in self.active_processes:
-            self._recovery_required.discard(profile_id)
-        else:
-            self._recovery_required.add(profile_id)
         identity = read_browser_identity(
             record.get("pid"), record.get("user_data_dir") or ""
         )
@@ -252,22 +562,64 @@ class BrowserLauncher:
                 self.active_ports[profile_id] = int(actual_port)
             if identity.get("created"):
                 try:
-                    self._runtime_store.upsert(
-                        profile_id, created=identity.get("created")
-                    )
+                    if record.get("launch_id"):
+                        self._runtime_store.upsert_if_owner(
+                            profile_id,
+                            launch_id=record.get("launch_id"),
+                            pid=record.get("pid"),
+                            created=identity.get("created"),
+                        )
+                    else:
+                        self._runtime_store.upsert(
+                            profile_id, created=identity.get("created")
+                        )
                 except Exception:
                     pass
+            self._recovery_required.add(profile_id)
+            persisted = record.get("cdp_health") or {}
+            persisted_reason = (
+                persisted.get("reason")
+                if persisted.get("state") == STATE_RECOVERY_REQUIRED
+                else None
+            )
+            owner = record.get("owner_instance")
+            if record.get("detached") or persisted_reason == REASON_DETACHED_OWNER_EXITED:
+                reason = REASON_DETACHED_OWNER_EXITED
+            elif persisted_reason:
+                reason = persisted_reason
+            elif not owner:
+                reason = REASON_LEGACY_OWNERSHIP
+            elif owner != self.instance_id:
+                reason = REASON_OWNED_BY_OTHER_INSTANCE
+            else:
+                reason = REASON_SERVER_RESTART
+            self.cdp_health.mark_recovery_required(
+                profile_id,
+                reason,
+                owner_instance=owner or self.instance_id,
+                pid=record.get("pid"),
+                launch_id=record.get("launch_id"),
+            )
             return record
         if identity.get("state") in ("absent", "mismatch"):
             self._clear_process(profile_id)
             return None
+        # Preserve persisted state on query failure; stop() will refuse to kill.
+        self._recovery_required.add(profile_id)
+        self.cdp_health.mark_recovery_required(
+            profile_id,
+            REASON_OWNER_UNKNOWN,
+            owner_instance=record.get("owner_instance") or self.instance_id,
+            pid=record.get("pid"),
+            launch_id=record.get("launch_id"),
+        )
         return record
 
     def is_running(self, profile_id: str) -> bool:
+        """Process liveness only. Never clears or sets CDP health."""
         proc = self.active_processes.get(profile_id)
         if proc:
             if proc.poll() is None:
-                self._recovery_required.discard(profile_id)
                 return True
             self._clear_process(profile_id)
             return False
@@ -281,6 +633,12 @@ class BrowserLauncher:
         identity = self._identity(profile)
         if identity["state"] == "owned":
             self._recovery_required.add(profile_id)
+            self.cdp_health.mark_recovery_required(
+                profile_id,
+                REASON_LEGACY_OWNERSHIP,
+                owner_instance=self.instance_id,
+                pid=profile.pid,
+            )
             if identity.get("port"):
                 self.active_ports[profile_id] = identity["port"]
             return True
@@ -289,7 +647,30 @@ class BrowserLauncher:
             return False
         # Preserve persisted state on query failure; stop() will refuse to kill.
         self._recovery_required.add(profile_id)
+        self.cdp_health.mark_recovery_required(
+            profile_id,
+            REASON_OWNER_UNKNOWN,
+            owner_instance=self.instance_id,
+            pid=profile.pid,
+        )
         return True
+
+    def profile_data_in_use(self, profile_id: str) -> bool:
+        """True when this tool or an external Chromium owns the user_data dir."""
+        if self.is_running(profile_id):
+            return True
+        user_data_dir = os.path.join(PROFILES_DATA_DIR, profile_id, "user_data")
+        if not os.path.isdir(user_data_dir):
+            return False
+        exclude = {
+            proc.pid
+            for proc in self.active_processes.values()
+            if proc is not None and proc.poll() is None
+        }
+        pids = browser_pids_using_dir(user_data_dir, exclude_pids=exclude)
+        # None means the process table was unavailable; do not block copies on
+        # an unanswerable query (the source is already not tracked as running).
+        return bool(pids)
 
     async def _probe_page_ready(self, port):
         """Confirm a page-domain reply without treating it as emulation validation."""
@@ -638,9 +1019,19 @@ class BrowserLauncher:
         user_data_dir: Optional[str] = None,
         proxy_auth: Optional[tuple] = None,
         fp_override: Optional[Any] = None,
+        launch_id: Optional[str] = None,
     ):
         """Inject stealth into every page/worker/OOPIF target via CDP."""
         import websockets
+
+        session = None
+        if launch_id:
+            session = self.cdp_health.bind_session(profile.id, launch_id)
+            if session is None:
+                # A newer launch owns this profile; let the old coroutine die
+                # without touching the new generation's health.
+                return
+        handshake_established = False
 
         # Use the launch-time normalized copy, not the stored profile. The
         # stored model may still contain legacy RAM/screen values; the injected
@@ -683,6 +1074,19 @@ class BrowserLauncher:
                 await asyncio.sleep(0.3)
 
         if not ws_url:
+            if session is not None:
+                session.mark_closed()
+            if (
+                launch_id
+                and self._cdp_process_alive(profile.id)
+                and not self.cdp_health.is_stopping(profile.id)
+            ):
+                self.cdp_health.mark_degraded(
+                    profile.id,
+                    launch_id,
+                    REASON_HANDSHAKE_FAILED,
+                    restart_required=True,
+                )
             log.warning(f"[Launcher] Cảnh báo: Không thể lấy CDP URL trên port {port}")
             return
 
@@ -734,12 +1138,14 @@ class BrowserLauncher:
             if native_brands.get("fullVersionList"):
                 ua_metadata["fullVersionList"] = native_brands["fullVersionList"]
 
+        pending_responses: Dict[int, asyncio.Future] = {}
+        target_tasks: Set[asyncio.Task] = set()
         try:
             async with websockets.connect(
                 ws_url, max_size=20 * 1024 * 1024
             ) as ws:
                 msg_id = 0
-                pending_responses: Dict[int, asyncio.Future] = {}
+                attached_sessions: Set[str] = set()
 
                 async def send(method, params=None, session_id=None):
                     nonlocal msg_id
@@ -752,9 +1158,16 @@ class BrowserLauncher:
                         payload["sessionId"] = session_id
                     fut = asyncio.get_running_loop().create_future()
                     pending_responses[current_id] = fut
-                    await ws.send(json.dumps(payload))
+                    # Bounded send + bounded response: a half-open socket must
+                    # not hold a configuration task forever.
+                    await asyncio.wait_for(
+                        ws.send(json.dumps(payload)),
+                        timeout=HEARTBEAT_TIMEOUT_SECONDS,
+                    )
                     try:
-                        res = await asyncio.wait_for(fut, timeout=5.0)
+                        res = await asyncio.wait_for(
+                            fut, timeout=HEARTBEAT_TIMEOUT_SECONDS
+                        )
                         if "error" in res:
                             raise RuntimeError(f"CDP {method} error: {res['error']}")
                         return res.get("result", {})
@@ -780,6 +1193,8 @@ class BrowserLauncher:
                             raise
 
                     task = asyncio.create_task(guarded())
+                    target_tasks.add(task)
+                    task.add_done_callback(target_tasks.discard)
 
                     def consume(task_obj):
                         if task_obj.cancelled():
@@ -799,14 +1214,32 @@ class BrowserLauncher:
                             "Inspected target navigated or closed",
                             "Session with given id not found",
                         )
-                        if isinstance(exc, asyncio.TimeoutError) or any(
-                            marker in text for marker in expected
-                        ):
+                        stopping = launch_id and self.cdp_health.is_stopping(profile.id)
+                        if any(marker in text for marker in expected):
                             return
+                        if isinstance(exc, asyncio.TimeoutError):
+                            # A timeout while the target is gone is a normal
+                            # close race. A timeout on a still-attached target
+                            # is a configuration failure.
+                            if (
+                                session_id not in attached_sessions
+                                or not self._cdp_process_alive(profile.id)
+                                or stopping
+                            ):
+                                return
                         log.error(
                             "[Launcher] CDP background task error: "
                             f"{type(exc).__name__}: {text}"
                         )
+                        if launch_id and not stopping and self._cdp_process_alive(
+                            profile.id
+                        ):
+                            self.cdp_health.mark_degraded(
+                                profile.id,
+                                launch_id,
+                                REASON_TARGET_CONFIG_FAILED,
+                                restart_required=True,
+                            )
 
                     task.add_done_callback(consume)
                     return task
@@ -1056,12 +1489,17 @@ class BrowserLauncher:
                             load_event.set()
                         return
 
+                    if method == "Target.detachedFromTarget":
+                        attached_sessions.discard(params.get("sessionId"))
+                        return
+
                     if method == "Target.attachedToTarget":
                         target_info = params.get("targetInfo", {})
                         target_type = target_info.get("type", "")
                         attached_id = params.get("sessionId")
                         if not attached_id:
                             return
+                        attached_sessions.add(attached_id)
                         if target_type == "page":
                             spawn_target_task(
                                 configure_page(attached_id, target_info), attached_id
@@ -1141,10 +1579,28 @@ class BrowserLauncher:
                         try:
                             msg = await asyncio.wait_for(ws.recv(), timeout=30.0)
                         except asyncio.TimeoutError:
-                            if not self.is_running(profile.id):
+                            if not self._cdp_process_alive(profile.id):
                                 break
+                            if launch_id and not self.cdp_health.is_stopping(profile.id):
+                                self.cdp_health.mark_degraded(
+                                    profile.id,
+                                    launch_id,
+                                    REASON_READER_TIMEOUT,
+                                    restart_required=True,
+                                )
                             continue
                         except Exception:
+                            if (
+                                launch_id
+                                and self._cdp_process_alive(profile.id)
+                                and not self.cdp_health.is_stopping(profile.id)
+                            ):
+                                self.cdp_health.mark_degraded(
+                                    profile.id,
+                                    launch_id,
+                                    REASON_SOCKET_CLOSED,
+                                    restart_required=True,
+                                )
                             break
 
                         try:
@@ -1162,14 +1618,35 @@ class BrowserLauncher:
                         await dispatch_event(event)
 
                 async def keepalive_loop():
+                    failures = 0
                     while True:
-                        await asyncio.sleep(20.0)
-                        if not self.is_running(profile.id):
+                        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+                        if not self._cdp_process_alive(profile.id):
+                            return
+                        if launch_id and self.cdp_health.is_stopping(profile.id):
                             return
                         try:
                             await send("Browser.getVersion")
-                        except Exception:
-                            return
+                        except Exception as exc:
+                            failures += 1
+                            if failures >= 2:
+                                if launch_id:
+                                    reason = (
+                                        REASON_HEARTBEAT_TIMEOUT
+                                        if isinstance(exc, asyncio.TimeoutError)
+                                        else REASON_SOCKET_SEND_FAILED
+                                    )
+                                    self.cdp_health.mark_degraded(
+                                        profile.id,
+                                        launch_id,
+                                        reason,
+                                        restart_required=True,
+                                    )
+                                return
+                            continue
+                        failures = 0
+                        if launch_id:
+                            self.cdp_health.mark_heartbeat(profile.id, launch_id)
 
                 reader_task = asyncio.create_task(reader_loop())
                 keepalive_task = asyncio.create_task(keepalive_loop())
@@ -1182,6 +1659,7 @@ class BrowserLauncher:
                             "flatten": True,
                         },
                     )
+                    handshake_established = True
                     await reader_task
                 finally:
                     keepalive_task.cancel()
@@ -1191,7 +1669,43 @@ class BrowserLauncher:
                         pass
 
         except Exception as e:
+            if (
+                launch_id
+                and self._cdp_process_alive(profile.id)
+                and not self.cdp_health.is_stopping(profile.id)
+            ):
+                self.cdp_health.mark_degraded(
+                    profile.id,
+                    launch_id,
+                    REASON_HANDSHAKE_FAILED
+                    if not handshake_established
+                    else REASON_SOCKET_CLOSED,
+                    restart_required=True,
+                )
             log.error(f"[Launcher] Lỗi kết nối CDP: {e}")
+        finally:
+            for fut in list(pending_responses.values()):
+                if not fut.done():
+                    fut.cancel()
+            for task in list(target_tasks):
+                task.cancel()
+            if target_tasks:
+                await asyncio.gather(*target_tasks, return_exceptions=True)
+            if session is not None:
+                session.mark_closed()
+            if (
+                launch_id
+                and self._cdp_process_alive(profile.id)
+                and not self.cdp_health.is_stopping(profile.id)
+            ):
+                self.cdp_health.mark_degraded(
+                    profile.id,
+                    launch_id,
+                    REASON_HANDSHAKE_FAILED
+                    if not handshake_established
+                    else REASON_SOCKET_CLOSED,
+                    restart_required=True,
+                )
 
     def _start_cdp_thread(
         self,
@@ -1201,11 +1715,18 @@ class BrowserLauncher:
         user_data_dir: Optional[str] = None,
         proxy_auth: Optional[tuple] = None,
         fp_override: Optional[Any] = None,
+        launch_id: Optional[str] = None,
     ):
         def run_loop():
             asyncio.run(
                 self._setup_cdp_stealth(
-                    port, profile, target_url, user_data_dir, proxy_auth, fp_override
+                    port,
+                    profile,
+                    target_url,
+                    user_data_dir,
+                    proxy_auth,
+                    fp_override,
+                    launch_id=launch_id,
                 )
             )
 
@@ -1281,7 +1802,17 @@ class BrowserLauncher:
         metrics.inc("launch_attempts")
         started = time.monotonic()
         try:
-            result = self._launch_impl(profile_id, open_url=open_url)
+            with self._lifecycle_locks.acquire(profile_id, timeout=2.0):
+                result = self._launch_impl(profile_id, open_url=open_url)
+        except ProfileLockTimeout:
+            result = {
+                "success": False,
+                "code": "PROFILE_BUSY",
+                "error": (
+                    "Profile đang được sao chép hoặc thao tác bởi tiến trình khác. "
+                    "Hãy thử lại sau."
+                ),
+            }
         except Exception:
             metrics.inc("launch_failures")
             metrics.observe_seconds("launch", time.monotonic() - started)
@@ -1321,29 +1852,7 @@ class BrowserLauncher:
                 return {"success": False, "error": error}
 
             if self.is_running(profile_id):
-                if profile_id in self._recovery_required:
-                    return {
-                        "success": False,
-                        "recovery_required": True,
-                        "error": (
-                            "Phiên Chrome được khôi phục chỉ an toàn để dừng. "
-                            "Hãy dừng profile rồi khởi chạy lại."
-                        ),
-                    }
-                # L2: Nếu profile đang chạy và có open_url, mở URL đó trong tab mới
-                if open_url:
-                    if not self.open_tab(profile_id, open_url):
-                        return {"success": False, "error": "Chrome đang chạy nhưng không thể mở tab mới."}
-                    return {
-                        "success": True,
-                        "message": "Profile đang chạy, đã mở trong tab mới",
-                        "port": self.active_ports.get(profile_id),
-                    }
-                return {
-                    "success": True,
-                    "message": "Profile đang chạy",
-                    "port": self.active_ports.get(profile_id),
-                }
+                return self._running_launch_result(profile_id, open_url)
 
             profile_dir = self.manager.get_profile_dir(profile_id)
             user_data_dir = os.path.join(profile_dir, "user_data")
@@ -1463,6 +1972,10 @@ class BrowserLauncher:
             target_url = open_url or "about:blank"
             args.append("about:blank")
 
+            # Mỗi lần launch là một generation mới; callback của session cũ
+            # không được ghi đè trạng thái của lần mở này.
+            launch_id = self.cdp_health.begin_launch(profile_id, self.instance_id)
+
             # Khởi chạy tiến trình Browser
             proc = None
             try:
@@ -1473,6 +1986,8 @@ class BrowserLauncher:
                 )
                 self.active_processes[profile_id] = proc
                 self.active_ports[profile_id] = port
+                self.cdp_health.set_process(profile_id, launch_id, proc.pid)
+                runtime_persisted = False
                 self._recovery_required.discard(profile_id)
                 if proxy_auth:
                     self._proxy_credentials[profile_id] = proxy_auth
@@ -1480,6 +1995,7 @@ class BrowserLauncher:
                 # Persist ownership outside profiles.json so a server restart
                 # or `cli.py stop-all` can still find and stop this browser.
                 try:
+                    starting_health = self.cdp_health.snapshot(profile_id)
                     self._runtime_store.upsert(
                         profile_id,
                         pid=proc.pid,
@@ -1488,7 +2004,25 @@ class BrowserLauncher:
                         user_data_dir=user_data_dir,
                         exe=browser_path,
                         started_at=int(time.time()),
+                        launch_id=launch_id,
+                        owner_instance=self.instance_id,
+                        cdp_health={
+                            key: starting_health.get(key)
+                            for key in (
+                                "launch_id",
+                                "owner_instance",
+                                "pid",
+                                "state",
+                                "reason",
+                                "verified_at",
+                                "last_heartbeat_at",
+                                "changed_at",
+                                "checked_at",
+                                "restart_required",
+                            )
+                        },
                     )
+                    runtime_persisted = True
                 except Exception as e:
                     log.warning(f"[Launcher] Không ghi được runtime state: {type(e).__name__}: {e}")
 
@@ -1518,7 +2052,13 @@ class BrowserLauncher:
 
                 # Khởi chạy luồng gắn kết CDP để tiêm script và điều hướng
                 self._start_cdp_thread(
-                    port, profile, target_url, user_data_dir, proxy_auth, fp
+                    port,
+                    profile,
+                    target_url,
+                    user_data_dir,
+                    proxy_auth,
+                    fp,
+                    launch_id=launch_id,
                 )
 
                 # Chờ CDP tiêm stealth thành công vào trang (tối đa 6.0 giây)
@@ -1576,10 +2116,42 @@ class BrowserLauncher:
                         "error": "Chrome đã thoát trong lúc khởi chạy profile.",
                         "cdp_ready": False,
                         "stealth_injected": False,
+                        "cdp_health": self.cdp_health.snapshot(profile_id),
+                        "launched_now": True,
                     }
 
-                cdp_ready_final = stealth_ok and configuration_verified
+                health_ok = False
+                if stealth_ok and configuration_verified and runtime_persisted:
+                    health_ok = self.cdp_health.mark_healthy(profile_id, launch_id)
+                if not health_ok:
+                    current_state = self.cdp_health.snapshot(profile_id).get("state")
+                    if current_state not in (STATE_DEGRADED, STATE_RECOVERY_REQUIRED):
+                        if not runtime_persisted:
+                            reason = REASON_RUNTIME_PERSIST_FAILED
+                        elif not stealth_ok:
+                            reason = REASON_HANDSHAKE_FAILED
+                        elif not configuration_verified:
+                            reason = REASON_VERIFICATION_FAILED
+                        else:
+                            # The session can close between mark_healthy and
+                            # this commit; report that race as degraded.
+                            reason = REASON_SOCKET_CLOSED
+                        self.cdp_health.mark_degraded(profile_id, launch_id, reason)
+                final_health = self.cdp_health.snapshot(profile_id)
+                if final_health.get("state") != STATE_STOPPED:
+                    self._persist_health_now(profile_id, launch_id, final_health)
+                cdp_ready_final = bool(
+                    stealth_ok
+                    and configuration_verified
+                    and runtime_persisted
+                    and final_health.get("state") == STATE_HEALTHY
+                )
                 warning_parts = list(launch_warnings)
+                if not runtime_persisted:
+                    warning_parts.insert(
+                        0,
+                        "Runtime ownership was not persisted; the browser cannot be recovered across a restart.",
+                    )
                 if not cdp_ready_final:
                     warning_parts.insert(
                         0,
@@ -1600,6 +2172,9 @@ class BrowserLauncher:
                     # "success" — browser đã mở nhưng fingerprint có thể chưa
                     # được che khi stealth/verify thất bại.
                     "degraded": not cdp_ready_final,
+                    "code": None if cdp_ready_final else "CDP_UNHEALTHY",
+                    "cdp_health": final_health,
+                    "launched_now": True,
                     "verification": verification,
                     "warnings": launch_warnings,
                     "warning": "; ".join(warning_parts) if warning_parts else None,
@@ -1624,7 +2199,18 @@ class BrowserLauncher:
     def stop(self, profile_id: str) -> Dict[str, Any]:
         """Instrumented entrypoint; see ``_stop_impl`` for the real flow."""
         metrics.inc("stop_attempts")
-        result = self._stop_impl(profile_id)
+        try:
+            with self._lifecycle_locks.acquire(profile_id, timeout=2.0):
+                result = self._stop_impl(profile_id)
+        except ProfileLockTimeout:
+            result = {
+                "success": False,
+                "code": "PROFILE_BUSY",
+                "error": (
+                    "Profile đang được sao chép hoặc thao tác bởi tiến trình khác. "
+                    "Hãy thử lại sau."
+                ),
+            }
         metrics.inc("stop_success" if result.get("success") else "stop_failures")
         return result
 
@@ -1654,6 +2240,33 @@ class BrowserLauncher:
             user_data_dir = record.get("user_data_dir") or os.path.join(
                 PROFILES_DATA_DIR, profile_id, "user_data"
             )
+            launch_id = self.cdp_health.current_launch_id(profile_id) or record.get(
+                "launch_id"
+            )
+            if self.cdp_health.mark_stopping(profile_id):
+                stopping_snapshot = self.cdp_health.snapshot(profile_id)
+                if launch_id:
+                    self._persist_health_now(
+                        profile_id, launch_id, stopping_snapshot
+                    )
+
+            def _stop_failed(message: str) -> Dict[str, Any]:
+                self.cdp_health.mark_degraded(
+                    profile_id,
+                    launch_id,
+                    REASON_STOP_FAILED,
+                    restart_required=True,
+                )
+                snapshot = self.cdp_health.snapshot(profile_id)
+                if launch_id:
+                    self._persist_health_now(profile_id, launch_id, snapshot)
+                return {
+                    "success": False,
+                    "code": "STOP_FAILED",
+                    "error": message,
+                    "cdp_health": snapshot,
+                }
+
             identity = None
             if not proc:
                 identity = self._identity_for_stop(pid, user_data_dir)
@@ -1661,7 +2274,7 @@ class BrowserLauncher:
                     self._clear_process(profile_id)
                     return {"success": True, "message": "Phiên cũ đã kết thúc"}
                 if identity["state"] != "owned":
-                    return {"success": False, "error": "Chưa xác minh được tiến trình của profile; không gửi lệnh tắt."}
+                    return _stop_failed("Chưa xác minh được tiến trình của profile; không gửi lệnh tắt.")
             try:
                 if sys.platform == "win32":
                     # First request normal closure; always continue to /F when
@@ -1675,9 +2288,9 @@ class BrowserLauncher:
                             if current["state"] in ("absent", "mismatch"):
                                 break
                             if current["state"] == "unknown":
-                                return {"success": False, "error": "Chưa xác minh lại được tiến trình; giữ nguyên trạng thái để kiểm tra."}
+                                return _stop_failed("Chưa xác minh lại được tiến trình; giữ nguyên trạng thái để kiểm tra.")
                             if current["state"] != "owned" or current.get("created") != identity.get("created"):
-                                return {"success": False, "error": "Tiến trình đã thay đổi; giữ nguyên trạng thái để kiểm tra."}
+                                return _stop_failed("Tiến trình đã thay đổi; giữ nguyên trạng thái để kiểm tra.")
                         args = ["taskkill", "/PID", str(pid), "/T"]
                         if force:
                             args.append("/F")
@@ -1710,7 +2323,7 @@ class BrowserLauncher:
                                 break
                     if not (proc.poll() is not None if proc else self._identity_for(pid, user_data_dir)["state"] in ("absent", "mismatch")):
                         detail = f" ({last_error})" if last_error else ""
-                        return {"success": False, "error": f"Windows chưa dừng được trình duyệt{detail}. Dữ liệu trạng thái được giữ nguyên."}
+                        return _stop_failed(f"Windows chưa dừng được trình duyệt{detail}. Dữ liệu trạng thái được giữ nguyên.")
                 elif proc:
                     proc.terminate()
                     try:
@@ -1719,12 +2332,12 @@ class BrowserLauncher:
                         proc.kill()
                         proc.wait(timeout=5)
                 else:
-                    return {"success": False, "error": "Không xác minh được quyền sở hữu tiến trình."}
+                    return _stop_failed("Không xác minh được quyền sở hữu tiến trình.")
                 exited = proc.poll() is not None if proc else self._identity_for(pid, user_data_dir)["state"] in ("absent", "mismatch")
                 if not exited:
-                    return {"success": False, "error": "Trình duyệt vẫn đang chạy; chưa thể báo đã dừng."}
+                    return _stop_failed("Trình duyệt vẫn đang chạy; chưa thể báo đã dừng.")
             except (OSError, subprocess.SubprocessError):
-                return {"success": False, "error": "Không thể dừng trình duyệt; trạng thái được giữ nguyên."}
+                return _stop_failed("Không thể dừng trình duyệt; trạng thái được giữ nguyên.")
             self._clear_process(profile_id)
             return {"success": True, "message": "Đã xác nhận trình duyệt dừng"}
 
@@ -1745,14 +2358,13 @@ class BrowserLauncher:
         return {"success": not failed, "failed_profile_ids": failed, "results": results,
                 "message": "Đã dừng toàn bộ profile" if not failed else "Một số profile chưa dừng được."}
 
-    def open_tab(self, profile_id: str, url: str) -> bool:
-        """Mở một tab mới trên profile đang chạy thông qua CDP HTTP endpoint (L2)."""
+    def _open_tab_impl(self, profile_id: str, url: str) -> bool:
         port = self.active_ports.get(profile_id)
         if not port:
-            self._recover_runtime(profile_id)
-            port = self.active_ports.get(profile_id)
-        if profile_id in self._recovery_required:
-            return False
+            record = self._runtime_store.get(profile_id) or {}
+            port = record.get("port")
+            if port:
+                self.active_ports[profile_id] = int(port)
         if not port:
             return False
         try:
@@ -1770,12 +2382,27 @@ class BrowserLauncher:
                 log.warning(f"[Launcher] Lỗi mở tab mới: {e}")
                 return False
 
+    def open_tab(self, profile_id: str, url: str) -> bool:
+        """Mở tab trên profile đang chạy; từ chối nếu CDP không khỏe (L2)."""
+        guard = self.cdp_guard(profile_id)
+        if not guard["ok"]:
+            log.info(
+                "[Launcher] Từ chối mở tab %s: %s (%s)",
+                profile_id,
+                guard["code"],
+                (guard["health"] or {}).get("reason"),
+            )
+            return False
+        return self._open_tab_impl(profile_id, url)
+
     def export_cookies(self, profile_id: str) -> List[Dict[str, Any]]:
         """Đọc cookies trực tiếp từ profile đang chạy, không tạo bản sao JSON trên đĩa."""
-        running = self.is_running(profile_id)
+        self.require_cdp(profile_id)
         port = self.active_ports.get(profile_id)
-        if not port or not running:
-            raise RuntimeError("Hãy mở profile trước khi đọc cookies.")
+        if not port:
+            raise CdpUnavailable(
+                "NOT_RUNNING", "Hãy mở profile trước khi đọc cookies."
+            )
         try:
             return _safe_run_async(fetch_cookies_cdp(port))
         except Exception as e:
@@ -1784,10 +2411,12 @@ class BrowserLauncher:
 
     def import_cookies(self, profile_id: str, cookies: List[Dict[str, Any]]) -> bool:
         """Nạp cookies trực tiếp vào profile đang chạy qua CDP Storage.setCookies."""
-        running = self.is_running(profile_id)
+        self.require_cdp(profile_id)
         port = self.active_ports.get(profile_id)
-        if not port or not running:
-            return False
+        if not port:
+            raise CdpUnavailable(
+                "NOT_RUNNING", "Hãy mở profile trước khi nạp cookies."
+            )
         try:
             normalized_cookies = normalize_cookies(cookies)
             if not normalized_cookies:
@@ -1798,7 +2427,7 @@ class BrowserLauncher:
             return False
 
     def fetch_facebook_pages(
-        self, profile_id: str, timeout: float = 40.0, deep: bool = False
+        self, profile_id: str, timeout: float = 90.0, deep: bool = False
     ) -> Dict[str, Any]:
         """Liệt kê fanpage profile này sở hữu/quản lý, đọc trực tiếp từ phiên đang chạy.
 
@@ -1808,34 +2437,111 @@ class BrowserLauncher:
         cùng một tab) để lấy ngày tạo + thời gian bài đăng gần nhất và gắn
         trạng thái theo ``classify_facebook_page``.
 
-        Trả về {"logged_in": bool, "pages": [...], "url": str}.
+        Trả về contract F4: {"logged_in", "pages", "scan_id",
+        "discovery_status", "completion_reason", "stability",
+        "observed_count", ...}. Profile dừng giữa chừng → ``ScanAborted``.
         """
-        running = self.is_running(profile_id)
+        self.require_cdp(profile_id)
         port = self.active_ports.get(profile_id)
-        if not port or not running:
-            raise RuntimeError("Hãy mở profile trước khi đọc fanpage.")
-        data = _safe_run_async(self._facebook_pages_cdp(port, timeout))
-        if deep and data.get("logged_in") and data.get("pages"):
+        if not port:
+            raise CdpUnavailable(
+                "NOT_RUNNING", "Hãy mở profile trước khi đọc fanpage."
+            )
+        expected_account_id = None
+        getter = getattr(self.manager, "get_facebook_scan_meta", None)
+        if callable(getter):
+            try:
+                meta = getter(profile_id) or {}
+                expected_account_id = meta.get("account_id_observed")
+            except Exception as e:
+                log.warning(
+                    f"[Launcher] Không đọc được scan meta: {type(e).__name__}"
+                )
+
+        def should_abort() -> bool:
+            return not self._facebook_scan_alive(profile_id)
+
+        data = _safe_run_async(
+            self._facebook_pages_cdp(
+                port,
+                timeout,
+                expected_account_id=expected_account_id,
+                should_abort=should_abort,
+            )
+        )
+        status = data.get("discovery_status")
+        if (
+            deep
+            and data.get("logged_in")
+            and data.get("pages")
+            and status in (None, "complete", "partial")
+        ):
             per_page = 8.0
             deep_timeout = min(300.0, 20.0 + per_page * len(data["pages"]))
             try:
                 details = _safe_run_async(
                     self._facebook_pages_deep_cdp(
-                        port, data["pages"], timeout=deep_timeout
+                        port,
+                        data["pages"],
+                        timeout=deep_timeout,
+                        should_abort=should_abort,
                     )
                 )
+            except ScanAborted:
+                raise
             except Exception:
                 details = {}
-            merge_page_details(data, details)
+            profile = self.manager.get_profile(profile_id)
+            tz_name = profile.fingerprint.timezone if profile else None
+            merge_page_details(data, details, display_tz=tz_name)
         return data
 
-    async def _facebook_pages_cdp(self, port: int, timeout: float = 40.0) -> Dict[str, Any]:
-        return await fetch_pages_cdp(port, timeout)
+    def _facebook_scan_alive(self, profile_id: str) -> bool:
+        """Liveness chỉ đọc cho scan; không gọi ``_clear_process``/health lock.
+
+        QĐ-6: CDP thread không được mutate runtime/health trong lúc quét.
+        """
+        proc = self.active_processes.get(profile_id)
+        if proc is not None:
+            return proc.poll() is None
+        record = self._runtime_store.get(profile_id)
+        if record:
+            identity = read_browser_identity(
+                record.get("pid"), record.get("user_data_dir") or ""
+            )
+            return identity.get("state") not in ("absent", "mismatch")
+        profile = self.manager.get_profile(profile_id)
+        if not profile or not profile.pid:
+            return False
+        identity = self._identity(profile)
+        return identity.get("state") not in ("absent", "mismatch")
+
+    async def _facebook_pages_cdp(
+        self,
+        port: int,
+        timeout: float = 90.0,
+        *,
+        expected_account_id: Optional[str] = None,
+        should_abort: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        return await fetch_pages_cdp(
+            port,
+            timeout,
+            expected_account_id=expected_account_id,
+            should_abort=should_abort,
+        )
 
     async def _facebook_pages_deep_cdp(
-        self, port: int, pages: List[Dict[str, Any]], timeout: float = 120.0
+        self,
+        port: int,
+        pages: List[Dict[str, Any]],
+        timeout: float = 120.0,
+        *,
+        should_abort: Optional[Any] = None,
     ) -> Dict[str, Dict[str, Any]]:
-        return await fetch_pages_deep_cdp(port, pages, timeout)
+        return await fetch_pages_deep_cdp(
+            port, pages, timeout, should_abort=should_abort
+        )
 
     def launch_all(
         self,
@@ -1895,7 +2601,7 @@ class BrowserLauncher:
                     item = {
                         "profile_id": p.id,
                         "name": p.name,
-                        "result": {"success": True, "message": "Đang chạy"},
+                        "result": self._running_launch_result(p.id),
                     }
                     results.append(item)
                     if progress_callback:

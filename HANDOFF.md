@@ -1,4 +1,4 @@
-# HANDOFF — Antidetect Python (cập nhật 2026-11-04; roadmap P0 + P1 + P2 đã commit)
+# HANDOFF — Antidetect Python (cập nhật 2026-11-05; đợt sửa ổn định F1–F4 chưa commit)
 
 Điểm bắt đầu cho model/người tiếp nhận. Mô tả **trạng thái thật hiện tại**.
 Đọc hết mục "Quy tắc an toàn" trước khi sửa code.
@@ -7,14 +7,14 @@
 
 ## 1. Trạng thái một câu
 
-Tool hoàn chỉnh ở mức production-ready có điều kiện: **HEAD `42e61e8`** trên
-nhánh `master`, working tree sạch tại thời điểm kiểm tra (sau đó chỉ
-`HANDOFF.md` này được cập nhật), `origin/master` trùng HEAD (đã push
-2026-11-04). Đo trên code hiện tại (2026-11-04): **301 pytest passed + 1
-skipped** (Playwright UI smoke skip vì chưa đặt `ANTIDETECT_RUN_UI_SMOKE=1`),
-coverage **71%** (gate CI 58%), ruff sạch. **E2E smoke 24/24 và Playwright UI
-smoke 1/1 chưa chạy lại trên HEAD này** — số gần nhất đo 2026-10-26 trên code
-trước đó; `compileall` cũng chưa chạy lại.
+Tool hoàn chỉnh ở mức production-ready có điều kiện: **HEAD `d3f70d1`** trên
+nhánh `master`; **working tree đang có thay đổi F1–F4 chưa commit** (xem mục
+1.1). Đo trên working tree 2026-11-05: **407 pytest passed + 1 skipped**
+(Playwright UI smoke skip vì chưa đặt `ANTIDETECT_RUN_UI_SMOKE=1`), ruff và
+`compileall` sạch; **coverage chưa đo lại** trong đợt này. **E2E smoke 24/24
+và Playwright UI smoke 1/1 chưa chạy lại trên working tree này** — số gần
+nhất đo 2026-10-26 trên code trước đó. Baseline commit `42e61e8` (2026-11-04)
+đo 301 passed + 1 skipped, coverage 71%.
 Roadmap P0 + P1 + P2 đã commit (`61ab5ec`); sau đó bổ sung fingerprint health
 center + pre-launch gate (`8093392`), hardening proxy/launch (`51bb963`), fix
 CI httpx2 (`313faab`) và fix scrape Fanpage (`0390ee8`).
@@ -27,11 +27,37 @@ bulk job xuyên instance (`data/bulk_jobs.json`) và nâng cấp/rollback có ch
 Ed25519 (`tools/release.py`/`tools/update.py`, version **1.1.0**, không auto
 update).
 
+### 1.1. Đợt sửa ổn định F1–F4 — 05/11/2026 (CHƯA COMMIT)
+
+- **F1:** `antidetect/cdp_health.py` + guard trong launcher; Chrome sống và CDP
+  healthy là hai tín hiệu riêng; `degraded`/`recovery_required` không bị báo
+  thành healthy; `--detach` ghi `DETACHED_OWNER_EXITED` và dashboard hiện
+  “Không có CDP (detached)”.
+- **F2:** `antidetect/profile_copy.py` + `profile_locks.py`; copy staging →
+  verify → promote → secret → metadata, journal `data/copy_operations/`,
+  `Idempotency-Key`/`X-Operation-Id`; không publish clone dở dang; lifecycle
+  lock dùng chung launch/stop/delete/duplicate.
+- **F3:** timestamp bài đăng theo khoảng + mốc quan sát, legacy
+  `last_post_days` quy đổi tại thời điểm đọc, `activity_stale` 48h cấu hình
+  được, cache trả `login_status=unknown`.
+- **F4:** `antidetect/fanpage_scan.py` + scan meta
+  `data/facebook_scan_meta.json`; completion chỉ khi có bằng chứng
+  (`TOTAL_MATCH`/`END_MARKER`/`EMPTY_CONFIRMED`), partial + retained count,
+  merge theo trường, scan lock xuyên process; refresh **không xóa cache**,
+  xóa bằng `DELETE /api/profiles/{id}/facebook/pages` hoặc nút “Xóa cache”.
+  `force=1` được giữ như đường tương thích để xóa khi kết quả rỗng có bằng chứng.
+- **Bằng chứng:** 407 passed + 1 skipped; ruff/compileall sạch;
+  `data/profiles.json` vẫn đúng hash baseline (xem
+  `docs/VERIFICATION_STABILITY_FIX_2026-11-05.md`).
+- **Chưa chạy:** Facebook thật (discovery/deep/identity), UI smoke/E2E,
+  Playwright UI, soak 24–72h, copy hàng GB/antivirus. Không coi các mục này là
+  PASS. Không commit/push trong đợt này.
+
 ## 2. Git & lịch sử
 
 ```text
-HEAD:  42e61e8 docs: update handoff data integrity snapshot (2026-11-01)
-Tree:  sạch; origin/master = HEAD (313faab..42e61e8 đã push 2026-11-04)
+HEAD:  d3f70d1 docs: refresh handoff after repo relocation (2026-11-04)
+Tree:  CÓ thay đổi chưa commit cho F1–F4 (2026-11-05); không tự commit/push
 ```
 
 Lịch sử gần nhất:
@@ -57,6 +83,7 @@ Lịch sử gần nhất:
 | `313faab` | fix CI: cài httpx2 cho Starlette TestClient |
 | `0390ee8` | fix(facebook): `profile.php` URL, prefix avatar, parse ngày tạo VI/EN |
 | `42e61e8` | docs handoff data snapshot 2026-11-01 |
+| `d3f70d1` | docs: refresh handoff after repo relocation (2026-11-04) |
 
 ## 3. Dữ liệu thật `data/` — đã kiểm tra toàn vẹn (cập nhật 2026-11-04)
 
@@ -151,6 +178,19 @@ Lịch sử gần nhất:
   (đã đối chiếu byte-equality 16 payload trước/sau khi tách).
 - `_facebook_pages_cdp` / `_facebook_pages_deep_cdp` trong launcher là seam cho
   test; `fetch_facebook_pages` dùng `merge_page_details` từ `facebook.py`.
+- **CDP health tách khỏi process:** `is_running()` chỉ kiểm tra Chrome;
+  `cdp_guard()`/`require_cdp()` là cổng chung cho mọi thao tác cần CDP. Không
+  tự reconnect hoặc tuyên bố healthy sau server restart; recovery bằng stop →
+  relaunch. Callback launch cũ không được ghi đè launch mới (`launch_id`).
+- **Lifecycle lock dùng chung:** launch/stop/delete/duplicate lấy khóa
+  per-profile xuyên process; scan dùng suffix `.scan` để stop/delete không bị
+  chặn. Copy chỉ publish sau staging+verify+secret+metadata; retry cùng
+  `operation_id` trả đúng một đích.
+- **Fanpage scan contract:** chỉ `complete` khi có `TOTAL_MATCH`/`END_MARKER`/
+  `EMPTY_CONFIRMED`; 3 vòng ổn định vẫn là `partial` + `NO_END_SIGNAL`. Merge
+  theo trường, giữ lịch sử; refresh không xóa cache.
+- **F3:** không dùng `last_post_days` đã đóng băng làm nguồn sự thật; normalize
+  tại thời điểm trả response, `login_status=unknown` từ cache.
 - `web/app.py` vẫn giữ route + singleton `profile_manager`/`launcher`/
   `_scheduler` để tương thích test; chưa phải router split hoàn chỉnh.
 - **Leak audit proxy thật trên build 1.1.0 (2026-10-26): PASS** — profile tạm
@@ -166,7 +206,9 @@ Lịch sử gần nhất:
    cải thiện (`0390ee8`: URL `profile.php`, bỏ prefix "Ảnh đại diện của", parse
    ngày tạo từ `about_profile_transparency` + HTML `creation_date`, định dạng
    VI/EN) nhưng **chưa verify với page thật**; heuristic DOM/parse ngày có thể
-   lệch khi FB đổi giao diện. Raw text được giữ để đối chiếu.
+   lệch khi FB đổi giao diện. Raw text được giữ để đối chiếu. Đợt F3/F4
+   (2026-11-05) đã có contract + test fixture nhưng **vẫn chưa chạy page
+   thật**; xem `docs/VERIFICATION_STABILITY_FIX_2026-11-05.md`.
 2. **Soak 24h / >20 profile đồng thời / SOCKS5 thật / DataDome+Turnstile
    thật** — chưa test; CI chỉ chạy unit + coverage, không chạy E2E/soak.
 3. **Refactor còn lại (P1 đã làm một phần):** launcher launch/stop/CDP core
@@ -181,23 +223,27 @@ Lịch sử gần nhất:
    residual: bulk job là single-slot cục bộ (không distributed lock nhiều máy);
    updater không auto-download/auto-update, không ký Authenticode bắt buộc,
    server guard best-effort; chưa build release thật ngoài bản test trong
-   `%TEMP%`. **Chưa chạy lại E2E smoke + UI smoke trên HEAD `42e61e8`** — phải
-   chạy tay trước phát hành.
+   `%TEMP%`. **Chưa chạy lại E2E smoke + UI smoke trên working tree F1–F4
+   (2026-11-05)** — phải chạy tay trước phát hành.
 5. UI bolt-on: chọn profile scope cho scheduler rule qua UI (API đã có
    `profile_ids`), hiển thị browser pin + `recent_runs` trong dashboard (API
    đã trả về).
 6. **Fork Chromium** — roadmap dài hạn (chỉ khi detector thương mại chặn thật;
    source ~100GB, dự án riêng).
+7. **Live test riêng cho F1/F2 (2026-11-05):** ngắt socket CDP thật, restart
+   server khi Chrome còn mở, copy nhiều GB với antivirus, kill process tại
+   từng mốc journal rồi recovery. Test hiện chỉ ở mức unit/API/storage và mô
+   phỏng journal; không suy diễn thành PASS live.
 
 ## 7. Lệnh mẫu
 
 ```powershell
 cd C:\Projects\Tools\Antidetect Python
-python -m pytest -q                                        # 301 passed + 1 skipped
+python -m pytest -q                                        # 407 passed + 1 skipped (working tree 2026-11-05)
 python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing
-                                                           # coverage 71%, gate CI 58%
-python -m ruff check .                                     # correctness-only, sạch
-python -m compileall -q antidetect web tools run.py        # sạch (lần cuối 2026-10-26)
+                                                           # chưa đo lại 2026-11-05; lần cuối 71%, gate 58%
+python -m ruff check .                                     # correctness-only, sạch (2026-11-05)
+python -m compileall -q antidetect web tools run.py        # sạch (2026-11-05)
 $env:ANTIDETECT_RUN_UI_SMOKE = "1"
 python -m pytest test_ui_smoke.py -q                       # 1 passed (lần cuối 2026-10-26; Chrome thật, data tạm)
 $env:ANTIDETECT_DATA_DIR = "$env:TEMP\opencode\ad-live-r4"

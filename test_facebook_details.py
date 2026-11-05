@@ -8,6 +8,20 @@ from antidetect.facebook import (
     parse_fb_created_date,
 )
 
+UTC = datetime.timezone.utc
+NOW = datetime.datetime(2026, 10, 26, 12, 0, tzinfo=UTC)
+
+
+def _window(min_days_ago, max_days_ago, *, observed=NOW, complete=True):
+    return {
+        "last_post_at_min": (NOW - datetime.timedelta(days=min_days_ago)).isoformat(),
+        "last_post_at_max": (NOW - datetime.timedelta(days=max_days_ago)).isoformat(),
+        "last_post_observed_at": observed.isoformat(),
+        "last_post_precision": "exact",
+        "activity_scan_complete": complete,
+        "detail_synced": True,
+    }
+
 
 def test_fb_unit_to_days_known_and_unknown_units():
     assert fb_unit_to_days(2, "d") == 2
@@ -32,35 +46,58 @@ def test_parse_fb_created_date_invalid_values_return_none():
     assert parse_fb_created_date("31/02/2020") is None
     assert parse_fb_created_date("2020-13-01") is None
     assert parse_fb_created_date("no date here") is None
+    # Thiếu năm không được đoán bằng năm hiện tại (tránh tuổi giả).
+    assert parse_fb_created_date("ngày 5 tháng 3") is None
 
 
 def test_classify_facebook_page_status_and_ready():
     today = datetime.date(2026, 10, 26)
-    active = classify_facebook_page({"last_post_days": 7}, today)
+    active = classify_facebook_page(
+        _window(7, 7), today, now=NOW, timezone="Asia/Ho_Chi_Minh"
+    )
     assert active["status"] == "active"
     assert active["ready"] is False
 
-    stopped = classify_facebook_page(
-        {"last_post_days": 8, "detail_synced": True}, today
+    just_over = classify_facebook_page(
+        {
+            "last_post_at_min": (NOW - datetime.timedelta(days=8)).isoformat(),
+            "last_post_at_max": (NOW - datetime.timedelta(days=7, seconds=1)).isoformat(),
+            "last_post_observed_at": NOW.isoformat(),
+            "activity_scan_complete": True,
+        },
+        today, now=NOW, timezone="Asia/Ho_Chi_Minh",
     )
-    assert stopped["status"] == "stopped"
+    assert just_over["status"] == "long_absent"
 
-    unknown = classify_facebook_page({"detail_synced": True}, today)
+    crossing = classify_facebook_page(
+        _window(8, 6), today, now=NOW, timezone="Asia/Ho_Chi_Minh"
+    )
+    assert crossing["status"] == "uncertain"
+
+    stale = classify_facebook_page(
+        _window(2, 2, observed=NOW - datetime.timedelta(hours=49)),
+        today, now=NOW, timezone="Asia/Ho_Chi_Minh",
+    )
+    assert stale["status"] == "unknown"
+    assert stale["activity_stale"] is True
+    assert stale["last_post_days"] == 2
+
+    unknown = classify_facebook_page({"detail_synced": True}, today, now=NOW)
     assert unknown["status"] == "unknown"
 
-    never_synced = classify_facebook_page({}, today)
+    never_synced = classify_facebook_page({}, today, now=NOW)
     assert never_synced["status"] is None
     assert never_synced["ready"] is False
 
-    ready = classify_facebook_page({"created_date": "2026-09-24"}, today)
+    ready = classify_facebook_page({"created_date": "2026-09-24"}, today, now=NOW)
     assert ready["age_days"] == 32
     assert ready["ready"] is True
 
-    not_ready = classify_facebook_page({"created_date": "2026-09-27"}, today)
+    not_ready = classify_facebook_page({"created_date": "2026-09-27"}, today, now=NOW)
     assert not_ready["age_days"] == 29
     assert not_ready["ready"] is False
 
-    bad_created = classify_facebook_page({"created_date": "not-a-date"}, today)
+    bad_created = classify_facebook_page({"created_date": "not-a-date"}, today, now=NOW)
     assert bad_created["age_days"] is None
     assert bad_created["ready"] is False
 
@@ -72,21 +109,31 @@ def test_merge_page_details_sets_created_date_and_last_post():
             {"url": "https://www.facebook.com/two", "name": "Two"},
         ]
     }
+    observed = NOW.isoformat()
     details = {
         "https://www.facebook.com/one": {
             "created_raw": "Ngày tạo trang: 15/03/2020",
             "times": [{"n": 2, "u": "d"}, {"n": 3, "u": "w"}],
+            "observed_at": observed,
+            "completed": True,
         },
         "https://www.facebook.com/two": {},
     }
-    merge_page_details(data, details)
+    merge_page_details(
+        data, details, display_tz="Asia/Ho_Chi_Minh", clock=lambda: NOW
+    )
     one, two = data["pages"]
     assert one["created_date"] == "2020-03-15"
     assert one["last_post_days"] == 2
+    assert one["last_post_age_min_days"] == 2
+    assert one["last_post_age_max_days"] == 3
     assert one["last_post_raw"] == "2 d"
     assert one["detail_synced"] is True
     assert one["status"] == "active"
-    assert one["detail_synced_at"] == datetime.date.today().isoformat()
+    assert one["activity_quality"] == "approximate"
+    assert one["last_post_at_min"] and one["last_post_at_max"]
+    assert one["last_post_observed_at"] == "2026-10-26T12:00:00Z"
+    assert one["detail_synced_at"] == "2026-10-26"
 
     assert two["created_raw"] is None
     assert two["last_post_raw"] is None
@@ -100,11 +147,14 @@ def test_merge_page_details_keeps_raw_when_date_parse_fails():
         "https://www.facebook.com/x": {
             "created_raw": "some unknown format",
             "times": [],
+            "observed_at": NOW.isoformat(),
+            "completed": True,
         }
     }
-    merge_page_details(data, details)
+    merge_page_details(data, details, display_tz="Asia/Ho_Chi_Minh", clock=lambda: NOW)
     page = data["pages"][0]
     assert page["created_raw"] == "some unknown format"
     assert "created_date" not in page
     assert page["detail_synced"] is True
     assert page["status"] == "unknown"
+    assert page["activity_scan_complete"] is False

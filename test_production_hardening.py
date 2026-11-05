@@ -366,7 +366,7 @@ def test_recovered_runtime_requires_stop_before_reuse(monkeypatch, recovered_sta
         m.delete_profile(p.id)
 
 
-def test_local_live_process_is_not_recovery_gated(monkeypatch):
+def test_local_live_process_with_healthy_cdp_is_not_recovery_gated(monkeypatch):
     m = ProfileManager()
     launcher = BrowserLauncher(m)
     p = m.create_profile("local-live-process")
@@ -378,12 +378,18 @@ def test_local_live_process_is_not_recovery_gated(monkeypatch):
 
     launcher.active_processes[p.id] = LiveProcess()
     launcher.active_ports[p.id] = 9555
+    launch_id = launcher.cdp_health.begin_launch(p.id, launcher.instance_id)
+    launcher.cdp_health.set_process(p.id, launch_id, 4242)
+    launcher.cdp_health.bind_session(p.id, launch_id)
+    assert launcher.cdp_health.mark_healthy(p.id, launch_id) is True
     launcher._recovery_required.add(p.id)
     monkeypatch.setattr(launcher, "_resolve_browser_path", lambda _profile: sys.executable)
     try:
         result = launcher.launch(p.id)
         assert result["success"] is True
         assert result["port"] == 9555
+        assert result["launched_now"] is False
+        assert result["cdp_health"]["state"] == "healthy"
         assert p.id not in launcher._recovery_required
     finally:
         launcher.unregister_cleanup()
@@ -648,10 +654,19 @@ def test_launch_all_skips_running_profiles(monkeypatch):
         monkeypatch.setattr(
             launcher, "is_running", lambda pid: pid == created[1].id
         )
+        running_launch = launcher.cdp_health.begin_launch(
+            created[1].id, launcher.instance_id
+        )
+        launcher.cdp_health.set_process(created[1].id, running_launch, 4242)
+        launcher.cdp_health.bind_session(created[1].id, running_launch)
+        assert launcher.cdp_health.mark_healthy(
+            created[1].id, running_launch
+        ) is True
 
         results = launcher.launch_all(delay=0.0, max_concurrent=2)
         by_id = {r["profile_id"]: r["result"] for r in results}
         assert by_id[created[1].id]["message"] == "Đang chạy"
+        assert by_id[created[1].id]["launched_now"] is False
         assert created[1].id not in launched
         assert {created[0].id, created[2].id} <= set(launched)
     finally:
@@ -661,21 +676,32 @@ def test_launch_all_skips_running_profiles(monkeypatch):
 
 
 def test_facebook_page_classification_rules():
-    """Quy tắc farm fanpage: ≤7 ngày = đang đăng; tuổi ≥30 ngày = sẵn sàng."""
+    """F3: active/long_absent/uncertain/unknown theo khoảng thời gian."""
     import datetime
     from antidetect.launcher import classify_facebook_page, _parse_fb_created_date, _fb_unit_to_days
 
     today = datetime.date(2026, 10, 24)
-    # Trạng thái đăng bài theo ngưỡng 7 ngày.
-    assert classify_facebook_page({"last_post_days": 0}, today)["status"] == "active"
-    assert classify_facebook_page({"last_post_days": 7}, today)["status"] == "active"
-    assert classify_facebook_page({"last_post_days": 8, "detail_synced": True}, today)["status"] == "stopped"
-    assert classify_facebook_page({"detail_synced": True}, today)["status"] == "unknown"
-    assert classify_facebook_page({}, today)["status"] is None  # chưa quét chi tiết
+    now = datetime.datetime(2026, 10, 24, 12, tzinfo=datetime.timezone.utc)
+
+    def exact(days_ago):
+        stamp = (now - datetime.timedelta(days=days_ago)).isoformat()
+        return {
+            "last_post_at_min": stamp,
+            "last_post_at_max": stamp,
+            "last_post_observed_at": now.isoformat(),
+            "last_post_precision": "exact",
+            "activity_scan_complete": True,
+        }
+
+    assert classify_facebook_page(exact(0), today, now=now)["status"] == "active"
+    assert classify_facebook_page(exact(7), today, now=now)["status"] == "active"
+    assert classify_facebook_page(exact(8), today, now=now)["status"] == "long_absent"
+    assert classify_facebook_page({"detail_synced": True}, today, now=now)["status"] == "unknown"
+    assert classify_facebook_page({}, today, now=now)["status"] is None  # chưa quét chi tiết
     # Sẵn sàng khi ngâm đủ 30 ngày.
-    assert classify_facebook_page({"created_date": "2026-09-24"}, today)["ready"] is True
-    assert classify_facebook_page({"created_date": "2026-09-25"}, today)["ready"] is False
-    assert classify_facebook_page({"last_post_days": 1}, today)["ready"] is False
+    assert classify_facebook_page({"created_date": "2026-09-24"}, today, now=now)["ready"] is True
+    assert classify_facebook_page({"created_date": "2026-09-25"}, today, now=now)["ready"] is False
+    assert classify_facebook_page(exact(1), today, now=now)["ready"] is False
 
     # Parse ngày tạo từ text Facebook (vi + en + số).
     assert _parse_fb_created_date("Ngày tạo trang: 15/03/2020") == datetime.date(2020, 3, 15)
@@ -706,9 +732,17 @@ def test_facebook_pages_deep_endpoint(monkeypatch):
     pid = r.json()["id"]
     try:
         monkeypatch.setattr(app_module.launcher, "is_running", lambda x: True, raising=False)
+        import datetime as _dt
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        stamp_min = (now - _dt.timedelta(days=3)).isoformat()
+        stamp_max = (now - _dt.timedelta(days=2)).isoformat()
         fake_pages = [{
             "name": "Page A", "url": "https://www.facebook.com/pagea", "id": "111",
-            "created_date": "2025-01-01", "last_post_days": 2, "last_post_raw": "2 ngày",
+            "created_date": "2025-01-01", "last_post_raw": "2 ngày trước",
+            "last_post_at_min": stamp_min, "last_post_at_max": stamp_max,
+            "last_post_observed_at": now.isoformat(),
+            "last_post_precision": "approximate", "activity_scan_complete": True,
             "created_raw": "Ngày tạo trang: 01/01/2025", "detail_synced": True,
         }]
         captured = {}
@@ -798,8 +832,14 @@ def test_facebook_deep_ui_present():
     ).read()
     assert "refreshFanpages(true)" in html
     assert "deep=1" in js
-    assert "Đang đăng" in js and "Dừng" in js and "Sẵn sàng" in js
+    assert "Đang đăng" in js and "Lâu chưa thấy bài mới" in js and "Sẵn sàng" in js
+    assert "Dữ liệu cũ, cần đồng bộ" in js
+    assert "login_status === false" in js
     assert "ageText" in js
+    # F4: phân biệt số đọc trong lượt với cache, badge chưa thấy, xóa cache riêng.
+    assert "clearFanpageCache" in js and "Chưa thấy lượt này" in js
+    assert "discovery_status" in js and "retained_count" in js
+    assert "Xóa cache" in html
 
 
 def test_stop_profile_with_deleted_metadata_cleans_stale_record():
@@ -2017,21 +2057,27 @@ def test_fanpage_deep_sync_marks_failed_scan_as_not_synced(monkeypatch):
     launcher = BrowserLauncher(manager)
     url = "https://www.facebook.com/deep-test"
 
-    async def fake_pages(port, timeout=0):
+    async def fake_pages(port, timeout=0, **kwargs):
         return {"logged_in": True, "pages": [{"name": "Deep", "url": url}]}
 
-    async def fake_deep_empty(port, pages, timeout=0):
+    async def fake_deep_empty(port, pages, timeout=0, **kwargs):
         return {url: {"times": [], "created_raw": None, "last_post_raw": None}}
 
     monkeypatch.setattr(launcher, "is_running", lambda pid: True)
     launcher.active_ports["deep-profile"] = 1234
+    launch_id = launcher.cdp_health.begin_launch(
+        "deep-profile", launcher.instance_id
+    )
+    launcher.cdp_health.set_process("deep-profile", launch_id, 4242)
+    launcher.cdp_health.bind_session("deep-profile", launch_id)
+    assert launcher.cdp_health.mark_healthy("deep-profile", launch_id) is True
     monkeypatch.setattr(launcher, "_facebook_pages_cdp", fake_pages)
     monkeypatch.setattr(launcher, "_facebook_pages_deep_cdp", fake_deep_empty)
 
     data = launcher.fetch_facebook_pages("deep-profile", timeout=1, deep=True)
     assert data["pages"][0]["detail_synced"] is False
 
-    async def fake_deep_ok(port, pages, timeout=0):
+    async def fake_deep_ok(port, pages, timeout=0, **kwargs):
         return {url: {
             "times": [{"n": 2, "u": "d"}],
             "created_raw": "Page created on January 1, 2024",
@@ -2041,6 +2087,80 @@ def test_fanpage_deep_sync_marks_failed_scan_as_not_synced(monkeypatch):
     monkeypatch.setattr(launcher, "_facebook_pages_deep_cdp", fake_deep_ok)
     data2 = launcher.fetch_facebook_pages("deep-profile", timeout=1, deep=True)
     assert data2["pages"][0]["detail_synced"] is True
+
+
+def test_fetch_facebook_pages_passes_scan_context_and_gates_deep(monkeypatch):
+    """F4: launcher truyền identity dự kiến + abort, chỉ deep khi còn dữ liệu."""
+    from antidetect.facebook import ScanAborted
+
+    launcher = BrowserLauncher(manager)
+    pid = "f4-scan-launcher"
+    monkeypatch.setattr(launcher, "is_running", lambda profile_id: True)
+    launcher.active_ports[pid] = 1234
+    launch_id = launcher.cdp_health.begin_launch(pid, launcher.instance_id)
+    launcher.cdp_health.set_process(pid, launch_id, 4242)
+    launcher.cdp_health.bind_session(pid, launch_id)
+    assert launcher.cdp_health.mark_healthy(pid, launch_id) is True
+    monkeypatch.setattr(
+        manager,
+        "get_facebook_scan_meta",
+        lambda profile_id: {"account_id_observed": "99999"},
+    )
+    captured = {}
+
+    async def fake_pages(port, timeout=0, *, expected_account_id=None, should_abort=None):
+        captured["expected"] = expected_account_id
+        captured["abort"] = should_abort
+        captured["timeout"] = timeout
+        return {
+            "logged_in": True,
+            "pages": [
+                {
+                    "name": "P",
+                    "url": "https://www.facebook.com/p",
+                    "id": "11111",
+                }
+            ],
+            "discovery_status": "partial",
+            "observed_count": 1,
+        }
+
+    async def fake_deep(port, pages, timeout=0, *, should_abort=None):
+        captured["deep"] = True
+        captured["deep_abort"] = should_abort
+        return {}
+
+    monkeypatch.setattr(launcher, "_facebook_pages_cdp", fake_pages)
+    monkeypatch.setattr(launcher, "_facebook_pages_deep_cdp", fake_deep)
+
+    data = launcher.fetch_facebook_pages(pid, timeout=1, deep=True)
+    assert data["discovery_status"] == "partial"
+    assert captured["expected"] == "99999"
+    assert captured["timeout"] == 1
+    assert callable(captured["abort"])
+    assert captured["deep"] is True
+    assert callable(captured["deep_abort"])
+
+    async def fake_failed(port, timeout=0, *, expected_account_id=None, should_abort=None):
+        return {
+            "logged_in": True,
+            "pages": [],
+            "discovery_status": "failed",
+            "observed_count": 0,
+            "completion_reason": "LOGIN_IDENTITY_MISMATCH",
+        }
+
+    captured.pop("deep", None)
+    monkeypatch.setattr(launcher, "_facebook_pages_cdp", fake_failed)
+    launcher.fetch_facebook_pages(pid, timeout=1, deep=True)
+    assert "deep" not in captured
+
+    async def fake_abort(port, timeout=0, *, expected_account_id=None, should_abort=None):
+        raise ScanAborted("profile stopped")
+
+    monkeypatch.setattr(launcher, "_facebook_pages_cdp", fake_abort)
+    with pytest.raises(ScanAborted):
+        launcher.fetch_facebook_pages(pid, timeout=1, deep=False)
 
 
 def test_verify_emulation_skips_webgl_when_spoof_disabled(monkeypatch):

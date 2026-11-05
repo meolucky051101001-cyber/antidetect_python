@@ -4,11 +4,12 @@ import json
 import time
 import uuid
 import asyncio
+import datetime
 import threading
 import secrets
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any, Set
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -19,7 +20,18 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from antidetect.models import Profile, FingerprintConfig, ProxyConfig, REDACTED_SECRET
-from antidetect.storage import ProfileManager, ProfileDeletionError, DATA_DIR, PROFILES_DATA_DIR
+from antidetect.storage import (
+    ProfileManager,
+    ProfileBusyError,
+    ProfileDeletionError,
+    DATA_DIR,
+    PROFILES_DATA_DIR,
+)
+from antidetect.profile_copy import (
+    ProfileCopyError,
+    new_operation_id,
+    validate_idempotency_key,
+)
 from antidetect.fingerprint import (
     generate_fingerprint,
     get_host_device_memory,
@@ -35,6 +47,19 @@ from antidetect.launch_gate import (
     settings_snapshot as _launch_gate_settings,
 )
 from antidetect.launcher import BrowserLauncher
+from antidetect.cdp_health import CdpUnavailable
+from antidetect.fanpage_scan import (
+    DISCOVERY_ENDPOINT_TIMEOUT_S,
+    STATUS_COMPLETE,
+    STATUS_FAILED,
+    STATUS_PARTIAL,
+    STATUS_UNKNOWN,
+    ensure_scan_contract,
+    scan_defaults,
+    scan_detail,
+)
+from antidetect.facebook import ScanAborted
+from antidetect.profile_locks import ProfileLockTimeout
 from antidetect.proxy import check_proxy
 from antidetect.scheduler import ScheduleStoreCorruption
 from antidetect.bulk_jobs import (
@@ -48,6 +73,7 @@ from antidetect import metrics
 from .schemas import (
     AuditFixRequest,
     BulkCreateRequest,
+    CdpHealth,
     CheckProxyRequest,
     CreateProfileRequest,
     ImportCookiesRequest,
@@ -65,7 +91,9 @@ from .services import (
     apply_geo_to_profile as _apply_geo_to_profile,
     auto_max_concurrent as _auto_max_concurrent,
     enrich_facebook_pages as _enrich_facebook_pages,
+    fanpage_stale_after_hours as _fanpage_stale_after_hours,
     host_gpu_strings as _host_gpu_strings,
+    profile_display_timezone as _profile_display_timezone,
     ram_by_profile_dir as _ram_by_profile_dir,
     sanitize_facebook_pages as _sanitize_facebook_pages,
     validate_iana_timezone,
@@ -99,8 +127,32 @@ def _profiles_with_status():
             if started:
                 item.uptime_seconds = max(0, int(time.time()) - int(started))
             item.ram_mb = round(ram_map.get(p.id, 0.0), 1) or None
+            item.cdp_health = CdpHealth(
+                **launcher.cdp_health_snapshot(p.id, running=True)
+            )
         runtime_profiles.append(item)
     return runtime_profiles
+
+
+_CDP_CONFLICT_CODES = {
+    "CDP_UNHEALTHY",
+    "CDP_STARTING",
+    "RECOVERY_REQUIRED",
+    "DETACHED_NO_CDP",
+    "PROFILE_BUSY",
+}
+
+
+def _cdp_conflict_response(exc: CdpUnavailable) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "success": False,
+            "code": exc.code,
+            "detail": str(exc),
+            "cdp_health": exc.health,
+        },
+    )
 
 
 @asynccontextmanager
@@ -332,7 +384,12 @@ def _record_bulk_progress(
         job = _active_start_all_job
         if not job or job.get("job_id") != job_id:
             return
-        if res.get("success"):
+        health_state = (res.get("cdp_health") or {}).get("state")
+        cdp_failed = res.get("success") and (
+            res.get("cdp_ready") is False
+            or (health_state and health_state != "healthy")
+        )
+        if res.get("success") and not cdp_failed:
             job["completed_count"] += 1
         else:
             job["failed_count"] += 1
@@ -1243,12 +1300,33 @@ def _scheduler_start_all(profile_ids=None):
                 ),
                 profile_ids=launch_ids,
             )
+            def _launch_failed(item):
+                result = item.get("result") or {}
+                if not result.get("success"):
+                    return True
+                if result.get("cdp_ready") is False:
+                    return True
+                state = (result.get("cdp_health") or {}).get("state")
+                return bool(state and state != "healthy")
+
+            failures = [
+                {
+                    "profile_id": item.get("profile_id"),
+                    "code": (item.get("result") or {}).get("code"),
+                }
+                for item in results
+                if _launch_failed(item)
+            ]
             if cancel_event.is_set():
                 status = "cancelled"
+            elif failures:
+                status = "partial"
             return {
-                "success": True,
+                "success": not failures,
                 "job_id": job_id,
                 "status": status,
+                "failed_count": len(failures),
+                "failures": failures,
                 "results": results,
                 "blocked": [item.as_dict() for item in blocked],
                 "gate_mode": gate_mode,
@@ -1566,27 +1644,79 @@ async def delete_profile(profile_id: str):
 
 
 @app.post("/api/profiles/{profile_id}/duplicate", response_model=Profile)
-async def duplicate_profile(profile_id: str, copy_data: bool = False):
-    def _duplicate():
-        if copy_data and launcher.is_running(profile_id):
-            return "RUNNING"
+async def duplicate_profile(
+    profile_id: str,
+    request: Request,
+    response: Response,
+    copy_data: bool = False,
+):
+    header_key = request.headers.get("idempotency-key")
+    operation_id = header_key or new_operation_id()
+    if header_key:
         try:
-            p = profile_manager.duplicate_profile(profile_id, copy_data=copy_data)
-        except RuntimeError as e:
-            return ("COPY_FAILED", str(e))
-        if not p:
-            return "NOT_FOUND"
-        return ("OK", p)
+            validate_idempotency_key(header_key)
+        except ProfileCopyError as e:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "code": e.code,
+                    "detail": str(e),
+                },
+            )
+    response.headers["X-Operation-Id"] = operation_id
 
-    result = await asyncio.to_thread(_duplicate)
-    if result == "RUNNING":
-        raise HTTPException(status_code=409, detail='Hãy đóng profile trước khi sao chép dữ liệu phiên.')
-    if result == "NOT_FOUND":
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    if isinstance(result, tuple) and result[0] == "COPY_FAILED":
-        # Không báo thành công khi bản sao user_data nửa chừng/corrupt.
-        raise HTTPException(status_code=500, detail=result[1])
-    return result[1]
+    def _duplicate():
+        return profile_manager.duplicate_profile(
+            profile_id,
+            copy_data=copy_data,
+            operation_id=operation_id,
+            source_running=launcher.profile_data_in_use,
+        )
+
+    try:
+        result = await asyncio.to_thread(_duplicate)
+    except ProfileCopyError as e:
+        if e.code in ("SOURCE_RUNNING", "PROFILE_BUSY", "COPY_OPERATION_CONFLICT"):
+            status_code = 409
+        elif e.code == "COPY_NO_SPACE":
+            status_code = 507
+        elif e.code == "INVALID_IDEMPOTENCY_KEY":
+            status_code = 400
+        else:
+            status_code = 500
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "success": False,
+                "code": e.code,
+                "detail": str(e),
+            },
+            headers={"X-Operation-Id": operation_id},
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "code": "COPY_FAILED",
+                "detail": str(e),
+            },
+            headers={"X-Operation-Id": operation_id},
+        )
+    if not result:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "success": False,
+                "code": "NOT_FOUND",
+                "detail": "Profile không tồn tại",
+            },
+            headers={"X-Operation-Id": operation_id},
+        )
+    return result
 
 
 @app.get("/api/profiles/{profile_id}/cookies/export")
@@ -1601,6 +1731,8 @@ async def export_profile_cookies(profile_id: str, request: Request):
         raise HTTPException(status_code=409, detail="Hãy mở profile trước khi đọc cookies.")
     try:
         cookies = await asyncio.to_thread(launcher.export_cookies, profile_id)
+    except CdpUnavailable as e:
+        return _cdp_conflict_response(e)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     return JSONResponse(
@@ -1619,7 +1751,21 @@ async def import_profile_cookies(profile_id: str, req: ImportCookiesRequest):
         raise HTTPException(status_code=400, detail="Định dạng cookies không hợp lệ, yêu cầu một mảng JSON các cookie.")
     if not launcher.is_running(profile_id):
         raise HTTPException(status_code=409, detail="Hãy mở profile trước khi nạp cookies.")
-    success = await asyncio.to_thread(launcher.import_cookies, profile_id, req.cookies)
+
+    def _import():
+        # Đổi danh tính Facebook không được chạy chồng với lượt quét fanpage.
+        with profile_manager.scan_lock(profile_id, timeout=0.0):
+            return launcher.import_cookies(profile_id, req.cookies)
+
+    try:
+        success = await asyncio.to_thread(_import)
+    except ProfileLockTimeout:
+        raise HTTPException(
+            status_code=409,
+            detail="Đang có lượt quét fanpage cho profile này. Hãy chờ lượt đó xong.",
+        )
+    except CdpUnavailable as e:
+        return _cdp_conflict_response(e)
     if not success:
         raise HTTPException(status_code=503, detail="Không thể nạp cookies vào profile đang chạy.")
     return {
@@ -1630,6 +1776,117 @@ async def import_profile_cookies(profile_id: str, req: ImportCookiesRequest):
     }
 
 
+def _scan_fields(scan: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    scan = scan or {}
+    return {
+        "scan_id": scan.get("scan_id"),
+        "discovery_status": scan.get("discovery_status"),
+        "completion_reason": scan.get("completion_reason"),
+        "stability": scan.get("stability"),
+        "observed_count": scan.get("observed_count"),
+        "retained_count": scan.get("retained_count"),
+        "total_pages_in_source": scan.get("total_pages_in_source"),
+        "started_at": scan.get("started_at"),
+        "finished_at": scan.get("finished_at"),
+        "identity_status": scan.get("identity_status"),
+        "collector_version": scan.get("collector_version"),
+    }
+
+
+def _fanpage_stale(
+    scan: Optional[Dict[str, Any]],
+    pages: List[Dict[str, Any]],
+    synced_at: int,
+    now: datetime.datetime,
+    stale_after_hours: int,
+) -> bool:
+    if not pages:
+        return False
+    status = (scan or {}).get("discovery_status")
+    if status in (STATUS_PARTIAL, STATUS_FAILED, STATUS_UNKNOWN, None):
+        return True
+    if synced_at and (now.timestamp() - synced_at) > stale_after_hours * 3600:
+        return True
+    return any(
+        pg.get("activity_stale") or pg.get("activity_scan_complete") is False
+        for pg in pages
+    )
+
+
+def _run_facebook_scan(
+    profile_id: str, deep: bool, force: bool, stale_after_hours: int
+):
+    """Chạy trong thread: giữ scan lock suốt fetch + merge (QĐ-6).
+
+    Scan lock chỉ chặn lượt quét khác, không chặn stop/delete; profile dừng
+    giữa chừng làm collector ném ``ScanAborted`` và cache giữ nguyên.
+    """
+    with profile_manager.scan_lock(profile_id, timeout=0.0):
+        profile = profile_manager.get_profile(profile_id)
+        if profile is None:
+            return None
+        scan_meta = profile_manager.get_facebook_scan_meta(profile_id)
+        data = launcher.fetch_facebook_pages(
+            profile_id,
+            DISCOVERY_ENDPOINT_TIMEOUT_S,
+            deep,
+        )
+        scan = ensure_scan_contract(
+            data, expected_account_id=scan_meta.get("account_id_observed")
+        )
+        applied = profile_manager.apply_facebook_scan(profile_id, scan)
+        if applied is None:
+            return None
+        updated, scan = applied
+        if (
+            force
+            and scan.get("discovery_status") in (STATUS_COMPLETE, STATUS_PARTIAL)
+            and scan.get("observed_count") == 0
+        ):
+            cleared = profile_manager.clear_facebook_pages(profile_id)
+            if cleared is not None:
+                updated = cleared
+            scan["retained_count"] = 0
+
+        if scan.get("completion_reason") == "LOGIN_LOST":
+            return {
+                "success": False,
+                "logged_in": False,
+                "login_status": False,
+                "pages": [],
+                "source": "live",
+                "stale": False,
+                **_scan_fields(scan),
+                "detail": (
+                    "Profile chưa đăng nhập Facebook. "
+                    "Hãy mở profile, đăng nhập rồi thử lại."
+                ),
+            }
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        enriched = _enrich_facebook_pages(
+            updated.facebook_pages or [],
+            now=now,
+            timezone=_profile_display_timezone(updated),
+            stale_after_hours=stale_after_hours,
+        )
+        observed = int(scan.get("observed_count") or 0)
+        return {
+            "success": True,
+            "logged_in": bool(scan.get("login_status")),
+            "login_status": bool(scan.get("login_status")),
+            "pages": enriched,
+            "source": "live" if observed else "cache",
+            "stale": _fanpage_stale(
+                scan, enriched, updated.facebook_pages_synced_at,
+                now, stale_after_hours,
+            ),
+            "synced_at": updated.facebook_pages_synced_at,
+            **_scan_fields(scan),
+            "detail": scan_detail(scan, len(enriched)),
+        }
+
+
 @app.get("/api/profiles/{profile_id}/facebook/pages")
 async def get_facebook_pages(
     profile_id: str, refresh: bool = False, deep: bool = False, force: bool = False
@@ -1637,19 +1894,27 @@ async def get_facebook_pages(
     """Liệt kê fanpage Facebook profile này sở hữu/quản lý.
 
     ``refresh=1`` (hoặc khi profile đang chạy mà chưa có cache) đọc trực tiếp
-    từ phiên Chrome đang chạy. ``deep=1`` (kèm refresh) quét thêm TỪNG page:
-    ngày tạo (trang about), bài đăng gần nhất (feed) → trạng thái
-    đang đăng/dừng (ngưỡng 7 ngày) và "sẵn sàng" (tuổi ≥ 30 ngày).
-    Mỗi page tốn ~4-8s khi deep — với 20 page mất ~2-3 phút.
+    từ phiên Chrome đang chạy. Discovery trả hợp đồng F4: ``discovery_status``
+    (complete/partial/failed), ``completion_reason``, ``observed_count``,
+    ``retained_count`` — tổng cache không bị báo nhầm là tổng vừa đọc.
 
-    Kết quả live rỗng không ghi đè cache đang có (Facebook đổi DOM có thể
-    trả 0 page dù tài khoản vẫn có fanpage); truyền ``force=1`` để chấp nhận
-    danh sách rỗng và xóa cache.
+    ``deep=1`` (kèm refresh) quét thêm TỪNG page: ngày tạo (trang about),
+    khoảng thời gian bài gần nhất (feed) → trạng thái active/long_absent/
+    uncertain/unknown và "sẵn sàng" (tuổi ≥ 30 ngày). Mỗi page tốn ~4-8s khi
+    deep — với 20 page mất ~2-3 phút.
+
+    Response cache trả ``login_status="unknown"`` (không khẳng định phiên còn
+    đăng nhập); ``logged_in`` chỉ true/false khi vừa kiểm tra live. ``stale``
+    phản ánh tuổi dữ liệu/độ đầy đủ của lần quét tương ứng, không luôn false.
+    Cache không bao giờ bị xóa bởi refresh thông thường; dùng DELETE để xóa.
     """
     p = profile_manager.get_profile(profile_id)
     if not p:
         raise HTTPException(status_code=404, detail="Profile không tồn tại")
     running = await asyncio.to_thread(launcher.is_running, profile_id)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    display_tz = _profile_display_timezone(p)
+    stale_after_hours = _fanpage_stale_after_hours()
 
     if refresh or (running and not p.facebook_pages):
         if not running:
@@ -1658,64 +1923,98 @@ async def get_facebook_pages(
                 detail="Hãy mở profile trước khi làm mới danh sách fanpage.",
             )
         try:
-            data = await asyncio.to_thread(
-                launcher.fetch_facebook_pages,
+            result = await asyncio.to_thread(
+                _run_facebook_scan,
                 profile_id,
-                40.0,
                 bool(deep),
+                bool(force),
+                stale_after_hours,
             )
+        except ProfileLockTimeout as e:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": (
+                        "Đang có lượt quét fanpage khác cho profile này. "
+                        "Hãy chờ lượt đó xong rồi thử lại."
+                    )
+                },
+            )
+        except ScanAborted as e:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": str(e), "code": "SCAN_ABORTED"},
+            )
+        except CdpUnavailable as e:
+            return _cdp_conflict_response(e)
         except RuntimeError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
-        if not data.get("logged_in"):
-            return {
-                "success": False,
-                "logged_in": False,
-                "pages": [],
-                "source": "live",
-                "detail": "Profile chưa đăng nhập Facebook. Hãy mở profile, đăng nhập rồi thử lại.",
-            }
-        pages = _enrich_facebook_pages(data.get("pages") or [])
-        cached = _enrich_facebook_pages(p.facebook_pages)
-        if not pages and cached and not force:
-            # Giữ cache cũ: 0 page từ một tab vừa mở thường là dấu hiệu
-            # layout Facebook đổi/trang chưa render xong, không phải mất hết page.
-            return {
-                "success": True,
-                "logged_in": True,
-                "pages": cached,
-                "source": "cache",
-                "stale": True,
-                "synced_at": p.facebook_pages_synced_at,
-                "detail": (
-                    "Facebook trả về 0 fanpage nên đã giữ dữ liệu cũ. "
-                    "Nếu tài khoản thực sự không còn fanpage, gọi lại với force=1."
-                ),
-            }
-        synced_at = int(time.time())
-        updated = profile_manager.update_facebook_pages(
-            profile_id, pages, synced_at
-        )
-        if updated is None:
+        if result is None:
             raise HTTPException(status_code=404, detail="Profile không tồn tại")
-        return {
-            "success": True,
-            "logged_in": True,
-            "pages": pages,
-            "source": "live",
-            "stale": False,
-            "synced_at": synced_at,
-        }
+        return result
 
-    # Cache: tính lại trạng thái runtime (không lưu) để phản ánh quy tắc mới.
-    enriched = _enrich_facebook_pages(p.facebook_pages)
+    # Cache: chưa kiểm tra phiên đăng nhập nên không khẳng định logged_in.
+    enriched = _enrich_facebook_pages(
+        p.facebook_pages,
+        now=now,
+        timezone=display_tz,
+        stale_after_hours=stale_after_hours,
+    )
+    meta = profile_manager.get_facebook_scan_meta(profile_id)
+    last_scan = meta.get("last_scan") if isinstance(meta.get("last_scan"), dict) else {}
+    scan: Dict[str, Any] = dict(scan_defaults(len(enriched)))
+    scan.update({k: v for k, v in last_scan.items() if v is not None})
+    # Cache không xác nhận phiên đăng nhập hiện tại.
+    scan["login_status"] = "unknown"
+    scan["identity_status"] = (
+        meta.get("identity_status") or scan.get("identity_status") or "unknown"
+    )
+    stale = _fanpage_stale(
+        scan, enriched, p.facebook_pages_synced_at, now, stale_after_hours
+    )
     return {
         "success": True,
-        "logged_in": True,
+        "logged_in": None,
+        "login_status": "unknown",
         "pages": enriched,
         "source": "cache",
-        "stale": False,
+        "stale": stale,
         "synced_at": p.facebook_pages_synced_at,
-        "detail": None if enriched else "Chưa có dữ liệu fanpage. Mở profile và bấm Làm mới.",
+        **_scan_fields(scan),
+        "detail": scan_detail(scan, len(enriched)),
+    }
+
+
+@app.delete("/api/profiles/{profile_id}/facebook/pages")
+async def delete_facebook_pages(profile_id: str):
+    """Xóa cache fanpage theo hành động rõ ràng (không tự xóa khi refresh)."""
+    p = profile_manager.get_profile(profile_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Profile không tồn tại")
+
+    def _clear():
+        with profile_manager.scan_lock(profile_id, timeout=0.0):
+            return profile_manager.clear_facebook_pages(profile_id)
+
+    try:
+        updated = await asyncio.to_thread(_clear)
+    except ProfileLockTimeout:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": (
+                    "Đang có lượt quét fanpage cho profile này. "
+                    "Hãy chờ lượt đó xong rồi xóa cache."
+                )
+            },
+        )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Profile không tồn tại")
+    return {
+        "success": True,
+        "pages": [],
+        "synced_at": updated.facebook_pages_synced_at,
+        "detail": "Đã xóa cache fanpage của profile.",
     }
 
 
@@ -1871,8 +2170,18 @@ async def start_profile(profile_id: str, url: Optional[str] = None, force: bool 
 
     res = await asyncio.to_thread(launcher.launch, profile_id, open_url=url)
     if not res.get("success"):
-        status_code = 409 if res.get("recovery_required") else 500
-        raise HTTPException(status_code=status_code, detail=res.get("error", "Lỗi khởi chạy"))
+        code = res.get("code")
+        if code in _CDP_CONFLICT_CODES or res.get("recovery_required"):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "code": code,
+                    "detail": res.get("error", "Lỗi khởi chạy"),
+                    "cdp_health": res.get("cdp_health"),
+                },
+            )
+        raise HTTPException(status_code=500, detail=res.get("error", "Lỗi khởi chạy"))
     if gate and gate.status in ("warning", "overridden", "unverified"):
         res["gate"] = gate.as_dict()
     return res

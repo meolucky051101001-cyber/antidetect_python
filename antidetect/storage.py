@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 import json
@@ -6,10 +7,48 @@ import time
 import threading
 import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from .models import Profile, FingerprintConfig, ProxyConfig
 from .fingerprint import generate_fingerprint
 from .applog import get_logger
+from .fanpage_scan import (
+    REASON_LOGIN_IDENTITY_MISMATCH,
+    SCAN_META_FILENAME,
+    SCAN_META_VERSION,
+    STATUS_COMPLETE,
+    STATUS_FAILED,
+    STATUS_PARTIAL,
+    empty_scan_meta,
+    merge_discovery_pages,
+    parse_utc,
+    scan_meta_last_scan,
+    to_utc_iso,
+    utc_now,
+)
+from .profile_locks import ProfileLockTimeout, ProfileLocks
+from .profile_copy import (
+    CopyJournal,
+    CopyJournalError,
+    ProfileCopyError,
+    check_disk_space,
+    cleanup_operation_root,
+    copy_user_data,
+    journal_path,
+    journal_owner_alive,
+    list_operation_journals,
+    measure_tree,
+    new_operation_id,
+    operation_paths,
+    prepare_staging,
+    promote_staging,
+    purge_expired_operations,
+    read_operation_result,
+    remove_operation_files,
+    remove_operation_target,
+    validate_idempotency_key,
+    validate_profile_id,
+    write_operation_result,
+)
 from .secrets import (
     SecretStoreCorruption,
     get_proxy_password,
@@ -26,6 +65,12 @@ log = get_logger("storage")
 
 class ProfileDeletionError(RuntimeError):
     """Directory/metadata deletion failed; state must stay retryable."""
+
+
+class ProfileBusyError(ProfileDeletionError):
+    """Another process/thread holds the profile lifecycle lock."""
+
+    code = "PROFILE_BUSY"
 
 
 def _safe_log(message: str) -> None:
@@ -154,12 +199,21 @@ class ProfileManager:
         self._ipc_lock = ReentrantInterProcessLock(
             os.path.join(DATA_DIR, "profiles.lock")
         )
+        # QĐ-6: lifecycle lock per-profile, dùng chung với launcher/CLI.
+        self._profile_locks = ProfileLocks(DATA_DIR)
+        # Scan lock riêng để stop/delete không phải chờ một lượt quét dài.
+        self._scan_locks = ProfileLocks(DATA_DIR, suffix=".scan")
         self._corrupted = False  # Cờ bảo vệ chống ghi đè khi file hỏng
         self._cache: Optional[List[Profile]] = None
         self._cache_mtime: float = 0.0
         os.makedirs(DATA_DIR, exist_ok=True)
         os.makedirs(PROFILES_DATA_DIR, exist_ok=True)
         self._ensure_profiles_file()
+        try:
+            self.recover_copy_operations()
+        except Exception as e:
+            # Recovery must never keep the dashboard from starting.
+            _safe_log(f"[Storage] Bỏ qua phục hồi copy_operations: {type(e).__name__}: {e}")
 
     def _ensure_profiles_file(self):
         # Tạo file dưới cùng IPC lock với save_profiles: hai process cùng
@@ -448,28 +502,172 @@ class ProfileManager:
                 return updated
             return None
 
-    def update_facebook_pages(
-        self,
-        profile_id: str,
-        pages: List[Dict[str, Any]],
-        synced_at: int,
-    ) -> Optional[Profile]:
-        """Merge only fanpage fields into the current record.
+    def scan_lock(self, profile_id: str, timeout: float = 0.0):
+        """Facebook scan lock (QĐ-6): chỉ chặn scan khác, không chặn stop/delete."""
+        self._validate_profile_id(profile_id)
+        return self._scan_locks.acquire(profile_id, timeout=timeout)
 
-        A deep Facebook scrape can run for minutes; replacing the whole profile
-        with the snapshot taken before it started would revert proxy edits made
-        in the meantime. Re-read under the lock and touch only these fields.
+    def _scan_meta_path(self) -> str:
+        return os.path.join(DATA_DIR, SCAN_META_FILENAME)
+
+    def _read_scan_meta(self) -> Optional[Dict[str, Any]]:
+        """Đọc scan meta; ``None`` khi file hỏng để caller không ghi đè mù."""
+        path = self._scan_meta_path()
+        if not os.path.exists(path):
+            return empty_scan_meta()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError, UnicodeError):
+            return None
+        if (
+            not isinstance(meta, dict)
+            or meta.get("version") != SCAN_META_VERSION
+            or not isinstance(meta.get("profiles"), dict)
+        ):
+            return None
+        return meta
+
+    def _write_scan_meta(self, meta: Dict[str, Any]) -> None:
+        meta["version"] = SCAN_META_VERSION
+        path = self._scan_meta_path()
+        os.makedirs(DATA_DIR, exist_ok=True)
+        temp_file = f"{path}.tmp.{uuid.uuid4().hex}"
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        _replace_with_retry(temp_file, path)
+
+    def get_facebook_scan_meta(self, profile_id: str) -> Dict[str, Any]:
+        """Metadata cấp scan của một profile (rỗng nếu chưa có/hỏng)."""
+        self._validate_profile_id(profile_id)
+        with self._lock:
+            meta = self._read_scan_meta()
+        if not meta:
+            return {}
+        entry = (meta.get("profiles") or {}).get(profile_id)
+        return dict(entry) if isinstance(entry, dict) else {}
+
+    def _update_scan_meta_locked(
+        self, profile_id: str, scan: Dict[str, Any]
+    ) -> None:
+        """Ghi scan meta atomic dưới metadata lock, bỏ qua lượt cũ hơn."""
+        meta = self._read_scan_meta()
+        if meta is None:
+            _safe_log(
+                "[Storage] facebook_scan_meta.json hỏng; giữ file và bỏ ghi meta."
+            )
+            return
+        profiles_meta = meta.setdefault("profiles", {})
+        entry = profiles_meta.get(profile_id)
+        if not isinstance(entry, dict):
+            entry = {}
+        last_scan = entry.get("last_scan")
+        if not isinstance(last_scan, dict):
+            last_scan = {}
+        finished = parse_utc(scan.get("finished_at"))
+        previous = parse_utc(last_scan.get("finished_at"))
+        if finished and previous and finished < previous:
+            return
+
+        status = scan.get("discovery_status")
+        reason = scan.get("completion_reason")
+        account_id = str(scan.get("account_id_observed") or "").strip()
+        trusted = str(entry.get("account_id_observed") or "").strip()
+        if account_id and not (
+            status == STATUS_FAILED and reason == REASON_LOGIN_IDENTITY_MISMATCH
+        ):
+            # Chỉ ID đã xác minh thành công mới trở thành mốc so sánh.
+            entry["account_id_observed"] = account_id
+            entry["identity_status"] = "verified"
+        elif not trusted:
+            entry["identity_status"] = scan.get("identity_status") or "unknown"
+
+        entry["last_scan"] = scan_meta_last_scan(
+            scan, int(scan.get("retained_count") or 0)
+        )
+        entry["updated_at"] = to_utc_iso(utc_now())
+        profiles_meta[profile_id] = entry
+        self._write_scan_meta(meta)
+
+    def apply_facebook_scan(
+        self, profile_id: str, scan: Dict[str, Any]
+    ) -> Optional[Tuple[Profile, Dict[str, Any]]]:
+        """Hợp nhất một lượt quét vào cache theo từng trường (không thay list).
+
+        Failed scan chỉ ghi bằng chứng, không đụng ``facebook_pages``. Page
+        vắng mặt trong lượt này vẫn được giữ, kèm ``retained_count``. Trả
+        ``None`` nếu profile đã bị xóa trong lúc quét.
         """
+        self._validate_profile_id(profile_id)
+        scan = dict(scan or {})
+        status = scan.get("discovery_status")
+        with self._lock, self._ipc_lock:
+            profiles = self.list_profiles()
+            target = next((p for p in profiles if p.id == profile_id), None)
+            if target is None:
+                return None
+            current = list(target.facebook_pages or [])
+            retained = len(current)
+            if status in (STATUS_COMPLETE, STATUS_PARTIAL):
+                merged, retained = merge_discovery_pages(
+                    current,
+                    scan.get("pages") or [],
+                    scan_id=scan.get("scan_id"),
+                    seen_at=scan.get("finished_at") or utc_now(),
+                )
+                if merged != current:
+                    target.facebook_pages = merged
+                    target.revision = (getattr(target, "revision", 1) or 1) + 1
+                    target.updated_at = int(time.time())
+                    finished = parse_utc(scan.get("finished_at"))
+                    observed_at = (
+                        int(finished.timestamp()) if finished else int(time.time())
+                    )
+                    target.facebook_pages_synced_at = max(
+                        int(target.facebook_pages_synced_at or 0), observed_at
+                    )
+                    self.save_profiles(profiles)
+            scan["retained_count"] = retained
+            try:
+                self._update_scan_meta_locked(profile_id, scan)
+            except OSError as e:
+                _safe_log(
+                    f"[Storage] Không ghi được scan meta: {type(e).__name__}"
+                )
+            return target, scan
+
+    def clear_facebook_pages(self, profile_id: str) -> Optional[Profile]:
+        """Xóa cache fanpage theo yêu cầu rõ ràng; không dùng khi refresh."""
+        self._validate_profile_id(profile_id)
         with self._lock, self._ipc_lock:
             profiles = self.list_profiles()
             for p in profiles:
                 if p.id != profile_id:
                     continue
-                p.facebook_pages = pages
-                p.facebook_pages_synced_at = synced_at
-                p.revision = (getattr(p, "revision", 1) or 1) + 1
-                p.updated_at = int(time.time())
-                self.save_profiles(profiles)
+                if p.facebook_pages:
+                    p.facebook_pages = []
+                    p.facebook_pages_synced_at = int(time.time())
+                    p.revision = (getattr(p, "revision", 1) or 1) + 1
+                    p.updated_at = int(time.time())
+                    self.save_profiles(profiles)
+                meta = self._read_scan_meta()
+                entry = (meta or {}).get("profiles", {}).get(profile_id)
+                last_scan = entry.get("last_scan") if isinstance(entry, dict) else None
+                if (
+                    isinstance(last_scan, dict)
+                    and last_scan.get("retained_count") != 0
+                ):
+                    last_scan["retained_count"] = 0
+                    entry["updated_at"] = to_utc_iso(utc_now())
+                    try:
+                        self._write_scan_meta(meta)
+                    except OSError as e:
+                        _safe_log(
+                            f"[Storage] Không cập nhật được scan meta sau khi "
+                            f"xóa cache: {type(e).__name__}"
+                        )
                 return p
             return None
 
@@ -616,6 +814,17 @@ class ProfileManager:
         )
 
     def delete_profile(self, profile_id: str) -> bool:
+        """Delete a profile while holding the shared lifecycle lock."""
+        self._validate_profile_id(profile_id)
+        try:
+            with self._profile_locks.acquire(profile_id, timeout=2.0):
+                return self._delete_profile_locked(profile_id)
+        except ProfileLockTimeout as e:
+            raise ProfileBusyError(
+                "Profile đang được thao tác bởi tiến trình khác. Hãy thử lại sau."
+            ) from e
+
+    def _delete_profile_locked(self, profile_id: str) -> bool:
         """Delete a profile with retryable, secret-safe ordering.
 
         Order: profile directory -> metadata -> secret. If the directory cannot
@@ -623,7 +832,6 @@ class ProfileManager:
         user can retry after closing the browser. Only a successful metadata
         save allows the secret to be removed.
         """
-        self._validate_profile_id(profile_id)
         # B1: rmtree user_data có thể chậm (thư mục GB, retry khi file bị
         # khóa) — làm nó NGOÀI file lock để không chặn create/update của
         # process khác tới timeout 8s.
@@ -667,6 +875,16 @@ class ProfileManager:
                 # Process khác đã xóa metadata sau khi ta đọc ở trên.
                 return False
             self.save_profiles(new_list)
+            meta = self._read_scan_meta()
+            if meta and profile_id in (meta.get("profiles") or {}):
+                meta["profiles"].pop(profile_id, None)
+                try:
+                    self._write_scan_meta(meta)
+                except OSError as e:
+                    _safe_log(
+                        f"[Storage] Không dọn được scan meta của {profile_id}: "
+                        f"{type(e).__name__}"
+                    )
 
         try:
             delete_proxy_password(profile_id)
@@ -683,52 +901,534 @@ class ProfileManager:
             )
         return True
 
-    def duplicate_profile(
-        self, profile_id: str, new_name: Optional[str] = None, copy_data: bool = False
+    def commit_staged_profile(self, profile: Profile) -> Profile:
+        """Publish an already-staged profile without creating directories.
+
+        The caller wrote the target user_data and DPAPI secret before this
+        point. Re-reading under the metadata lock keeps concurrent edits to
+        other profiles intact.
+        """
+        with self._lock, self._ipc_lock:
+            profiles = self.list_profiles()
+            if any(p.id == profile.id for p in profiles):
+                raise RuntimeError(
+                    f"Profile đích {profile.id} đã tồn tại trong metadata."
+                )
+            profiles.append(profile)
+            self.save_profiles(profiles)
+        return profile
+
+    @staticmethod
+    def _operation_lock_id(operation_id: str) -> str:
+        digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:32]
+        return f"copy-{digest}"
+
+    @staticmethod
+    def _profile_snapshot(profile: Profile) -> Dict[str, Any]:
+        data = profile.model_dump(context={"include_secrets": False})
+        proxy = data.get("proxy")
+        if isinstance(proxy, dict):
+            proxy.pop("password", None)
+        return data
+
+    def _read_operation_journal(self, operation_id: str) -> Optional[Dict[str, Any]]:
+        path = journal_path(DATA_DIR, operation_id)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as e:
+            raise CopyJournalError(
+                f"Journal không đọc được: {type(e).__name__}"
+            ) from e
+        if not isinstance(data, dict):
+            raise CopyJournalError("Journal phải là một object JSON")
+        return data
+
+    def _check_journal_source(self, journal: Dict[str, Any], source_id: str) -> None:
+        if str(journal.get("source_id") or "") != source_id:
+            raise ProfileCopyError(
+                "Mã thao tác đã được dùng cho một profile nguồn khác.",
+                code="COPY_OPERATION_CONFLICT",
+            )
+        operation_paths(DATA_DIR, PROFILES_DATA_DIR, journal)
+
+    def _result_profile(
+        self, result: Dict[str, Any], source_id: str
     ) -> Optional[Profile]:
-        with self._lock:
-            orig = self.get_profile(profile_id)
-            if not orig:
+        if str(result.get("source_id") or "") != source_id:
+            raise ProfileCopyError(
+                "Mã thao tác đã được dùng cho một profile nguồn khác.",
+                code="COPY_OPERATION_CONFLICT",
+            )
+        target_id = validate_profile_id(str(result.get("target_id") or ""))
+        return self.get_profile(target_id)
+
+    def _finalize_committed_operation(
+        self, journal: Dict[str, Any]
+    ) -> Optional[Profile]:
+        operation_id = str(journal.get("operation_id") or "")
+        target_id = validate_profile_id(str(journal.get("target_id") or ""))
+        target = self.get_profile(target_id)
+        if target is None:
+            return None
+        snapshot = journal.get("target_profile")
+        if not isinstance(snapshot, dict):
+            snapshot = self._profile_snapshot(target)
+        result = {
+            "operation_id": operation_id,
+            "source_id": journal.get("source_id"),
+            "target_id": target_id,
+            "committed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "profile": snapshot,
+        }
+        try:
+            write_operation_result(DATA_DIR, operation_id, result)
+        except ProfileCopyError as e:
+            _safe_log(f"[Storage] Không ghi được kết quả copy {operation_id}: {e}")
+        if journal.get("phase") != "committed":
+            try:
+                writer = CopyJournal(
+                    journal_path(DATA_DIR, operation_id),
+                    operation_id=operation_id,
+                    source_id=str(journal.get("source_id") or ""),
+                    target_id=target_id,
+                    owner=journal.get("owner"),
+                )
+                writer.update("committed", target_profile=snapshot)
+            except Exception as e:
+                _safe_log(
+                    f"[Storage] Không cập nhật được journal {operation_id}: "
+                    f"{type(e).__name__}"
+                )
+        return target
+
+    @staticmethod
+    def _journal_data(journal: Any) -> Dict[str, Any]:
+        if isinstance(journal, dict):
+            return journal
+        read = getattr(journal, "read", None)
+        if callable(read):
+            return read()
+        raise TypeError("Journal không hợp lệ")
+
+    def _cleanup_operation_artifacts(self, journal: Any) -> List[str]:
+        journal = self._journal_data(journal)
+        operation_id = str(journal.get("operation_id") or "")
+        target_id = str(journal.get("target_id") or "")
+        operation_paths(DATA_DIR, PROFILES_DATA_DIR, journal)
+        errors: List[str] = []
+        try:
+            cleanup_operation_root(PROFILES_DATA_DIR, operation_id)
+        except Exception as e:
+            errors.append(f"staging:{type(e).__name__}")
+        try:
+            remove_operation_target(PROFILES_DATA_DIR, target_id)
+        except Exception as e:
+            errors.append(f"target:{type(e).__name__}")
+        try:
+            delete_proxy_password(target_id)
+        except Exception as e:
+            errors.append(f"secret:{type(e).__name__}")
+        return errors
+
+    def _mark_cleanup_pending(
+        self, journal: Any, errors: List[str], error_type: str
+    ) -> None:
+        journal = self._journal_data(journal)
+        operation_id = str(journal.get("operation_id") or "")
+        try:
+            writer = CopyJournal(
+                journal_path(DATA_DIR, operation_id),
+                operation_id=operation_id,
+                source_id=str(journal.get("source_id") or ""),
+                target_id=str(journal.get("target_id") or ""),
+                owner=journal.get("owner"),
+            )
+            writer.update(
+                "cleanup_pending",
+                cleanup_errors=errors[:5],
+                error_type=error_type,
+            )
+        except Exception as e:
+            _safe_log(
+                f"[Storage] Không ghi được cleanup_pending cho {operation_id}: "
+                f"{type(e).__name__}"
+            )
+
+    def _recover_operation_locked(
+        self,
+        journal: Dict[str, Any],
+        *,
+        raise_on_cleanup_failure: bool = False,
+    ) -> Optional[Profile]:
+        """Resolve a stale operation while its lifecycle locks are held."""
+        operation_id = str(journal.get("operation_id") or "")
+        target_id = validate_profile_id(str(journal.get("target_id") or ""))
+        phase = str(journal.get("phase") or "")
+
+        if phase in ("committed", "cleanup_pending"):
+            target = self.get_profile(target_id)
+            if target is not None:
+                finalized = self._finalize_committed_operation(journal)
+                try:
+                    cleanup_operation_root(PROFILES_DATA_DIR, operation_id)
+                except Exception as e:
+                    # The copy is already published; keep reporting the
+                    # unfinished cleanup instead of deleting user data.
+                    self._mark_cleanup_pending(
+                        journal, [f"staging:{type(e).__name__}"], "CLEANUP_AFTER_COMMIT"
+                    )
+                return finalized
+            errors = self._cleanup_operation_artifacts(journal)
+            if errors:
+                self._mark_cleanup_pending(journal, errors, "RECOVERY_CLEANUP")
+                if raise_on_cleanup_failure:
+                    raise ProfileCopyError(
+                        "Bản sao chưa hoàn tất và chưa dọn được dữ liệu dở dang.",
+                        code="CLEANUP_PENDING",
+                    )
                 return None
+            try:
+                remove_operation_files(DATA_DIR, operation_id)
+            except CopyJournalError as e:
+                _safe_log(f"[Storage] Không xóa được operation {operation_id}: {e}")
+            return None
 
-            name = new_name or f"{orig.name} (Bản sao)"
-            new_fp = generate_fingerprint(
-                target_os=orig.fingerprint.os,
-                timezone=orig.fingerprint.timezone,
-                locale=orig.fingerprint.locale,
-                latitude=orig.fingerprint.latitude or 21.0285,
-                longitude=orig.fingerprint.longitude or 105.8542,
+        # Metadata is the publication point: a target that already exists in
+        # profiles.json is finished even if the journal lagged behind.
+        target = self.get_profile(target_id)
+        if target is not None:
+            return self._finalize_committed_operation(journal)
+
+        errors = self._cleanup_operation_artifacts(journal)
+        if errors:
+            self._mark_cleanup_pending(journal, errors, "RECOVERY_CLEANUP")
+            if raise_on_cleanup_failure:
+                raise ProfileCopyError(
+                    "Bản sao chưa hoàn tất và chưa dọn được dữ liệu dở dang.",
+                    code="CLEANUP_PENDING",
+                )
+            return None
+        try:
+            remove_operation_files(DATA_DIR, operation_id)
+        except CopyJournalError as e:
+            _safe_log(f"[Storage] Không xóa được operation {operation_id}: {e}")
+        return None
+
+    def recover_copy_operations(self, lock_timeout: float = 1.0) -> int:
+        """Finish or clean stale copy operations whose owner process is gone."""
+        handled = 0
+        for journal in list_operation_journals(DATA_DIR):
+            if journal_owner_alive(journal):
+                continue
+            operation_id = str(journal.get("operation_id") or "")
+            try:
+                with self._profile_locks.acquire(
+                    self._operation_lock_id(operation_id), timeout=lock_timeout
+                ):
+                    fresh = self._read_operation_journal(operation_id)
+                    if fresh is None or journal_owner_alive(fresh):
+                        continue
+                    operation_paths(DATA_DIR, PROFILES_DATA_DIR, fresh)
+                    source_id = str(fresh.get("source_id") or "")
+                    target_id = str(fresh.get("target_id") or "")
+                    with self._profile_locks.acquire_many(
+                        [source_id, target_id], timeout=lock_timeout
+                    ):
+                        self._recover_operation_locked(fresh)
+                    handled += 1
+            except (ProfileLockTimeout, ProfileCopyError, ValueError) as e:
+                _safe_log(
+                    f"[Storage] Bỏ qua phục hồi operation {operation_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
+        try:
+            purge_expired_operations(DATA_DIR)
+        except Exception as e:
+            _safe_log(f"[Storage] Không dọn được operation hết TTL: {type(e).__name__}")
+        return handled
+
+    def duplicate_profile(
+        self,
+        profile_id: str,
+        new_name: Optional[str] = None,
+        copy_data: bool = False,
+        *,
+        operation_id: Optional[str] = None,
+        source_running: Optional[Callable[[str], bool]] = None,
+        lock_timeout: float = 2.0,
+    ) -> Optional[Profile]:
+        """Transactional profile copy (QĐ-3).
+
+        No target metadata/directory is published until the staged copy and
+        its DPAPI secret are complete. A retry with the same operation_id
+        returns the previously created target instead of copying twice.
+        """
+        self._validate_profile_id(profile_id)
+        if operation_id is None:
+            operation_id = new_operation_id()
+        else:
+            validate_idempotency_key(operation_id)
+        try:
+            purge_expired_operations(DATA_DIR)
+        except Exception as e:
+            _safe_log(
+                f"[Storage] Không dọn được operation hết TTL: {type(e).__name__}"
             )
+        try:
+            with self._profile_locks.acquire(
+                self._operation_lock_id(operation_id), timeout=lock_timeout
+            ):
+                return self._duplicate_profile_locked(
+                    profile_id,
+                    new_name=new_name,
+                    copy_data=copy_data,
+                    operation_id=operation_id,
+                    source_running=source_running,
+                    lock_timeout=lock_timeout,
+                )
+        except ProfileLockTimeout as e:
+            raise ProfileCopyError(
+                "Profile đang được thao tác bởi tiến trình khác. Hãy thử lại sau.",
+                code="PROFILE_BUSY",
+            ) from e
 
-            new_profile = self.create_profile(
-                name=name,
-                target_os=orig.fingerprint.os,
-                proxy=orig.proxy.model_copy(),
-                fingerprint=new_fp,
-                notes=orig.notes,
-                tags=orig.tags.copy(),
-            )
+    def _duplicate_profile_locked(
+        self,
+        profile_id: str,
+        *,
+        new_name: Optional[str],
+        copy_data: bool,
+        operation_id: str,
+        source_running: Optional[Callable[[str], bool]],
+        lock_timeout: float,
+    ) -> Optional[Profile]:
+        journal = self._read_operation_journal(operation_id)
+        if journal is not None:
+            self._check_journal_source(journal, profile_id)
+        result = read_operation_result(DATA_DIR, operation_id)
+        if result is not None:
+            return self._result_profile(result, profile_id)
+        if journal is not None and journal.get("phase") == "committed":
+            target = self._finalize_committed_operation(journal)
+            if target is not None:
+                return target
+            return None
 
-            # M16: Tùy chọn sao chép dữ liệu phiên (cookies, session) nếu copy_data=True
-            if copy_data and new_profile:
-                orig_dir = os.path.join(PROFILES_DATA_DIR, profile_id)
-                new_dir = os.path.join(PROFILES_DATA_DIR, new_profile.id)
-                # Không nhân bản file cookies.json rời; phiên trình duyệt chỉ nằm trong user_data.
-                orig_user_data = os.path.join(orig_dir, "user_data")
-                new_user_data = os.path.join(new_dir, "user_data")
-                if os.path.exists(orig_user_data):
-                    # MED-4: nuốt lỗi copytree ở đây từng khiến bản sao nửa
-                    # chừng/corrupt được báo thành công. Raise để API trả lỗi
-                    # rõ ràng; profile mới đã tạo nhưng user_data trống.
-                    try:
-                        def ignore_locks(d, files):
-                            return [f for f in files if f in ("lockfile", "DevToolsActivePort", "SingletonLock", "SingletonCookie", "SingletonSocket")]
-                        shutil.copytree(orig_user_data, new_user_data, dirs_exist_ok=True, ignore=ignore_locks)
-                    except Exception as e:
-                        raise RuntimeError(
-                            "Sao chép dữ liệu phiên (user_data) thất bại: "
-                            f"{type(e).__name__}: {e}. Profile mới đã được tạo "
-                            "nhưng KHÔNG có dữ liệu phiên."
-                        ) from e
+        target_id = (
+            validate_profile_id(str(journal.get("target_id")))
+            if journal is not None
+            else str(uuid.uuid4())
+        )
+        try:
+            with self._profile_locks.acquire_many(
+                [profile_id, target_id], timeout=lock_timeout
+            ):
+                # A concurrent retry may have finished while we waited.
+                result = read_operation_result(DATA_DIR, operation_id)
+                if result is not None:
+                    return self._result_profile(result, profile_id)
+                journal = self._read_operation_journal(operation_id)
+                if journal is not None:
+                    self._check_journal_source(journal, profile_id)
+                    if journal.get("phase") == "committed":
+                        target = self._finalize_committed_operation(journal)
+                        if target is not None:
+                            return target
+                        return None
+                    recovered = self._recover_operation_locked(
+                        journal, raise_on_cleanup_failure=True
+                    )
+                    if recovered is not None:
+                        return recovered
+                    target_id = validate_profile_id(
+                        str(journal.get("target_id") or target_id)
+                    )
+                return self._run_copy_transaction(
+                    profile_id,
+                    target_id,
+                    operation_id,
+                    new_name=new_name,
+                    copy_data=copy_data,
+                    source_running=source_running,
+                )
+        except ProfileLockTimeout as e:
+            raise ProfileCopyError(
+                "Profile đang được thao tác bởi tiến trình khác. Hãy thử lại sau.",
+                code="PROFILE_BUSY",
+            ) from e
 
-            return new_profile
+    def _run_copy_transaction(
+        self,
+        profile_id: str,
+        target_id: str,
+        operation_id: str,
+        *,
+        new_name: Optional[str],
+        copy_data: bool,
+        source_running: Optional[Callable[[str], bool]],
+    ) -> Optional[Profile]:
+        orig = self.get_profile(profile_id)
+        if not orig:
+            return None
+
+        if copy_data and source_running is not None:
+            try:
+                running = bool(source_running(profile_id))
+            except Exception as e:
+                raise ProfileCopyError(
+                    "Không xác minh được profile nguồn đã dừng; hủy sao chép.",
+                    code="SOURCE_RUNNING",
+                ) from e
+            if running:
+                raise ProfileCopyError(
+                    "Hãy đóng profile trước khi sao chép dữ liệu phiên.",
+                    code="SOURCE_RUNNING",
+                )
+
+        new_fp = generate_fingerprint(
+            target_os=orig.fingerprint.os,
+            timezone=orig.fingerprint.timezone,
+            locale=orig.fingerprint.locale,
+            latitude=orig.fingerprint.latitude or 21.0285,
+            longitude=orig.fingerprint.longitude or 105.8542,
+        )
+        target = Profile(
+            id=target_id,
+            name=new_name or f"{orig.name} (Bản sao)",
+            proxy=orig.proxy.model_copy(deep=True) if orig.proxy else ProxyConfig(),
+            fingerprint=new_fp,
+            notes=orig.notes,
+            tags=list(orig.tags),
+        )
+        proxy_password = target.proxy.password if target.proxy else None
+        if target.proxy:
+            # Secret goes to DPAPI only; never to the journal or profiles.json.
+            target.proxy.password = None
+
+        source_user_data = os.path.join(PROFILES_DATA_DIR, profile_id, "user_data")
+        target_dir = os.path.join(PROFILES_DATA_DIR, target_id)
+        target_user_data = os.path.join(target_dir, "user_data")
+        staging_user_data = os.path.join(
+            PROFILES_DATA_DIR, ".staging", operation_id, "user_data"
+        )
+        copy_source_exists = os.path.isdir(source_user_data)
+
+        source_size = 0
+        if copy_data and copy_source_exists:
+            stats = measure_tree(source_user_data)
+            source_size = stats.total_bytes
+            check_disk_space(source_size, PROFILES_DATA_DIR)
+
+        snapshot = self._profile_snapshot(target)
+        journal = CopyJournal(
+            journal_path(DATA_DIR, operation_id),
+            operation_id=operation_id,
+            source_id=profile_id,
+            target_id=target_id,
+            owner=f"{os.getpid()}:{threading.get_ident()}",
+            source_dir=os.path.join(PROFILES_DATA_DIR, profile_id),
+            staging_dir=staging_user_data,
+            target_dir=target_user_data,
+        )
+        journal.write(
+            "staging",
+            copy_data=bool(copy_data),
+            source_size=source_size,
+            target_profile=snapshot,
+        )
+
+        try:
+            if copy_data and copy_source_exists:
+                prepare_staging(PROFILES_DATA_DIR, operation_id)
+                copied = copy_user_data(source_user_data, staging_user_data)
+                journal.update(
+                    "copied",
+                    copied_files=copied.total_files,
+                    copied_bytes=copied.total_bytes,
+                )
+                promote_staging(staging_user_data, target_user_data)
+                journal.update("promoted", promoted=True)
+            else:
+                journal.update(
+                    "promoted",
+                    promoted=False,
+                    source_missing=bool(copy_data and not copy_source_exists),
+                )
+
+            if proxy_password and target.proxy:
+                try:
+                    set_proxy_password(
+                        target_id,
+                        proxy_password,
+                        identity=target.proxy.identity_key(),
+                    )
+                except Exception as e:
+                    raise ProfileCopyError(
+                        "Không ghi được mật khẩu proxy cho bản sao. "
+                        "Dữ liệu phiên và metadata chưa được công bố.",
+                        code="COMMIT_FAILED",
+                    ) from e
+            journal.update("secret_written")
+
+            try:
+                self.commit_staged_profile(target)
+            except Exception as e:
+                raise ProfileCopyError(
+                    "Không ghi được metadata cho bản sao; đã hủy công bố profile đích.",
+                    code="COMMIT_FAILED",
+                ) from e
+
+            try:
+                journal.update("committed", target_profile=snapshot)
+            except Exception as e:
+                _safe_log(
+                    f"[Storage] Journal {operation_id} chưa ghi committed: "
+                    f"{type(e).__name__}"
+                )
+            try:
+                write_operation_result(
+                    DATA_DIR,
+                    operation_id,
+                    {
+                        "operation_id": operation_id,
+                        "source_id": profile_id,
+                        "target_id": target_id,
+                        "committed_at": time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                        ),
+                        "profile": snapshot,
+                    },
+                )
+            except ProfileCopyError as e:
+                # The committed journal still lets a retry return the same ID.
+                _safe_log(f"[Storage] Không ghi được kết quả copy {operation_id}: {e}")
+            try:
+                cleanup_operation_root(PROFILES_DATA_DIR, operation_id)
+            except Exception as e:
+                self._mark_cleanup_pending(
+                    journal, [f"staging:{type(e).__name__}"], "CLEANUP_AFTER_COMMIT"
+                )
+            return target
+        except Exception as exc:
+            errors = self._cleanup_operation_artifacts(journal)
+            if errors:
+                self._mark_cleanup_pending(journal, errors, type(exc).__name__)
+                raise ProfileCopyError(
+                    f"{exc} (dữ liệu dở dang chưa dọn được; trạng thái cleanup_pending)",
+                    code="CLEANUP_PENDING",
+                ) from exc
+            try:
+                remove_operation_files(DATA_DIR, operation_id)
+            except CopyJournalError as e:
+                _safe_log(
+                    f"[Storage] Không xóa được operation {operation_id}: {e}"
+                )
+            if isinstance(exc, ProfileCopyError):
+                raise
+            raise ProfileCopyError(
+                f"Sao chép profile thất bại: {type(exc).__name__}: {exc}",
+                code="COPY_FAILED",
+            ) from exc

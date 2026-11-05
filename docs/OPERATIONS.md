@@ -1,9 +1,12 @@
 # Runbook vận hành — Antidetect Python
 
-Cập nhật: **2026-10-26** (roadmap P0 + P1 + P2: CI + coverage gate, scheduler
+Cập nhật: **2026-11-05** (bổ sung vận hành CDP health, copy profile có
+transaction và fanpage F3/F4 — xem mục 4.8 và
+`VERIFICATION_STABILITY_FIX_2026-11-05.md`; đợt này **chưa commit**).
+Bản 2026-10-26 mô tả roadmap P0 + P1 + P2: CI + coverage gate, scheduler
 lease heartbeat + run history, UI `expected_revision`; tách module launcher/web,
 JS/CSS ra asset ngoài + CSP `script-src 'self'`, logging xoay vòng + metrics,
-Playwright UI smoke; bulk job xuyên instance và nâng cấp/rollback có chữ ký).
+Playwright UI smoke; bulk job xuyên instance và nâng cấp/rollback có chữ ký.
 Bản 2026-10-24 mô tả đợt hardening production (xem
 `VERIFICATION_2026-10-24.md`). Tài liệu này là hướng dẫn vận hành hàng ngày để
 giảm rủi ro khi dùng cho profile thật.
@@ -190,10 +193,11 @@ Chrome sạch của máy** (đo 1 lần, ghi lại — không so với 0%).
 
 ## 5. Checklist trước khi đưa profile vào quy trình thật
 
-1. `python -m pytest -q` → 255 passed + 1 skipped (baseline dev 2026-10-26;
-   skipped là Playwright UI smoke opt-in). Khi sửa nhiều chạy thêm
+1. `python -m pytest -q` → **407 passed + 1 skipped** (working tree F1–F4
+   2026-11-05; skipped là Playwright UI smoke opt-in). Khi sửa nhiều chạy thêm
    `python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing`
-   (coverage hiện tại 68.15%; CI fail dưới 58%).
+   — **coverage chưa đo lại trong đợt 2026-11-05**; lần cuối 71%, CI fail dưới
+   gate 58%.
 2. `python tools\verify_live.py --profile <id> --json $env:TEMP\v.json` →
    RESULT: PASS.
 3. `python tools\detector_audit.py --profile <id> --screenshots ... --json ...`
@@ -261,6 +265,18 @@ Chrome sạch của máy** (đo 1 lần, ghi lại — không so với 0%).
   key giữ offline. `--allow-unsigned` chỉ dành cho dev.
 - Server guard của updater là best-effort (đọc `server.pid` + health); server
   chạy port lạ hoặc do user khác khởi chạy có thể không bị phát hiện.
+- **CDP health (F1, 2026-11-05):** mới được kiểm chứng bằng unit/API; chưa
+  ngắt socket thật, chưa restart server thật khi Chrome còn mở. Không tự
+  reconnect; phục hồi bằng stop → relaunch.
+- **Copy transaction (F2, 2026-11-05):** khóa/journal là cục bộ trên một ổ đĩa,
+  không phải distributed lock; chưa copy nhiều GB với antivirus, chưa kill
+  process thật tại từng mốc journal.
+- **Fanpage F3/F4 (2026-11-05):** contract/merge/giới hạn đã có test tự động;
+  chưa chạy discovery/deep với Facebook thật, chưa kiểm tra DOM ảo hóa >100
+  page, logout/đổi tài khoản giữa lượt hoặc UI trên trình duyệt thật.
+- **UI/E2E/soak:** Playwright UI smoke, `tools/e2e_smoke.py` và soak 24–72h
+  chưa chạy lại trên working tree 2026-11-05; không suy diễn PASS từ test tự
+  động.
 
 
 ## 4.3. TLS diversity + JA3/JA4 (Giai đoạn 3, 2026-10-24)
@@ -399,3 +415,72 @@ python tools\update.py rollback --stop-server --yes
   server trả 409 và lệnh dừng — đóng profile rồi chạy lại.
 - Không có cơ chế tự tải/tự cập nhật: mọi thay đổi do người vận hành chủ động
   chạy CLI và xác nhận `--yes`.
+
+## 4.8. Sức khỏe CDP, copy profile và fanpage (2026-11-05)
+
+Đợt sửa ổn định F1–F4 thêm ba nhóm hành vi vận hành dưới đây. Đây là mô tả
+hành vi đã có test tự động; live test với Facebook/Chrome thật và soak vẫn
+**chưa chạy** (xem `VERIFICATION_STABILITY_FIX_2026-11-05.md`).
+
+### 4.8.1. Chrome đang chạy ≠ CDP khỏe
+
+- List profile và response start có `cdp_health` (`state`, `reason`,
+  `checked_at`, `restart_required`). Dashboard hiển thị “Không có CDP
+  (detached)” cho phiên `--detach` đã thoát CLI, “Cần khởi chạy lại” cho
+  `recovery_required`, và cảnh báo khi `degraded`.
+- Thao tác cần CDP (mở tab, export/import cookies, fanpage discovery/deep,
+  start vào profile đang chạy) trả **409** với `code`:
+  `CDP_UNHEALTHY`, `CDP_STARTING`, `RECOVERY_REQUIRED`, `DETACHED_NO_CDP`,
+  `PROFILE_BUSY`. Stop, xem trạng thái và chẩn đoán vẫn chạy khi degraded.
+- Cách xử lý: **dừng profile rồi mở lại từ dashboard/server**. Không có tự
+  reconnect; không dùng phiên detached cho collector, deep scan hoặc cookie
+  automation.
+- Ngân sách phát hiện: heartbeat 10s, timeout 5s, hai lần thất bại liên tiếp;
+  reader timeout 30s. UI thấy ở lần polling kế tiếp; sleep/wake tính riêng.
+
+### 4.8.2. Nhân bản profile (copy transaction)
+
+- `POST /api/profiles/{id}/duplicate?copy_data=true|false` giữ endpoint cũ.
+  Client nên gửi `Idempotency-Key` (8–64 ký tự chữ/số/`_`/`-`); response có
+  `X-Operation-Id`. Bấm lại sau lỗi mạng với cùng key trả đúng profile đích,
+  không tạo bản sao thứ hai.
+- `copy_data=true` yêu cầu profile nguồn đã dừng; tool cũng phát hiện Chrome
+  bên ngoài đang giữ `user_data` và từ chối (`SOURCE_RUNNING`). Không tự dừng
+  browser đó.
+- Lỗi thường gặp: `PROFILE_BUSY`/`SOURCE_RUNNING` (409), `COPY_NO_SPACE`
+  (507), `COMMIT_FAILED`, `CLEANUP_PENDING`. Đọc `code` trong JSON, không chỉ
+  đọc chuỗi tiếng Việt.
+- Chỉ profile đích **hoàn chỉnh** mới xuất hiện trong danh sách. Journal nằm
+  ở `data/copy_operations/<operation>.json`; lúc khởi động tool tự hoàn tất
+  hoặc dọn operation mồ côi. Không xóa journal khi giao dịch còn chạy.
+  Nếu thấy `cleanup_pending`, giữ nguyên dữ liệu và xử lý theo log; không tự
+  xóa thư mục đích.
+- Khóa là file lock trên một ổ cục bộ, không phải distributed lock nhiều máy.
+
+### 4.8.3. Fanpage: độ đầy đủ, cache và thời gian
+
+- Mỗi lượt quét trả `discovery_status` (`complete`/`partial`/`failed`/
+  `unknown`), `completion_reason`, `observed_count` (đọc trong lượt) và
+  `retained_count` (giữ từ cache). Giao diện ghi rõ “đọc N page trong lượt
+  này · giữ M page từ cache”; không cộng cache thành số vừa đọc.
+- Chỉ `complete` khi có `TOTAL_MATCH`, `END_MARKER` hoặc `EMPTY_CONFIRMED`.
+  Ba vòng cuộn ổn định không thêm page chỉ là `partial` + `NO_END_SIGNAL`.
+  Giới hạn: discovery 60s (endpoint 90s), 500 page, 50 vòng cuộn.
+- **Refresh không xóa cache.** Partial giữ page vắng mặt và chi tiết cũ;
+  failed không đổi `pages`/`synced_at`/`revision`. Complete rỗng cũng không
+  tự xóa lịch sử. Xóa lịch sử bằng nút **“Xóa cache”** hoặc
+  `DELETE /api/profiles/{id}/facebook/pages`. `force=1` chỉ còn là đường
+  tương thích để xóa khi kết quả rỗng có bằng chứng.
+- Tài khoản đăng nhập khác lần quét trước → `failed` +
+  `LOGIN_IDENTITY_MISMATCH`, không merge. Không đọc được ID → `unknown`,
+  không chặn.
+- Chỉ một lượt quét fanpage/profile tại một thời điểm (scan lock xuyên
+  process); lượt thứ hai nhận 409. Stop/delete không bị scan lock chặn; dừng
+  profile giữa lượt sẽ hủy collector và giữ cache.
+- Cache dùng `login_status="unknown"` vì chưa kiểm tra phiên; `stale` phản
+  ánh tuổi dữ liệu/độ đầy đủ. Ngưỡng stale mặc định 48h, đổi bằng
+  `ANTIDETECT_FANPAGE_STALE_HOURS`. Dữ liệu legacy được quy đổi tại thời điểm
+  trả response, không dùng `last_post_days` đã đóng băng làm kết luận.
+- Deep scan có budget riêng theo từng page; metadata scan lưu riêng ở
+  `data/facebook_scan_meta.json` (version 1), không thêm field top-level vào
+  profile.
