@@ -191,7 +191,7 @@ def _chrome_processes(dirs):
     return result
 
 
-def _minimize_pid(pid):
+def _hide_pid(pid):
     if sys.platform != "win32" or not pid:
         return False
     try:
@@ -205,7 +205,7 @@ def _minimize_pid(pid):
             owner = wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
             if int(owner.value) == int(pid) and user32.IsWindowVisible(hwnd):
-                user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE
                 found["count"] += 1
             return True
 
@@ -213,6 +213,19 @@ def _minimize_pid(pid):
         return found["count"] > 0
     except Exception:
         return False
+
+
+def _keep_awake(enabled):
+    if sys.platform != "win32":
+        return
+    try:
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if enabled else 0)
+        )
+    except Exception:
+        pass
 
 
 def _close_soak_tabs(port, soak_base, keep=1):
@@ -532,7 +545,7 @@ class SoakRunner:
         profile["pid"] = body.get("pid")
         profile["port"] = body.get("port")
         profile["starts"] = profile.get("starts", 0) + 1
-        _minimize_pid(profile["pid"])
+        _hide_pid(profile["pid"])
         health = (body.get("cdp_health") or {}).get("state")
         if body.get("degraded") or health not in (None, "healthy"):
             self._error(
@@ -634,10 +647,13 @@ class SoakRunner:
             if health in ("degraded", "recovery_required"):
                 degraded += 1
             pids = chrome.get(profile["id"], {}).get("pids", [])
+            if profile["active"] and profile.get("pid"):
+                _hide_pid(profile["pid"])
             if profile["active"] and not pids:
                 self._error(
                     "missing_chrome",
                     f"{profile['name']}: active nhưng không thấy process",
+                    critical=True,
                 )
             if not profile["active"] and pids:
                 self._error(
@@ -649,6 +665,7 @@ class SoakRunner:
                 self._error(
                     "status_mismatch",
                     f"{profile['name']}: active nhưng API status={status_text}",
+                    critical=True,
                 )
         server_metrics = _process_metrics(self.server.pid if self.server else None)
         chrome_total = sum(entry["rss_mb"] for entry in chrome.values())
@@ -783,6 +800,7 @@ class SoakRunner:
             )
             if status == 200 and body.get("success"):
                 opened += 1
+                _hide_pid(profile.get("pid"))
             else:
                 self._error(
                     "open_tab",
@@ -982,7 +1000,12 @@ class SoakRunner:
         latencies = sorted(self._api_latencies)
         p95 = latencies[int(len(latencies) * 0.95)] if latencies else None
         duration = time.time() - self._started_ts
-        passed = completed and not self.critical and orphan_count == 0
+        passed = (
+            completed
+            and not self.critical
+            and orphan_count == 0
+            and not self.errors
+        )
         self.state["finished_at"] = _now_iso()
         self.state["status"] = "completed" if passed else "failed"
         self.state["summary"] = {
@@ -1021,6 +1044,7 @@ class SoakRunner:
 
     def run(self):
         self._validate_dirs()
+        _keep_awake(True)
         self._save()
         self._log(
             f"SOAK start: {self.hours}h, {self.target_profiles} profiles, "
@@ -1044,6 +1068,7 @@ class SoakRunner:
             traceback.print_exc()
         finally:
             return_code = self._finalize()
+            _keep_awake(False)
         return return_code
 
 
@@ -1083,6 +1108,11 @@ def _stop(path):
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     parser = argparse.ArgumentParser(description="Soak test Antidetect Python")
     sub = parser.add_subparsers(dest="command", required=True)
 
