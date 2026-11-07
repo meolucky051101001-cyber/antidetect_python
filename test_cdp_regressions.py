@@ -126,3 +126,134 @@ def test_r3_ui_shows_warnings_even_when_cdp_ready(fn):
     warning_pos = block.index("else if (data.warning)")
     success_pos = block.index("'success'")
     assert not_ready_pos < warnings_pos < warning_pos < success_pos
+
+
+def test_session_tabs_restore_occurs_after_r4_core_verification():
+    src = _read(LAUNCHER_SRC)
+    configure = _between(
+        src, "async def configure_page(", "async def configure_iframe("
+    )
+    core_wait_pos = configure.index("core_event.wait")
+    blank_branch_pos = configure.index('if target_url == "about:blank":')
+    restore_pos = configure.index("self._load_session_tabs")
+    assert core_wait_pos < blank_branch_pos < restore_pos
+
+
+def test_session_tabs_save_load_and_filtering(tmp_path):
+    from antidetect.launcher import BrowserLauncher, MAX_RESTORED_TABS
+
+    launcher = object.__new__(BrowserLauncher)
+    user_data_dir = str(tmp_path / "user_data")
+    os.makedirs(user_data_dir, exist_ok=True)
+
+    raw_urls = [
+        "about:blank",
+        "chrome://newtab/",
+        "http://127.0.0.1:9222/json/version",
+        "https://www.facebook.com/",
+        "https://www.facebook.com/",  # consecutive duplicate
+        "https://www.facebook.com/pages/?category=your_pages",
+        "edge://settings",
+        "devtools://devtools/bundled/inspector.html",
+    ]
+    assert launcher._save_session_tabs(user_data_dir, raw_urls) is True
+    loaded = launcher._load_session_tabs(user_data_dir)
+    assert loaded == [
+        "https://www.facebook.com/",
+        "https://www.facebook.com/pages/?category=your_pages",
+    ]
+
+    # Empty / about:blank-only updates must NOT wipe out previously saved tabs
+    # when the browser window is closing and detaching tabs.
+    assert launcher._save_session_tabs(user_data_dir, ["about:blank", "chrome://newtab/"]) is False
+    assert launcher._load_session_tabs(user_data_dir) == [
+        "https://www.facebook.com/",
+        "https://www.facebook.com/pages/?category=your_pages",
+    ]
+
+    # Cap at MAX_RESTORED_TABS
+    many_urls = [f"https://example.com/page-{i}" for i in range(MAX_RESTORED_TABS + 5)]
+    assert launcher._save_session_tabs(user_data_dir, many_urls) is True
+    assert len(launcher._load_session_tabs(user_data_dir)) == MAX_RESTORED_TABS
+
+
+def test_snapshot_tabs_via_http_ignores_transient_scan_tabs(tmp_path, monkeypatch):
+    import io
+    import json
+    import urllib.request
+    from antidetect.facebook import TRANSIENT_TARGET_IDS
+    from antidetect.launcher import BrowserLauncher
+
+    launcher = object.__new__(BrowserLauncher)
+    user_data_dir = str(tmp_path / "user_data")
+    os.makedirs(user_data_dir, exist_ok=True)
+
+    fake_targets = [
+        {
+            "id": "scan-temp-tab",
+            "type": "page",
+            "url": "https://www.facebook.com/bookmarks/pages",
+        },
+        {
+            "id": "user-tab-2",
+            "type": "page",
+            "url": "https://www.facebook.com/myfanpage",
+        },
+        {
+            "id": "user-tab-1",
+            "type": "page",
+            "url": "https://www.facebook.com/",
+        },
+        {
+            "id": "sw-1",
+            "type": "service_worker",
+            "url": "https://www.facebook.com/sw.js",
+        },
+    ]
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(fake_targets).encode("utf-8")
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+    TRANSIENT_TARGET_IDS.add("scan-temp-tab")
+    try:
+        saved = launcher._snapshot_tabs_via_http(9222, user_data_dir)
+    finally:
+        TRANSIENT_TARGET_IDS.discard("scan-temp-tab")
+
+    assert saved == [
+        "https://www.facebook.com/",
+        "https://www.facebook.com/myfanpage",
+    ]
+    assert launcher._load_session_tabs(user_data_dir) == [
+        "https://www.facebook.com/",
+        "https://www.facebook.com/myfanpage",
+    ]
+
+
+def test_prepare_clean_chrome_preferences_clears_crash_flag(tmp_path):
+    import json
+    from antidetect.launcher import BrowserLauncher
+
+    user_data_dir = tmp_path / "user_data"
+    default_dir = user_data_dir / "Default"
+    default_dir.mkdir(parents=True)
+    prefs_file = default_dir / "Preferences"
+    prefs_file.write_text(
+        json.dumps({"profile": {"exit_type": "Crashed", "exited_cleanly": False, "name": "P1"}}),
+        encoding="utf-8",
+    )
+
+    BrowserLauncher._prepare_clean_chrome_preferences(str(user_data_dir))
+    updated = json.loads(prefs_file.read_text(encoding="utf-8"))
+    assert updated["profile"]["exit_type"] == "Normal"
+    assert updated["profile"]["exited_cleanly"] is True
+    assert updated["profile"]["name"] == "P1"
+

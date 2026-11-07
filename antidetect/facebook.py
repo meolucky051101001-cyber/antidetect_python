@@ -23,6 +23,10 @@ from .fanpage_scan import (
     evaluate_discovery,
 )
 
+# Các targetId của tab tạm do trình quét fanpage tự mở và tự đóng.
+# Launcher dùng tập này để không ghi đè tab tạm vào danh sách tab phiên của người dùng.
+TRANSIENT_TARGET_IDS: set = set()
+
 
 # Fanpage listing: mở tab facebook.com/bookmarks/pages TRONG phiên profile
 # (session đã đăng nhập). Mỗi vòng đọc DOM, ghi nhận bằng chứng kết thúc
@@ -959,6 +963,7 @@ async def fetch_pages_cdp(
         ) from e
     if not target_id:
         raise RuntimeError("Chrome không trả về tab mới.")
+    TRANSIENT_TARGET_IDS.add(str(target_id))
 
     started_at = utc_now()
     try:
@@ -1218,6 +1223,7 @@ async def fetch_pages_cdp(
             result["url"] = last_snap.get("url")
             return result
     finally:
+        TRANSIENT_TARGET_IDS.discard(str(target_id))
         # Tab này do tool mở — luôn đóng lại, kể cả khi scrape lỗi.
         try:
             await asyncio.to_thread(_http_json, f"/json/close/{target_id}", "PUT")
@@ -1304,6 +1310,7 @@ async def fetch_pages_deep_cdp(
         ) from e
     if not target_id:
         raise RuntimeError("Chrome không trả về tab mới.")
+    TRANSIENT_TARGET_IDS.add(str(target_id))
 
     results: Dict[str, Dict[str, Any]] = {}
     try:
@@ -1447,6 +1454,7 @@ async def fetch_pages_deep_cdp(
                 results[page_url] = entry
         return results
     finally:
+        TRANSIENT_TARGET_IDS.discard(str(target_id))
         try:
             await asyncio.to_thread(_http_json, f"/json/close/{target_id}", "PUT")
         except Exception:

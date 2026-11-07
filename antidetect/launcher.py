@@ -63,6 +63,7 @@ from .browser_env import (
 )
 from .cookies import fetch_cookies_cdp, normalize_cookies, set_cookies_cdp
 from .facebook import (
+    TRANSIENT_TARGET_IDS,
     ScanAborted,
     classify_facebook_page,
     fb_unit_to_days as _fb_unit_to_days,
@@ -73,6 +74,9 @@ from .facebook import (
 )
 
 log = get_logger("launcher")
+
+SESSION_TABS_FILENAME = "antidetect_session_tabs.json"
+MAX_RESTORED_TABS = 15
 
 
 def _safe_run_async(coro):
@@ -672,6 +676,143 @@ class BrowserLauncher:
         # an unanswerable query (the source is already not tracked as running).
         return bool(pids)
 
+    # ------------------------------------------------------------------
+    # Lưu & khôi phục các tab đang mở của từng profile qua các lần tắt/bật
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _session_tabs_path(user_data_dir: str) -> str:
+        return os.path.join(user_data_dir, SESSION_TABS_FILENAME)
+
+    @classmethod
+    def _filter_restorable_urls(cls, urls: Any) -> List[str]:
+        """Chỉ giữ các URL web thực sự (http/https), loại bỏ about:blank và trang nội bộ."""
+        if not urls:
+            return []
+        cleaned: List[str] = []
+        for raw in urls:
+            if not isinstance(raw, str):
+                continue
+            url = raw.strip()
+            if not url:
+                continue
+            lower = url.lower()
+            if not (lower.startswith("http://") or lower.startswith("https://")):
+                continue
+            if lower.startswith(("http://127.0.0.1:", "http://localhost:")):
+                if "/json/" in lower or "/devtools/" in lower:
+                    continue
+            if cleaned and cleaned[-1] == url:
+                continue
+            cleaned.append(url)
+            if len(cleaned) >= MAX_RESTORED_TABS:
+                break
+        return cleaned
+
+    def _save_session_tabs(self, user_data_dir: Optional[str], urls: Any) -> bool:
+        """Ghi nguyên tử danh sách tab đang mở vào user_data_dir của profile.
+
+        Chỉ cập nhật khi có ít nhất 1 URL http(s) hợp lệ để thao tác đóng trình
+        duyệt (lúc các tab lần lượt bị detach) không xóa mất danh sách đã lưu.
+        """
+        if not user_data_dir or not os.path.isdir(user_data_dir):
+            return False
+        filtered = self._filter_restorable_urls(urls)
+        if not filtered:
+            return False
+        path = self._session_tabs_path(user_data_dir)
+        tmp_path = f"{path}.{uuid.uuid4().hex[:8]}.tmp"
+        payload = {
+            "urls": filtered,
+            "updated_at": int(time.time()),
+        }
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+            return True
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            return False
+
+    def _load_session_tabs(self, user_data_dir: Optional[str]) -> List[str]:
+        """Đọc danh sách tab đã lưu từ lần chạy trước của profile."""
+        if not user_data_dir:
+            return []
+        path = self._session_tabs_path(user_data_dir)
+        if not os.path.isfile(path):
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return self._filter_restorable_urls(data.get("urls") or [])
+            if isinstance(data, list):
+                return self._filter_restorable_urls(data)
+        except Exception:
+            pass
+        return []
+
+    def _snapshot_tabs_via_http(
+        self, port: Optional[int], user_data_dir: Optional[str]
+    ) -> List[str]:
+        """Chụp nhanh danh sách tab qua /json/list ngay trước khi dừng profile."""
+        if not port or not user_data_dir:
+            return []
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{int(port)}/json/list", timeout=1.0
+            ) as resp:
+                targets = json.loads(resp.read().decode("utf-8", "replace"))
+            if not isinstance(targets, list):
+                return []
+            urls = [
+                t.get("url")
+                for t in targets
+                if isinstance(t, dict)
+                and t.get("type") == "page"
+                and str(t.get("id") or "") not in TRANSIENT_TARGET_IDS
+            ]
+            # /json/list thường trả tab mới mở trước; đảo lại để giữ thứ tự tab.
+            urls.reverse()
+            filtered = self._filter_restorable_urls(urls)
+            if filtered:
+                self._save_session_tabs(user_data_dir, filtered)
+            return filtered
+        except Exception:
+            return []
+
+    @staticmethod
+    def _prepare_clean_chrome_preferences(user_data_dir: Optional[str]) -> None:
+        """Đánh dấu trạng thái thoát sạch trong Preferences để tránh hộp thoại báo crash."""
+        if not user_data_dir or not os.path.isdir(user_data_dir):
+            return
+        prefs_path = os.path.join(user_data_dir, "Default", "Preferences")
+        if not os.path.isfile(prefs_path):
+            return
+        try:
+            with open(prefs_path, "r", encoding="utf-8") as f:
+                prefs = json.load(f)
+            if not isinstance(prefs, dict):
+                return
+            prof = prefs.get("profile")
+            if not isinstance(prof, dict):
+                prof = {}
+                prefs["profile"] = prof
+            if prof.get("exit_type") == "Normal" and prof.get("exited_cleanly") is True:
+                return
+            prof["exit_type"] = "Normal"
+            prof["exited_cleanly"] = True
+            tmp_path = f"{prefs_path}.{uuid.uuid4().hex[:8]}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(prefs, f, ensure_ascii=False)
+            os.replace(tmp_path, prefs_path)
+        except Exception:
+            pass
+
     async def _probe_page_ready(self, port):
         """Confirm a page-domain reply without treating it as emulation validation."""
         import websockets
@@ -1245,6 +1386,41 @@ class BrowserLauncher:
                     return task
 
                 is_first_tab = True
+                session_restore_done = False
+                sync_tabs_lock = asyncio.Lock()
+
+                async def sync_session_tabs(delay: float = 0.0):
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    if not session_restore_done:
+                        return
+                    if not self._cdp_process_alive(profile.id):
+                        return
+                    if launch_id and self.cdp_health.is_stopping(profile.id):
+                        return
+                    if sync_tabs_lock.locked():
+                        return
+                    async with sync_tabs_lock:
+                        if not self._cdp_process_alive(profile.id):
+                            return
+                        if launch_id and self.cdp_health.is_stopping(profile.id):
+                            return
+                        try:
+                            res = await send("Target.getTargets")
+                            infos = (res or {}).get("targetInfos") or []
+                            urls = [
+                                t.get("url")
+                                for t in infos
+                                if isinstance(t, dict)
+                                and t.get("type") == "page"
+                                and str(t.get("targetId") or "") not in TRANSIENT_TARGET_IDS
+                            ]
+                            if urls:
+                                await asyncio.to_thread(
+                                    self._save_session_tabs, user_data_dir, urls
+                                )
+                        except Exception:
+                            pass
 
                 async def apply_screen_emulation(session_id):
                     """S3: let Chrome's native layer set screen.* and CSS media.
@@ -1274,7 +1450,7 @@ class BrowserLauncher:
                         )
 
                 async def configure_page(session_id, target_info):
-                    nonlocal is_first_tab
+                    nonlocal is_first_tab, session_restore_done
                     first_tab = is_first_tab
                     if first_tab:
                         is_first_tab = False
@@ -1350,31 +1526,56 @@ class BrowserLauncher:
                     if profile.id in self._cdp_ready_events:
                         self._cdp_ready_events[profile.id].set()
                     if first_tab:
-                        core_event = self._core_verified_events.get(profile.id)
-                        if core_event is not None:
-                            await asyncio.to_thread(core_event.wait, 8.0)
-                        if target_url == "about:blank":
-                            nav_event = self._navigation_events.get(profile.id)
-                            if nav_event is not None:
-                                nav_event.set()
-                        elif target_url:
-                            load_event = asyncio.Event()
-                            self._page_load_events[session_id] = load_event
-                            try:
-                                await send(
-                                    "Page.navigate",
-                                    {"url": target_url},
-                                    session_id=session_id,
-                                )
-                                try:
-                                    await asyncio.wait_for(load_event.wait(), timeout=10.0)
-                                except asyncio.TimeoutError:
-                                    pass
-                            finally:
-                                self._page_load_events.pop(session_id, None)
+                        try:
+                            core_event = self._core_verified_events.get(profile.id)
+                            if core_event is not None:
+                                await asyncio.to_thread(core_event.wait, 8.0)
+                            if target_url == "about:blank":
                                 nav_event = self._navigation_events.get(profile.id)
                                 if nav_event is not None:
                                     nav_event.set()
+                                restored_urls = await asyncio.to_thread(
+                                    self._load_session_tabs, user_data_dir
+                                )
+                                if restored_urls:
+                                    try:
+                                        await send(
+                                            "Page.navigate",
+                                            {"url": restored_urls[0]},
+                                            session_id=session_id,
+                                        )
+                                        for extra_url in restored_urls[1:]:
+                                            try:
+                                                await send(
+                                                    "Target.createTarget",
+                                                    {"url": extra_url},
+                                                )
+                                            except Exception:
+                                                pass
+                                        await asyncio.sleep(0.5)
+                                    except Exception:
+                                        pass
+                            elif target_url:
+                                load_event = asyncio.Event()
+                                self._page_load_events[session_id] = load_event
+                                try:
+                                    await send(
+                                        "Page.navigate",
+                                        {"url": target_url},
+                                        session_id=session_id,
+                                    )
+                                    try:
+                                        await asyncio.wait_for(load_event.wait(), timeout=10.0)
+                                    except asyncio.TimeoutError:
+                                        pass
+                                finally:
+                                    self._page_load_events.pop(session_id, None)
+                                    nav_event = self._navigation_events.get(profile.id)
+                                    if nav_event is not None:
+                                        nav_event.set()
+                        finally:
+                            session_restore_done = True
+                        asyncio.create_task(sync_session_tabs(0.5))
 
                 async def configure_iframe(session_id, target_info):
                     # OOPIF: Page.addScriptToEvaluateOnNewDocument handles the
@@ -1487,10 +1688,16 @@ class BrowserLauncher:
                         load_event = self._page_load_events.get(session_id)
                         if load_event is not None:
                             load_event.set()
+                        asyncio.create_task(sync_session_tabs(0.2))
+                        return
+
+                    if method == "Page.navigatedWithinDocument":
+                        asyncio.create_task(sync_session_tabs(0.2))
                         return
 
                     if method == "Target.detachedFromTarget":
                         attached_sessions.discard(params.get("sessionId"))
+                        asyncio.create_task(sync_session_tabs(0.35))
                         return
 
                     if method == "Target.attachedToTarget":
@@ -1647,6 +1854,7 @@ class BrowserLauncher:
                         failures = 0
                         if launch_id:
                             self.cdp_health.mark_heartbeat(profile.id, launch_id)
+                        await sync_session_tabs()
 
                 reader_task = asyncio.create_task(reader_loop())
                 keepalive_task = asyncio.create_task(keepalive_loop())
@@ -1857,6 +2065,7 @@ class BrowserLauncher:
             profile_dir = self.manager.get_profile_dir(profile_id)
             user_data_dir = os.path.join(profile_dir, "user_data")
             os.makedirs(user_data_dir, exist_ok=True)
+            self._prepare_clean_chrome_preferences(user_data_dir)
 
             # Xóa DevToolsActivePort cũ nếu tồn tại (tránh đọc nhầm port từ phiên crash trước)
             active_port_file = os.path.join(user_data_dir, "DevToolsActivePort")
@@ -1919,6 +2128,7 @@ class BrowserLauncher:
                 "--high-dpi-support=1",
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--hide-crash-restore-bubble",
                 # L3: Giới hạn dung lượng bộ nhớ đệm chống phình ổ đĩa
                 "--disk-cache-size=104857600",
                 "--media-cache-size=52428800",
@@ -2240,6 +2450,10 @@ class BrowserLauncher:
             user_data_dir = record.get("user_data_dir") or os.path.join(
                 PROFILES_DATA_DIR, profile_id, "user_data"
             )
+            if proc is not None and proc.poll() is None:
+                live_port = self.active_ports.get(profile_id)
+                if live_port:
+                    self._snapshot_tabs_via_http(live_port, user_data_dir)
             launch_id = self.cdp_health.current_launch_id(profile_id) or record.get(
                 "launch_id"
             )
