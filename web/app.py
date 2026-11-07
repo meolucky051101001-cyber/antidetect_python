@@ -69,6 +69,7 @@ from antidetect.bulk_jobs import (
 )
 from antidetect.applog import get_logger, setup_logging
 from antidetect import metrics
+from antidetect.fanpages import FanpageRevisionConflictError, FanpageService
 
 from .schemas import (
     AuditFixRequest,
@@ -76,6 +77,9 @@ from .schemas import (
     CdpHealth,
     CheckProxyRequest,
     CreateProfileRequest,
+    FanpageBulkUpdateRequest,
+    FanpageOpenRequest,
+    FanpageUpdateRequest,
     ImportCookiesRequest,
     ImportProfilesRequest,
     LaunchGateSettingsRequest,
@@ -2229,3 +2233,327 @@ async def check_proxy_endpoint(req: CheckProxyRequest):
 @app.get("/api/fingerprint/random")
 async def random_fingerprint_endpoint(target_os: str = "windows"):
     return generate_fingerprint(target_os=target_os)
+
+
+# --- Fanpage Manager (Giai đoạn 1) ---
+
+_fanpage_service_cache: Dict[str, FanpageService] = {}
+_fanpage_service_lock = threading.Lock()
+
+
+def get_fanpage_service() -> FanpageService:
+    """Khởi tạo lười (lazy) FanpageService gắn với thư mục data của profile_manager hiện hành.
+
+    Tuyệt đối không mở/ghi SQLite ở thời điểm import module để các bài test
+    hoán đổi ``profile_manager`` hoặc ``ANTIDETECT_DATA_DIR`` luôn cô lập
+    100% khỏi ``data/`` thật.
+    """
+    import antidetect.storage as _storage_mod
+
+    data_dir = os.path.abspath(
+        getattr(profile_manager, "data_dir", None)
+        or getattr(_storage_mod, "DATA_DIR", None)
+        or os.environ.get("ANTIDETECT_DATA_DIR")
+        or DATA_DIR
+    )
+    with _fanpage_service_lock:
+        svc = _fanpage_service_cache.get(data_dir)
+        if (
+            svc is None
+            or svc.profile_manager is not profile_manager
+            or svc.launcher is not launcher
+        ):
+            svc = FanpageService(
+                profile_manager=profile_manager,
+                launcher=launcher,
+                db_path=os.path.join(data_dir, "fanpages.sqlite"),
+            )
+            _fanpage_service_cache[data_dir] = svc
+        return svc
+
+
+@app.get("/fanpages", response_class=HTMLResponse)
+async def fanpages_page(request: Request):
+    if not authorized(request):
+        return templates.TemplateResponse(
+            request=request, name="unlock.html", context={}
+        )
+    return templates.TemplateResponse(
+        request=request, name="fanpages.html", context={}
+    )
+
+
+@app.get("/api/fanpages/summary")
+async def get_fanpages_summary(
+    include_archived: bool = False,
+    profile_id: Optional[str] = None,
+    tag: Optional[str] = None,
+):
+    svc = get_fanpage_service()
+    summary = await asyncio.to_thread(
+        svc.get_summary,
+        include_archived=include_archived,
+        profile_id=profile_id,
+        tag=tag,
+    )
+    return {"success": True, **summary}
+
+
+@app.get("/api/fanpages/export")
+async def export_fanpages_csv(
+    q: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    tag: Optional[str] = None,
+    activity_status: Optional[str] = None,
+    connection_status: Optional[str] = None,
+    data_quality: Optional[str] = None,
+    age_ready: Optional[str] = None,
+    archived: str = "active",
+    sort_by: str = "page_name",
+    sort_dir: str = "asc",
+):
+    svc = get_fanpage_service()
+    csv_data = await asyncio.to_thread(
+        svc.export_csv,
+        q=q or "",
+        profile_id=profile_id or "",
+        tag=tag or "",
+        activity_status=activity_status or "",
+        connection_status=connection_status or "",
+        data_quality=data_quality or "",
+        age_ready=age_ready,
+        archived=archived,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    csv_bytes = (
+        csv_data.encode("utf-8") if isinstance(csv_data, str) else csv_data
+    )
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="fanpages_export.csv"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.post("/api/fanpages/bulk")
+async def bulk_update_fanpages(req: FanpageBulkUpdateRequest):
+    if not req.page_ids:
+        raise HTTPException(
+            status_code=400, detail="Danh sách fanpage được chọn trống."
+        )
+    svc = get_fanpage_service()
+    result = await asyncio.to_thread(
+        svc.bulk_update,
+        page_ids=req.page_ids,
+        add_tags=req.add_tags,
+        remove_tags=req.remove_tags,
+        is_archived=req.is_archived,
+    )
+    return {"success": True, **result}
+
+
+@app.get("/api/fanpages")
+async def list_fanpages_endpoint(
+    q: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    tag: Optional[str] = None,
+    activity_status: Optional[str] = None,
+    connection_status: Optional[str] = None,
+    data_quality: Optional[str] = None,
+    age_ready: Optional[str] = None,
+    archived: str = "active",
+    sort_by: str = "page_name",
+    sort_dir: str = "asc",
+    page: int = 1,
+    page_size: int = 50,
+):
+    svc = get_fanpage_service()
+    result = await asyncio.to_thread(
+        svc.list_pages,
+        q=q or "",
+        profile_id=profile_id or "",
+        tag=tag or "",
+        activity_status=activity_status or "",
+        connection_status=connection_status or "",
+        data_quality=data_quality or "",
+        age_ready=age_ready,
+        archived=archived,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
+    )
+    return {"success": True, **result}
+
+
+@app.get("/api/fanpages/{page_id}")
+async def get_fanpage_detail_endpoint(page_id: str):
+    svc = get_fanpage_service()
+    detail = await asyncio.to_thread(svc.get_page, page_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
+    return {"success": True, "page": detail}
+
+
+@app.patch("/api/fanpages/{page_id}")
+async def update_fanpage_endpoint(page_id: str, req: FanpageUpdateRequest):
+    svc = get_fanpage_service()
+    try:
+        updated = await asyncio.to_thread(
+            svc.update_page,
+            page_id,
+            tags=req.tags,
+            note=req.note,
+            preferred_profile_id=req.preferred_profile_id,
+            is_archived=req.is_archived,
+            expected_revision=req.expected_revision,
+        )
+    except FanpageRevisionConflictError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "code": "REVISION_CONFLICT",
+                "detail": str(exc),
+                "current_revision": exc.current_revision,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
+    return {"success": True, "page": updated}
+
+
+@app.post("/api/fanpages/{page_id}/open")
+async def open_fanpage_in_profile(
+    page_id: str, req: Optional[FanpageOpenRequest] = None
+):
+    req = req or FanpageOpenRequest()
+    svc = get_fanpage_service()
+    detail = await asyncio.to_thread(svc.get_page, page_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
+
+    linked_profiles = [
+        lk
+        for lk in (detail.get("linked_profiles") or [])
+        if lk.get("link_status") != "profile_deleted"
+        and not lk.get("profile_missing")
+    ]
+    linked_ids = {lk["profile_id"] for lk in linked_profiles}
+
+    target_profile_id = (req.profile_id or "").strip() or None
+    if target_profile_id:
+        if target_profile_id not in linked_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Profile được chọn không liên kết với fanpage này.",
+            )
+    else:
+        preferred = detail.get("preferred_profile_id")
+        if preferred and preferred in linked_ids:
+            target_profile_id = preferred
+        elif linked_profiles:
+            active_links = [
+                lk
+                for lk in linked_profiles
+                if lk.get("link_status") == "active"
+            ]
+            target_profile_id = (
+                active_links[0]["profile_id"]
+                if active_links
+                else linked_profiles[0]["profile_id"]
+            )
+
+    if not target_profile_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Fanpage không còn profile khả dụng để mở.",
+        )
+
+    p = profile_manager.get_profile(target_profile_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Profile không tồn tại")
+
+    base_url = str(detail.get("canonical_url") or "").strip()
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail="Fanpage chưa có URL hợp lệ (http/https) để mở.",
+        )
+
+    target_kind = (req.target or "page").strip().lower()
+    if target_kind == "transparency":
+        if "profile.php?id=" in base_url:
+            open_url = f"{base_url}&sk=about_profile_transparency"
+        else:
+            open_url = f"{base_url.rstrip('/')}/about_profile_transparency"
+    else:
+        open_url = base_url
+
+    gate = None
+    gate_mode = _launch_gate_mode()
+    if gate_mode != "off":
+        try:
+            already_running = await asyncio.to_thread(
+                launcher.is_running, target_profile_id
+            )
+        except Exception:
+            already_running = False
+        if not already_running:
+            profiles = await asyncio.to_thread(profile_manager.list_profiles)
+            browser_paths = await asyncio.to_thread(
+                _resolve_browser_paths, profiles
+            )
+            gate = await asyncio.to_thread(
+                _evaluate_launch_gate,
+                p,
+                profiles,
+                browser_paths,
+                gate_mode,
+                bool(req.force),
+            )
+            if not gate.allowed:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "success": False,
+                        "detail": gate.message,
+                        "gate": gate.as_dict(),
+                    },
+                )
+
+    res = await asyncio.to_thread(
+        launcher.launch, target_profile_id, open_url=open_url
+    )
+    if not res.get("success"):
+        code = res.get("code")
+        if code in _CDP_CONFLICT_CODES or res.get("recovery_required"):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "code": code,
+                    "detail": res.get("error", "Lỗi khởi chạy"),
+                    "cdp_health": res.get("cdp_health"),
+                },
+            )
+        raise HTTPException(
+            status_code=500, detail=res.get("error", "Lỗi khởi chạy")
+        )
+    if gate and gate.status in ("warning", "overridden", "unverified"):
+        res["gate"] = gate.as_dict()
+    return {
+        **res,
+        "page_id": page_id,
+        "profile_id": target_profile_id,
+        "profile_name": p.name,
+        "opened_url": open_url,
+    }
+

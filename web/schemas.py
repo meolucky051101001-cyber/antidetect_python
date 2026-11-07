@@ -122,3 +122,25 @@ class AuditFixRequest(BaseModel):
 
 class LaunchGateSettingsRequest(BaseModel):
     mode: str
+
+
+class FanpageUpdateRequest(BaseModel):
+    tags: Optional[List[str]] = None
+    note: Optional[str] = None
+    preferred_profile_id: Optional[str] = None
+    is_archived: Optional[bool] = None
+    expected_revision: Optional[int] = None
+
+
+class FanpageBulkUpdateRequest(BaseModel):
+    page_ids: List[str] = Field(default_factory=list)
+    add_tags: Optional[List[str]] = None
+    remove_tags: Optional[List[str]] = None
+    is_archived: Optional[bool] = None
+
+
+class FanpageOpenRequest(BaseModel):
+    profile_id: Optional[str] = None
+    target: str = "page"  # page | transparency
+    force: bool = False
+

@@ -17,17 +17,31 @@
 
     <!-- Header -->
     <header class="border-b border-borderBg bg-slate-900/80 backdrop-blur sticky top-0 z-40 px-6 py-4 flex items-center justify-between">
-        <div class="flex items-center space-x-3">
-            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
-                <i data-lucide="shield-check" class="w-6 h-6 text-white"></i>
-            </div>
-            <div>
-                <div class="flex items-center space-x-2">
-                    <h1 class="text-lg font-bold tracking-tight">Antidetect Python</h1>
-                    <span class="text-xs font-semibold px-2 py-0.5 bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-full">v1.0 Core</span>
+        <div class="flex items-center space-x-4">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                    <i data-lucide="shield-check" class="w-6 h-6 text-white"></i>
                 </div>
-                <p class="text-xs text-slate-400">Hệ thống trình duyệt Antidetect mã nguồn mở xây dựng trên Python & CDP</p>
+                <div>
+                    <div class="flex items-center space-x-2">
+                        <h1 class="text-lg font-bold tracking-tight">Antidetect Python</h1>
+                        <span class="text-xs font-semibold px-2 py-0.5 bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-full">v1.0 Core</span>
+                    </div>
+                    <p class="text-xs text-slate-400">Hệ thống trình duyệt Antidetect mã nguồn mở xây dựng trên Python & CDP</p>
+                </div>
             </div>
+
+            <!-- Điều hướng chính: Profiles | Fanpage Manager -->
+            <nav class="hidden sm:flex items-center bg-slate-800/80 border border-slate-700/60 rounded-xl p-1 text-xs font-medium" aria-label="Điều hướng chính">
+                <a href="/" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white shadow-sm flex items-center space-x-1.5">
+                    <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+                    <span>Profiles</span>
+                </a>
+                <a href="/fanpages" class="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-700/50 transition flex items-center space-x-1.5">
+                    <i data-lucide="flag" class="w-3.5 h-3.5 text-amber-400"></i>
+                    <span>Fanpage Manager</span>
+                </a>
+            </nav>
         </div>
 
         <div class="flex items-center space-x-2">
@@ -99,7 +113,7 @@
                 </div>
             </div>
 
-            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex items-center space-x-4 cursor-pointer hover:border-amber-500/40 transition" title="Tổng số fanpage Facebook đã đồng bộ qua các profile">
+            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex items-center space-x-4 cursor-pointer hover:border-amber-500/40 transition" onclick="window.location.href='/fanpages'" title="Bấm để mở Fanpage Manager — quản lý danh mục fanpage hợp nhất">
                 <div class="p-3 bg-amber-500/10 text-amber-400 rounded-lg">
                     <i data-lucide="flag" class="w-6 h-6"></i>
                 </div>
@@ -915,7 +929,13 @@
             </div>
             <div class="px-5 py-3 border-t border-borderBg flex items-center justify-between bg-slate-900/40">
                 <button onclick="clearFanpageCache()" class="px-3.5 py-1.5 text-xs text-rose-300 hover:text-white hover:bg-rose-600/80 border border-rose-500/30 rounded-lg transition" title="Xóa toàn bộ danh sách fanpage đã lưu của profile này">Xóa cache</button>
-                <button onclick="closeFanpagesModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                <div class="flex items-center space-x-2">
+                    <button onclick="openFanpageManagerForCurrentProfile()" class="px-3.5 py-1.5 text-xs bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded-lg transition flex items-center space-x-1.5">
+                        <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+                        <span>Mở trong Fanpage Manager</span>
+                    </button>
+                    <button onclick="closeFanpagesModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                </div>
             </div>
         </div>
     </div>

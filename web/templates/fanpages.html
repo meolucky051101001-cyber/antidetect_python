@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Antidetect Python — Fanpage Manager</title>
+    <!-- Theme init TRƯỚC khi render để tránh nháy flash -->
+    <script src="/static/js/theme-init.js"></script>
+    <!-- Tailwind CSS -->
+    <script src="/static/vendor/tailwind.js"></script>
+    <script src="/static/js/tailwind-config.js"></script>
+    <!-- Lucide Icons -->
+    <script src="/static/vendor/lucide.min.js"></script>
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body class="bg-darkBg text-slate-100 min-h-screen font-sans flex flex-col antialiased selection:bg-blue-500 selection:text-white">
+
+    <!-- Header -->
+    <header class="border-b border-borderBg bg-slate-900/80 backdrop-blur sticky top-0 z-40 px-6 py-4 flex items-center justify-between">
+        <div class="flex items-center space-x-4">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-600 flex items-center justify-center shadow-lg shadow-amber-500/20">
+                    <i data-lucide="flag" class="w-6 h-6 text-white"></i>
+                </div>
+                <div>
+                    <div class="flex items-center space-x-2">
+                        <h1 class="text-lg font-bold tracking-tight">Fanpage Manager</h1>
+                        <span class="text-xs font-semibold px-2 py-0.5 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-full">Stage 1 Catalog</span>
+                    </div>
+                    <p class="text-xs text-slate-400">Danh mục fanpage hợp nhất, chống trùng đa profile & kiểm chứng độ tin cậy dữ liệu</p>
+                </div>
+            </div>
+
+            <!-- Điều hướng chính: Profiles | Fanpage Manager -->
+            <nav class="hidden sm:flex items-center bg-slate-800/80 border border-slate-700/60 rounded-xl p-1 text-xs font-medium" aria-label="Điều hướng chính">
+                <a href="/" class="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-700/50 transition flex items-center space-x-1.5">
+                    <i data-lucide="layers" class="w-3.5 h-3.5 text-blue-400"></i>
+                    <span>Profiles</span>
+                </a>
+                <a href="/fanpages" class="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-semibold shadow-sm flex items-center space-x-1.5">
+                    <i data-lucide="flag" class="w-3.5 h-3.5"></i>
+                    <span>Fanpage Manager</span>
+                </a>
+            </nav>
+        </div>
+
+        <div class="flex items-center space-x-2">
+            <button onclick="toggleTheme()" class="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition" title="Chuyển Dark / Light mode">
+                <span class="theme-icon-moon inline-block"><i data-lucide="moon" class="w-4 h-4"></i></span>
+                <span class="theme-icon-sun inline-block"><i data-lucide="sun" class="w-4 h-4"></i></span>
+            </button>
+            <button onclick="reloadFanpageCatalog()" class="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition" title="Đồng bộ lại từ cache profile & làm mới bảng">
+                <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+            </button>
+            <button onclick="exportCurrentCsv()" class="flex items-center space-x-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg text-xs font-medium rounded-lg transition" title="Xuất danh sách theo bộ lọc hiện tại ra CSV (UTF-8 BOM, mở trực tiếp bằng Excel)">
+                <i data-lucide="download" class="w-4 h-4 text-emerald-400"></i>
+                <span>Xuất CSV</span>
+            </button>
+            <a href="/" class="flex items-center space-x-1.5 px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg shadow-md shadow-blue-600/20 transition">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+                <span>Quản Lý Profile</span>
+            </a>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+
+        <!-- KPI Overview Cards (3.1 Tổng quan) -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <!-- Card 1: Tổng page quản lý -->
+            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex flex-col justify-between space-y-2">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs text-slate-400 font-medium">Tổng Fanpage Quản Lý</span>
+                    <div class="p-2 bg-amber-500/10 text-amber-400 rounded-lg">
+                        <i data-lucide="flag" class="w-4 h-4"></i>
+                    </div>
+                </div>
+                <div class="flex items-baseline space-x-2">
+                    <span id="kpi-total-pages" class="text-2xl font-bold text-white">0</span>
+                    <span id="kpi-multi-profile-note" class="text-[11px] text-slate-400">không cộng trùng đa profile</span>
+                </div>
+                <div id="kpi-id-coverage" class="text-[11px] text-slate-500">0 đã xác minh ID · 0 chờ xác minh ID</div>
+            </div>
+
+            <!-- Card 2: Follower & Like đã xác minh -->
+            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex flex-col justify-between space-y-2">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs text-slate-400 font-medium">Tổng Follower / Like</span>
+                    <div class="p-2 bg-blue-500/10 text-blue-400 rounded-lg">
+                        <i data-lucide="users" class="w-4 h-4"></i>
+                    </div>
+                </div>
+                <div class="flex items-baseline space-x-2">
+                    <span id="kpi-total-followers" class="text-2xl font-bold text-blue-400">—</span>
+                    <span id="kpi-total-likes" class="text-xs text-slate-400">· Like: —</span>
+                </div>
+                <div id="kpi-followers-coverage" class="text-[11px] text-slate-500">Độ phủ: 0/0 page có dữ liệu follower</div>
+            </div>
+
+            <!-- Card 3: Nhịp đăng bài (F3 Dynamic Aging) -->
+            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex flex-col justify-between space-y-2">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs text-slate-400 font-medium">Trạng Thái Hoạt Động</span>
+                    <div class="p-2 bg-emerald-500/10 text-emerald-400 rounded-lg">
+                        <i data-lucide="activity" class="w-4 h-4"></i>
+                    </div>
+                </div>
+                <div class="flex items-baseline space-x-3">
+                    <div>
+                        <span id="kpi-active-pages" class="text-2xl font-bold text-emerald-400">0</span>
+                        <span class="text-[11px] text-slate-400 ml-1">đang đăng</span>
+                    </div>
+                    <div>
+                        <span id="kpi-absent-pages" class="text-lg font-semibold text-amber-400">0</span>
+                        <span class="text-[11px] text-slate-400 ml-1">&gt;7 ngày</span>
+                    </div>
+                </div>
+                <div id="kpi-activity-coverage" class="text-[11px] text-slate-500">Độ phủ bài đăng: 0/0 page · 0 chưa quét</div>
+            </div>
+
+            <!-- Card 4: Cảnh báo & Ngưỡng tuổi nội bộ -->
+            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex flex-col justify-between space-y-2">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs text-slate-400 font-medium">Cần Kiểm Tra &amp; Tuổi Nội Bộ</span>
+                    <div class="p-2 bg-sky-500/10 text-sky-400 rounded-lg">
+                        <i data-lucide="shield-alert" class="w-4 h-4"></i>
+                    </div>
+                </div>
+                <div class="flex items-baseline space-x-3">
+                    <button type="button" onclick="quickFilterAttention()" class="text-left group" title="Bấm để lọc các page cần kiểm tra">
+                        <span id="kpi-attention-pages" class="text-2xl font-bold text-rose-400 group-hover:underline">0</span>
+                        <span class="text-[11px] text-slate-400 ml-1">cần chú ý</span>
+                    </button>
+                    <button type="button" onclick="quickFilterAgeReady()" class="text-left group" title="Bấm để lọc các page đủ ngưỡng tuổi nội bộ ≥ 30 ngày">
+                        <span id="kpi-age-ready-pages" class="text-lg font-semibold text-sky-400 group-hover:underline">0</span>
+                        <span class="text-[11px] text-slate-400 ml-1">đủ tuổi ≥30d</span>
+                    </button>
+                </div>
+                <div id="kpi-age-coverage" class="text-[11px] text-slate-500">Độ phủ ngày tạo: 0/0 page</div>
+            </div>
+        </div>
+
+        <!-- Filter & Search Bar (3.2 Danh sách Fanpage) -->
+        <div class="bg-cardBg border border-borderBg rounded-xl p-4 space-y-3 shadow-lg">
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <!-- Search -->
+                <div class="relative">
+                    <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+                    <input type="text" id="filter-q" oninput="onSearchInput()" placeholder="Tìm tên page, FB ID, URL, ghi chú..." class="w-full bg-slate-900 border border-borderBg rounded-lg pl-9 pr-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500">
+                </div>
+
+                <!-- Profile filter -->
+                <div>
+                    <select id="filter-profile" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                        <option value="">Profile: Tất cả</option>
+                    </select>
+                </div>
+
+                <!-- Activity status filter -->
+                <div>
+                    <select id="filter-activity" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                        <option value="">Hoạt động đăng bài: Tất cả</option>
+                        <option value="active">Đang đăng (≤ 7 ngày)</option>
+                        <option value="long_absent">Lâu chưa thấy bài mới (&gt; 7 ngày)</option>
+                        <option value="uncertain">Chưa đủ chắc chắn (cắt ngưỡng 7 ngày)</option>
+                        <option value="unscanned">Chưa quét chi tiết</option>
+                        <option value="unknown">Chưa xác minh</option>
+                    </select>
+                </div>
+
+                <!-- Connection status filter -->
+                <div>
+                    <select id="filter-connection" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                        <option value="">Trạng thái kết nối: Tất cả</option>
+                        <option value="ok">Kết nối đầy đủ</option>
+                        <option value="needs_relogin">Cần đăng nhập lại Facebook</option>
+                        <option value="partial_discovery">Quét danh sách chưa đầy đủ (partial)</option>
+                        <option value="missing_in_latest_scan">Vắng mặt ở lượt quét gần nhất</option>
+                        <option value="cached_unverified">Từ cache (chưa có metadata quét)</option>
+                        <option value="profile_deleted">Profile gốc đã xóa</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 pt-1">
+                <!-- Data quality filter -->
+                <div>
+                    <select id="filter-quality" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                        <option value="">Chất lượng dữ liệu: Tất cả</option>
+                        <option value="verified">Đã xác minh (verified)</option>
+                        <option value="partial">Một phần (partial)</option>
+                        <option value="stale">Dữ liệu cũ (stale)</option>
+                        <option value="unverified">Chờ xác minh ID (unverified)</option>
+                    </select>
+                </div>
+
+                <!-- Internal Age Threshold filter -->
+                <div>
+                    <select id="filter-age-ready" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                        <option value="">Ngưỡng tuổi nội bộ: Tất cả</option>
+                        <option value="true">Đủ ngưỡng tuổi nội bộ (≥ 30 ngày)</option>
+                        <option value="false">Chưa đủ 30 ngày</option>
+                        <option value="unknown">Chưa rõ ngày tạo</option>
+                    </select>
+                </div>
+
+                <!-- Tag filter -->
+                <div>
+                    <select id="filter-tag" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                        <option value="">Tag: Tất cả</option>
+                    </select>
+                </div>
+
+                <!-- Archived filter -->
+                <div>
+                    <select id="filter-archived" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                        <option value="active">Trạng thái: Đang quản lý</option>
+                        <option value="archived">Trạng thái: Đã lưu trữ</option>
+                        <option value="all">Trạng thái: Tất cả (kể cả lưu trữ)</option>
+                    </select>
+                </div>
+
+                <!-- Sort -->
+                <div>
+                    <select id="filter-sort" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                        <option value="page_name:asc">Sắp xếp: Tên A → Z</option>
+                        <option value="page_name:desc">Sắp xếp: Tên Z → A</option>
+                        <option value="followers:desc">Follower: Cao → Thấp</option>
+                        <option value="likes:desc">Like: Cao → Thấp</option>
+                        <option value="last_post:asc">Bài đăng: Mới nhất trước</option>
+                        <option value="last_post:desc">Bài đăng: Lâu nhất trước</option>
+                        <option value="age_days:desc">Tuổi page: Lâu năm nhất</option>
+                        <option value="age_days:asc">Tuổi page: Mới tạo nhất</option>
+                        <option value="last_synced:desc">Đồng bộ: Gần nhất</option>
+                    </select>
+                </div>
+
+                <!-- Page size & Reset -->
+                <div class="flex items-center space-x-2">
+                    <select id="filter-page-size" onchange="applyFilters(1)" class="flex-1 bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                        <option value="25">25 / trang</option>
+                        <option value="50" selected>50 / trang</option>
+                        <option value="100">100 / trang</option>
+                    </select>
+                    <button type="button" onclick="resetFilters()" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition" title="Xóa toàn bộ bộ lọc">
+                        Đặt lại
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bulk Action Bar (ẩn khi chưa chọn dòng nào) -->
+        <div id="fanpage-bulk-bar" class="hidden bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div class="flex items-center space-x-2 text-xs">
+                <span id="fanpage-bulk-count" class="font-semibold text-amber-300">0 đã chọn</span>
+                <button type="button" onclick="clearPageSelection()" class="text-slate-400 hover:text-white underline">Bỏ chọn</button>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <button type="button" onclick="bulkAddTagPrompt()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                    <i data-lucide="tag" class="w-3.5 h-3.5 text-amber-400"></i>
+                    <span>Gắn Tag</span>
+                </button>
+                <button type="button" onclick="bulkRemoveTagPrompt()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                    <i data-lucide="x-circle" class="w-3.5 h-3.5 text-slate-400"></i>
+                    <span>Gỡ Tag</span>
+                </button>
+                <button type="button" onclick="bulkArchiveAction(true)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                    <i data-lucide="archive" class="w-3.5 h-3.5"></i>
+                    <span>Lưu trữ</span>
+                </button>
+                <button type="button" onclick="bulkArchiveAction(false)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30 rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                    <i data-lucide="archive-restore" class="w-3.5 h-3.5"></i>
+                    <span>Khôi phục</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Fanpage Table Card -->
+        <div class="bg-cardBg border border-borderBg rounded-xl overflow-hidden shadow-xl">
+            <div class="px-4 py-3 border-b border-borderBg flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-900/40">
+                <div class="text-xs text-slate-400">
+                    <span id="table-summary-text">Đang tải danh mục fanpage...</span>
+                </div>
+                <div class="text-[11px] text-slate-500">
+                    Dữ liệu tổng hợp tự động từ các profile đã đồng bộ · Chống cộng trùng page nhiều quản trị viên
+                </div>
+            </div>
+
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="border-b border-borderBg bg-slate-900/60 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                            <th class="py-3 px-4 w-9">
+                                <input type="checkbox" id="select-all-pages" onchange="toggleSelectAllPages(this.checked)" class="accent-amber-500 rounded cursor-pointer">
+                            </th>
+                            <th class="py-3 px-4">Fanpage &amp; Định Danh</th>
+                            <th class="py-3 px-4">Profile Quản Lý</th>
+                            <th class="py-3 px-4">Follower / Like</th>
+                            <th class="py-3 px-4">Bài Gần Nhất &amp; Nhịp Đăng</th>
+                            <th class="py-3 px-4">Tuổi Page &amp; Ngưỡng Nội Bộ</th>
+                            <th class="py-3 px-4">Chất Lượng &amp; Kết Nối</th>
+                            <th class="py-3 px-4 text-right">Hành Động</th>
+                        </tr>
+                    </thead>
+                    <tbody id="fanpage-table-body" class="divide-y divide-borderBg text-xs">
+                        <!-- Populated by fanpages.js -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Empty state -->
+            <div id="fanpage-empty-state" class="hidden py-14 px-6 text-center space-y-3">
+                <div class="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
+                    <i data-lucide="flag" class="w-6 h-6"></i>
+                </div>
+                <h3 id="empty-title" class="text-sm font-semibold text-slate-200">Chưa có fanpage nào khớp bộ lọc</h3>
+                <p id="empty-desc" class="text-xs text-slate-500 max-w-md mx-auto">Thử đặt lại bộ lọc tìm kiếm hoặc mở Profile trong trang Quản Lý Profile để đồng bộ danh sách fanpage từ Facebook.</p>
+            </div>
+
+            <!-- Pagination Footer -->
+            <div class="px-4 py-3 border-t border-borderBg flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/40 text-xs">
+                <div id="pagination-info" class="text-slate-400">Trang 1 / 1</div>
+                <div class="flex items-center space-x-2">
+                    <button type="button" id="btn-prev-page" onclick="changePage(-1)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 rounded-lg transition">
+                        Trước
+                    </button>
+                    <button type="button" id="btn-next-page" onclick="changePage(1)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 rounded-lg transition">
+                        Sau
+                    </button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Modal Chi Tiết Fanpage (3.3 Chi tiết Fanpage) -->
+    <div id="pageDetailModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="bg-cardBg border border-borderBg rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col max-h-[88vh]">
+            <div class="px-5 py-4 border-b border-borderBg flex items-center justify-between bg-slate-900/60">
+                <div class="flex items-center space-x-2.5 min-w-0">
+                    <i data-lucide="flag" class="w-5 h-5 text-amber-400 shrink-0"></i>
+                    <div class="min-w-0">
+                        <h3 id="detail-page-name" class="text-sm font-semibold text-white truncate">Chi tiết Fanpage</h3>
+                        <p id="detail-page-subtitle" class="text-[11px] text-slate-400 truncate"></p>
+                    </div>
+                </div>
+                <button type="button" onclick="closePageDetailModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+            </div>
+
+            <div class="p-5 overflow-y-auto space-y-5 flex-1 text-xs">
+                <input type="hidden" id="detail-internal-id" />
+                <input type="hidden" id="detail-revision" />
+
+                <!-- Khu vực Mở nhanh bằng Profile Antidetect -->
+                <div class="bg-slate-900/60 border border-borderBg rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div class="space-y-1">
+                        <div class="font-semibold text-slate-200">Mở Fanpage bằng Phiên Trình Duyệt Antidetect</div>
+                        <div class="text-[11px] text-slate-400">Khởi chạy hoặc mở tab mới trực tiếp trên profile đã liên kết (không tự chuyển đổi danh tính ngầm).</div>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2 shrink-0">
+                        <select id="detail-open-profile-select" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200"></select>
+                        <button type="button" onclick="openPageInBrowserFromDetail('page')" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition flex items-center space-x-1.5">
+                            <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+                            <span>Mở Trang</span>
+                        </button>
+                        <button type="button" onclick="openPageInBrowserFromDetail('transparency')" class="px-3 py-1.5 bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white border border-violet-500/30 font-medium rounded-lg transition" title="Mở mục Tính minh bạch của Trang (about_profile_transparency)">
+                            <span>Tính minh bạch</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Lưới thông tin định danh & chỉ số hiện tại -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="bg-slate-900/40 border border-borderBg rounded-xl p-3.5 space-y-2">
+                        <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Định Danh &amp; Xác Minh</div>
+                        <div id="detail-identity-box" class="space-y-1.5 text-slate-300"></div>
+                    </div>
+                    <div class="bg-slate-900/40 border border-borderBg rounded-xl p-3.5 space-y-2">
+                        <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Chỉ Số &amp; Hoạt Động Đã Ghi Nhận</div>
+                        <div id="detail-metrics-box" class="space-y-1.5 text-slate-300"></div>
+                    </div>
+                </div>
+
+                <!-- Chỉnh sửa thông tin quản trị nội bộ -->
+                <div class="bg-slate-900/40 border border-borderBg rounded-xl p-4 space-y-3">
+                    <div class="flex items-center justify-between">
+                        <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Quản Trị Nội Bộ (Lưu trong fanpages.sqlite)</div>
+                        <span id="detail-revision-badge" class="text-[10px] font-mono text-slate-500"></span>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-[11px] text-slate-400 mb-1">Profile ưu tiên khi mở nhanh</label>
+                            <select id="detail-preferred-profile" class="w-full bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200"></select>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] text-slate-400 mb-1">Tags (cách nhau bằng dấu phẩy)</label>
+                            <input type="text" id="detail-tags" placeholder="reup, chủ lực, cần kiểm tra..." class="w-full bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1">Ghi chú vận hành</label>
+                        <textarea id="detail-note" rows="2" placeholder="Ghi chú nội bộ cho fanpage này..." class="w-full bg-slate-950 border border-borderBg rounded-lg p-2.5 text-xs text-slate-200"></textarea>
+                    </div>
+                    <div class="flex items-center justify-between pt-1">
+                        <label class="inline-flex items-center space-x-2 text-xs text-slate-300 cursor-pointer">
+                            <input type="checkbox" id="detail-archived" class="accent-amber-500 rounded">
+                            <span>Lưu trữ page này (ẩn khỏi danh sách Đang quản lý mặc định)</span>
+                        </label>
+                        <button type="button" onclick="savePageDetail()" class="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg transition">
+                            Lưu Thay Đổi
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Danh sách Profile liên kết -->
+                <div class="space-y-2">
+                    <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Các Profile Liên Kết Với Fanpage Này</div>
+                    <div id="detail-linked-profiles" class="space-y-2"></div>
+                </div>
+
+                <!-- URL Aliases & Lịch sử Snapshot -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="space-y-2">
+                        <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">URL Aliases Đã Ghi Nhận</div>
+                        <div id="detail-aliases" class="bg-slate-900/40 border border-borderBg rounded-xl p-3 space-y-1 text-[11px] font-mono text-slate-300 max-h-40 overflow-y-auto"></div>
+                    </div>
+                    <div class="space-y-2">
+                        <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Lịch Sử Quan Sát Gần Đây</div>
+                        <div id="detail-history" class="bg-slate-900/40 border border-borderBg rounded-xl p-3 space-y-1.5 text-[11px] text-slate-300 max-h-40 overflow-y-auto"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
+                <button type="button" onclick="closePageDetailModal()" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed bottom-6 right-6 px-4 py-3 bg-slate-800 border border-slate-700 text-white text-xs rounded-xl shadow-2xl flex items-center space-x-3 hidden z-50 transition-all duration-300">
+        <span id="toast-icon"></span>
+        <span id="toast-message"></span>
+    </div>
+
+    <script src="/static/js/fanpages.js"></script>
+</body>
+</html>

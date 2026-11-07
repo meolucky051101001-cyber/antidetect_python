@@ -1974,6 +1974,15 @@
             document.getElementById('fanpagesModal').classList.add('hidden');
         }
 
+        function openFanpageManagerForCurrentProfile() {
+            const id = (document.getElementById('fanpages-profile-id') || {}).value || '';
+            if (id) {
+                window.location.href = `/fanpages?profile_id=${encodeURIComponent(id)}`;
+            } else {
+                window.location.href = '/fanpages';
+            }
+        }
+
         async function refreshFanpages(deep) {
             await loadFanpages(true, deep);
         }
@@ -2103,9 +2112,9 @@
                     return '';
                 };
                 const badgeReady = (pg) => pg.ready
-                    ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30" title="Đã ngâm đủ 1 tháng tuổi">Sẵn sàng</span>'
+                    ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30" title="Sẵn sàng — Quy tắc nội bộ: tuổi page ≥ 30 ngày (không chứng minh đủ điều kiện kiếm tiền hay không bị hạn chế)">Đủ ngưỡng tuổi nội bộ</span>'
                     : (pg.age_days != null
-                        ? `<span class="px-1.5 py-0.5 rounded text-[10px] text-slate-400 border border-slate-600/50" title="Cần ngâm đủ 30 ngày">Chưa (${pg.age_days}/30 ngày)</span>`
+                        ? `<span class="px-1.5 py-0.5 rounded text-[10px] text-slate-400 border border-slate-600/50" title="Ngưỡng tuổi nội bộ 30 ngày">Chưa đủ 30 ngày (${pg.age_days}/30)</span>`
                         : '');
                 const badgeNotSeen = (pg) => {
                     if (!data.scan_id) return '';
