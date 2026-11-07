@@ -2410,7 +2410,7 @@ class BrowserLauncher:
         """Instrumented entrypoint; see ``_stop_impl`` for the real flow."""
         metrics.inc("stop_attempts")
         try:
-            with self._lifecycle_locks.acquire(profile_id, timeout=2.0):
+            with self._lifecycle_locks.acquire(profile_id, timeout=4.0):
                 result = self._stop_impl(profile_id)
         except ProfileLockTimeout:
             result = {
@@ -2535,6 +2535,20 @@ class BrowserLauncher:
                                 time.sleep(0.2)
                             if self._identity_for(pid, user_data_dir)["state"] in ("absent", "mismatch"):
                                 break
+                    # Cho thêm grace period để Windows hoàn tất reap tiến trình sau lệnh taskkill /F
+                    if proc and proc.poll() is None:
+                        for _ in range(8):
+                            try:
+                                proc.wait(timeout=0.5)
+                            except subprocess.TimeoutExpired:
+                                pass
+                            if proc.poll() is not None:
+                                break
+                    elif not proc and self._identity_for(pid, user_data_dir)["state"] not in ("absent", "mismatch"):
+                        for _ in range(10):
+                            if self._identity_for(pid, user_data_dir)["state"] in ("absent", "mismatch"):
+                                break
+                            time.sleep(0.2)
                     if not (proc.poll() is not None if proc else self._identity_for(pid, user_data_dir)["state"] in ("absent", "mismatch")):
                         detail = f" ({last_error})" if last_error else ""
                         return _stop_failed(f"Windows chưa dừng được trình duyệt{detail}. Dữ liệu trạng thái được giữ nguyên.")

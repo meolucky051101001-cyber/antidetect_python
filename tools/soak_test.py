@@ -580,11 +580,20 @@ class SoakRunner:
             timeout=120,
         )
         if status != 200 or not body.get("success"):
+            detail = (body.get("detail") or body.get("error")) if isinstance(body, dict) else None
+            msg = f"{error} ({detail})" if (error and detail) else (detail or error or status)
             self._error(
                 "stop",
-                f"{profile['name']}: {error or body.get('detail') or body.get('error')}",
-                code=body.get("code"),
+                f"{profile['name']}: {msg}",
+                code=body.get("code") if isinstance(body, dict) else None,
             )
+            # Kiểm tra xem Chrome thực tế đã dừng hay chưa để tránh lệch trạng thái
+            time.sleep(1.0)
+            pids = _chrome_processes(self._chrome_map()).get(profile["id"], {}).get("pids", [])
+            if not pids:
+                profile["active"] = False
+                profile["stops"] = profile.get("stops", 0) + 1
+                self._event("profile_stopped", profile=profile["name"], reason=reason)
             return False
         profile["active"] = False
         profile["stops"] = profile.get("stops", 0) + 1
@@ -835,7 +844,8 @@ class SoakRunner:
             return
         profile = active[self._cycle_index % len(active)]
         self._cycle_index += 1
-        if self._stop_profile(profile, "cycle"):
+        stopped = self._stop_profile(profile, "cycle")
+        if stopped or not profile["active"]:
             self._start_profile(profile)
         self._lifecycle_cycles += 1
         self.state["counters"]["lifecycle_cycles"] = self._lifecycle_cycles
@@ -927,7 +937,7 @@ class SoakRunner:
     def _loop(self):
         next_sample = time.monotonic()
         next_tab = next_sample + self.args.tab_interval
-        next_cycle = next_sample + self.args.cycle_interval
+        next_cycle = next_sample + self.args.cycle_interval + 25.0
         next_copy = next_sample + min(self.args.copy_interval, 3600)
         while True:
             self._check_stop_requested()
