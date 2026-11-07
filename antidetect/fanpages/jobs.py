@@ -83,6 +83,12 @@ class FanpageSyncJobManager:
         self._lock = threading.RLock()
         self._cancel_events: Dict[str, threading.Event] = {}
         self._job_threads: Dict[str, threading.Thread] = {}
+        try:
+            self.repo.recover_interrupted_jobs(
+                current_owner_instance=self.owner_instance
+            )
+        except Exception:
+            pass
 
     def resolve_target_profiles(
         self,

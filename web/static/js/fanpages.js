@@ -281,6 +281,17 @@ function renderSummaryCards(s) {
     document.getElementById('kpi-age-ready-pages').innerText = Number(s.internal_age_ready_pages || 0).toLocaleString('vi-VN');
     document.getElementById('kpi-age-coverage').innerText =
         `Độ phủ ngày tạo: ${ageCov.available}/${ageCov.total} page · ${Number(s.needs_relogin_pages || 0)} cần đăng nhập lại`;
+
+    const alertBadge = document.getElementById('header-alert-badge');
+    if (alertBadge) {
+        const alertCount = Number((s.alerts_summary && s.alerts_summary.open_count) ?? (s.alerts_summary && s.alerts_summary.active_count) ?? 0);
+        if (alertCount > 0) {
+            alertBadge.innerText = String(alertCount);
+            alertBadge.classList.remove('hidden');
+        } else {
+            alertBadge.classList.add('hidden');
+        }
+    }
 }
 
 function populateFilterDropdowns(s) {
@@ -437,13 +448,15 @@ function renderFanpageTable() {
                 </div>`;
         }
 
-        // Follower / Like
+        // Follower / Like + Stage 3 Delta Badge
         const followersText = formatNumberVi(item.followers_count, item.followers_precision);
         const likesText = formatNumberVi(item.likes_count, item.likes_precision);
+        const flwDeltaBadge = renderDeltaBadge(item.followers_delta);
+        const likeDeltaBadge = renderDeltaBadge(item.likes_delta);
         const metricsHtml = `
             <div class="space-y-0.5">
-                <div class="text-slate-200 font-medium">${followersText ? escapeHtml(followersText) + ' flw' : '<span class="text-slate-500">Chưa có dữ liệu</span>'}</div>
-                <div class="text-[11px] text-slate-400">${likesText ? escapeHtml(likesText) + ' like' : 'Like: —'}</div>
+                <div class="text-slate-200 font-medium flex flex-wrap items-center gap-1">${followersText ? escapeHtml(followersText) + ' flw' : '<span class="text-slate-500">Chưa có dữ liệu</span>'}${flwDeltaBadge}</div>
+                <div class="text-[11px] text-slate-400 flex flex-wrap items-center gap-1">${likesText ? escapeHtml(likesText) + ' like' : 'Like: —'}${likeDeltaBadge}</div>
             </div>`;
 
         // Bài gần nhất
@@ -654,6 +667,8 @@ async function openPageDetailModal(internalId) {
         renderPageDetailModal(data.page);
         document.getElementById('pageDetailModal').classList.remove('hidden');
         safeCreateIcons();
+        const days = parseInt(document.getElementById('detail-metrics-days')?.value || '28', 10) || 28;
+        await loadPageMetricsSeries(internalId, days);
     } catch (e) {
         showToast('Lỗi tải chi tiết fanpage: ' + e, 'error');
     }
@@ -1125,6 +1140,264 @@ async function retrySyncJobById(jobId) {
         await loadSyncJobs();
     } catch (e) {
         showToast('Lỗi khi thử lại job: ' + e, 'error');
+    }
+}
+
+// --- Stage 3: Time-Series Metrics, Alerts Center & Online Backup ---
+
+function renderDeltaBadge(delta) {
+    if (delta === null || delta === undefined) return '';
+    const num = Number(delta);
+    if (!Number.isFinite(num) || num === 0) return '';
+    if (num > 0) {
+        return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30" title="Tăng so với lần quan sát trước">+${num.toLocaleString('vi-VN')}</span>`;
+    }
+    return `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/30" title="Giảm so với lần quan sát trước (không ép về 0)">${num.toLocaleString('vi-VN')}</span>`;
+}
+
+async function onDetailMetricsWindowChange() {
+    const internalId = document.getElementById('detail-internal-id')?.value;
+    const days = parseInt(document.getElementById('detail-metrics-days')?.value || '28', 10) || 28;
+    if (!internalId) return;
+    await loadPageMetricsSeries(internalId, days);
+}
+
+async function loadPageMetricsSeries(internalId, days = 28) {
+    const chartBox = document.getElementById('detail-metrics-chart');
+    const summaryBox = document.getElementById('detail-metrics-delta-summary');
+    if (chartBox) chartBox.innerHTML = '<span class="text-slate-500 italic">Đang tải chuỗi thời gian...</span>';
+    if (summaryBox) summaryBox.innerHTML = '';
+
+    try {
+        const res = await fetch(`/api/fanpages/${encodeURIComponent(internalId)}/metrics?days=${encodeURIComponent(days)}`, { cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            if (chartBox) chartBox.innerHTML = `<span class="text-rose-400">${escapeHtml(data.detail || 'Không tải được dữ liệu chuỗi thời gian.')}</span>`;
+            return;
+        }
+        renderMetricsSeriesChart(data);
+    } catch (e) {
+        if (chartBox) chartBox.innerHTML = `<span class="text-rose-400">Lỗi kết nối: ${escapeHtml(String(e))}</span>`;
+    }
+}
+
+function renderMetricsSeriesChart(series) {
+    const chartBox = document.getElementById('detail-metrics-chart');
+    const summaryBox = document.getElementById('detail-metrics-delta-summary');
+    if (!chartBox || !summaryBox) return;
+
+    const points = Array.isArray(series.points) ? series.points : [];
+    const flwDelta = series.followers_delta;
+    const flwPct = series.followers_pct;
+    const likeDelta = series.likes_delta;
+    const likePct = series.likes_pct;
+
+    const formatDeltaSummary = (delta, pct, label) => {
+        if (delta === null || delta === undefined) {
+            return `<div class="bg-slate-900/70 border border-borderBg/60 rounded-lg px-3 py-2"><div class="text-[10px] text-slate-400">${escapeHtml(label)}</div><div class="text-slate-500 font-medium">Chưa đủ ≥ 2 điểm so sánh</div></div>`;
+        }
+        const n = Number(delta);
+        const sign = n > 0 ? '+' : '';
+        const color = n > 0 ? 'text-emerald-400' : (n < 0 ? 'text-rose-400' : 'text-slate-200');
+        const pctStr = (pct !== null && pct !== undefined) ? ` (${n > 0 ? '+' : ''}${Number(pct).toFixed(2)}%)` : '';
+        return `<div class="bg-slate-900/70 border border-borderBg/60 rounded-lg px-3 py-2"><div class="text-[10px] text-slate-400">${escapeHtml(label)}</div><div class="font-semibold ${color}">${sign}${n.toLocaleString('vi-VN')}${escapeHtml(pctStr)}</div></div>`;
+    };
+
+    summaryBox.innerHTML =
+        formatDeltaSummary(flwDelta, flwPct, `Chênh lệch Follower (${series.window_days || 28}d)`) +
+        formatDeltaSummary(likeDelta, likePct, `Chênh lệch Like (${series.window_days || 28}d)`) +
+        `<div class="bg-slate-900/70 border border-borderBg/60 rounded-lg px-3 py-2"><div class="text-[10px] text-slate-400">Số điểm quan sát thật</div><div class="font-semibold text-slate-200">${points.length} mẫu ${series.counter_decreased ? '<span class="text-rose-400 text-[10px] ml-1">(Có sụt giảm bộ đếm)</span>' : ''}</div></div>`;
+
+    const flwPoints = points.filter(p => p.followers_count !== null && p.followers_count !== undefined);
+    if (flwPoints.length === 0) {
+        chartBox.innerHTML = '<div class="text-slate-500 italic py-4">Chưa có điểm quan sát Follower nào trong khoảng ngày đã chọn (không tự nội suy số 0).</div>';
+        return;
+    }
+
+    const width = 560;
+    const height = 110;
+    const padX = 28;
+    const padY = 18;
+    const vals = flwPoints.map(p => Number(p.followers_count));
+    const minVal = Math.min(...vals);
+    const maxVal = Math.max(...vals);
+    const span = maxVal - minVal || 1;
+
+    const coords = flwPoints.map((p, idx) => {
+        const x = flwPoints.length === 1
+            ? width / 2
+            : padX + (idx / (flwPoints.length - 1)) * (width - padX * 2);
+        const y = height - padY - ((Number(p.followers_count) - minVal) / span) * (height - padY * 2);
+        return { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, point: p };
+    });
+
+    const polylinePoints = coords.map(c => `${c.x},${c.y}`).join(' ');
+    const circlesHtml = coords.map(c => {
+        const label = `${formatIsoVi(c.point.observed_at)}: ${Number(c.point.followers_count).toLocaleString('vi-VN')} follower`;
+        return `<circle cx="${c.x}" cy="${c.y}" r="4" class="fill-amber-400 stroke-slate-950" stroke-width="1.5"><title>${escapeHtml(label)}</title></circle>`;
+    }).join('');
+
+    chartBox.innerHTML = `
+        <div class="w-full space-y-1.5">
+            <svg viewBox="0 0 ${width} ${height}" class="w-full h-28 overflow-visible">
+                <line x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}" stroke="#334155" stroke-dasharray="3 3" stroke-width="1" />
+                <line x1="${padX}" y1="${padY}" x2="${width - padX}" y2="${padY}" stroke="#334155" stroke-dasharray="3 3" stroke-width="1" />
+                ${coords.length > 1 ? `<polyline fill="none" stroke="#f59e0b" stroke-width="2" points="${polylinePoints}" />` : ''}
+                ${circlesHtml}
+            </svg>
+            <div class="flex items-center justify-between text-[10px] text-slate-400 px-1">
+                <span>Đầu kỳ: ${escapeHtml(formatIsoVi(flwPoints[0].observed_at))} (${Number(flwPoints[0].followers_count).toLocaleString('vi-VN')})</span>
+                <span>Cuối kỳ: ${escapeHtml(formatIsoVi(flwPoints[flwPoints.length - 1].observed_at))} (${Number(flwPoints[flwPoints.length - 1].followers_count).toLocaleString('vi-VN')})</span>
+            </div>
+        </div>
+    `;
+}
+
+async function openAlertsModal() {
+    const modal = document.getElementById('alertsModal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        safeCreateIcons();
+    }
+    await loadAlertsList();
+}
+
+function closeAlertsModal() {
+    const modal = document.getElementById('alertsModal');
+    if (modal) {
+        modal.classList.add('hidden');
+    }
+}
+
+async function loadAlertsList() {
+    const container = document.getElementById('alerts-list-container');
+    const status = document.getElementById('alert-filter-status')?.value || 'active';
+    const severity = document.getElementById('alert-filter-severity')?.value || '';
+    const params = new URLSearchParams();
+    params.set('status', status);
+    if (severity) params.set('severity', severity);
+
+    try {
+        const res = await fetch(`/api/fanpage-alerts?${params.toString()}`, { cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            if (container) container.innerHTML = `<div class="text-rose-400">${escapeHtml(data.detail || 'Không tải được cảnh báo.')}</div>`;
+            return;
+        }
+        renderAlertsList(data.items || []);
+        await loadSummaryAndFilters();
+    } catch (e) {
+        if (container) container.innerHTML = `<div class="text-rose-400">Lỗi kết nối: ${escapeHtml(String(e))}</div>`;
+    }
+}
+
+function renderAlertsList(items) {
+    const container = document.getElementById('alerts-list-container');
+    if (!container) return;
+    if (!items.length) {
+        container.innerHTML = '<div class="text-slate-500 italic py-6 text-center">Không có cảnh báo nào khớp bộ lọc hiện tại.</div>';
+        return;
+    }
+
+    container.innerHTML = items.map(a => {
+        const sevBadge = a.severity === 'critical'
+            ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/30">Nghiêm trọng</span>'
+            : (a.severity === 'warning'
+                ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30">Cảnh báo</span>'
+                : '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/30">Thông tin</span>');
+
+        const statusBadge = a.status === 'open'
+            ? '<span class="px-1.5 py-0.5 rounded text-[10px] bg-rose-500/15 text-rose-300">Chưa xem</span>'
+            : (a.status === 'acknowledged'
+                ? '<span class="px-1.5 py-0.5 rounded text-[10px] bg-slate-700 text-slate-300">Đã xem</span>'
+                : (a.status === 'snoozed'
+                    ? `<span class="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-300">Tạm ẩn đến ${escapeHtml(formatIsoVi(a.snoozed_until))}</span>`
+                    : '<span class="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-300">Đã đóng</span>'));
+
+        return `
+            <div class="bg-slate-900/50 border border-borderBg rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div class="space-y-1 min-w-0">
+                    <div class="flex flex-wrap items-center gap-1.5">
+                        ${sevBadge}
+                        ${statusBadge}
+                        <span class="font-semibold text-slate-100">${escapeHtml(a.title || a.alert_type)}</span>
+                    </div>
+                    <div class="text-xs text-slate-300">${escapeHtml(a.message || '')}</div>
+                    <div class="text-[10px] text-slate-500">
+                        Đầu tiên: ${escapeHtml(formatIsoVi(a.first_seen_at))} · Gần nhất: ${escapeHtml(formatIsoVi(a.last_seen_at))}
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-1.5 shrink-0">
+                    ${a.status === 'open' ? `
+                        <button type="button" onclick="updateAlertAction(${Number(a.alert_id)}, 'acknowledge')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-[11px] transition">
+                            Đã xem
+                        </button>
+                    ` : ''}
+                    ${a.status !== 'snoozed' && a.status !== 'resolved' ? `
+                        <button type="button" onclick="updateAlertAction(${Number(a.alert_id)}, 'snooze', 24)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 rounded-lg text-[11px] transition">
+                            Tạm ẩn 24h
+                        </button>
+                    ` : ''}
+                    ${a.status !== 'resolved' ? `
+                        <button type="button" onclick="updateAlertAction(${Number(a.alert_id)}, 'resolve')" class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 rounded-lg text-[11px] transition">
+                            Đóng
+                        </button>
+                    ` : `
+                        <button type="button" onclick="updateAlertAction(${Number(a.alert_id)}, 'reopen')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-borderBg rounded-lg text-[11px] transition">
+                            Mở lại
+                        </button>
+                    `}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function updateAlertAction(alertId, action, snoozeHours = 24) {
+    try {
+        const res = await fetch(`/api/fanpage-alerts/${encodeURIComponent(alertId)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, snooze_hours: snoozeHours }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Không cập nhật được cảnh báo.', 'error');
+            return;
+        }
+        await loadAlertsList();
+    } catch (e) {
+        showToast('Lỗi kết nối: ' + e, 'error');
+    }
+}
+
+async function acknowledgeAllAlerts() {
+    try {
+        const res = await fetch('/api/fanpage-alerts/acknowledge-all', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Không thể đánh dấu đã xem.', 'error');
+            return;
+        }
+        showToast(`Đã đánh dấu đã xem ${data.acknowledged_count || 0} cảnh báo.`, 'success');
+        await loadAlertsList();
+    } catch (e) {
+        showToast('Lỗi kết nối: ' + e, 'error');
+    }
+}
+
+async function createDatabaseBackup() {
+    try {
+        const res = await fetch('/api/fanpages/backup', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Sao lưu SQLite thất bại.', 'error');
+            return;
+        }
+        const b = data.backup || {};
+        showToast(`Đã sao lưu an toàn: ${b.filename || 'fanpages.sqlite'} (${Number(b.size_bytes || 0).toLocaleString('vi-VN')} bytes).`, 'success');
+    } catch (e) {
+        showToast('Lỗi khi sao lưu DB: ' + e, 'error');
     }
 }
 

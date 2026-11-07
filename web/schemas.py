@@ -158,3 +158,18 @@ class FanpageSyncJobRetryRequest(BaseModel):
     auto_start: Optional[bool] = None
 
 
+class FanpageAlertUpdateRequest(BaseModel):
+    action: str = "acknowledge"  # acknowledge | snooze | resolve | reopen
+    snooze_hours: int = 24
+
+
+class FanpageMergeRequest(BaseModel):
+    source_page_id: str
+
+
+class FanpagePruneRequest(BaseModel):
+    metric_retention_days: int = 365
+    job_retention_days: int = 30
+
+
+

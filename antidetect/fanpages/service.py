@@ -43,8 +43,10 @@ ALLOWED_SORT_FIELDS = frozenset(
         "last_post",
         "followers_count",
         "followers",
+        "followers_delta",
         "likes_count",
         "likes",
+        "likes_delta",
         "last_synced_at",
         "last_synced",
         "updated_at",
@@ -263,7 +265,9 @@ class FanpageService:
                 resolved_conn = self._resolve_profile_connection(
                     pid, meta, runtime_map.get(pid)
                 )
-                if lk.get("link_status") == "missing_in_latest_scan":
+                if resolved_conn in ("login_required", "identity_mismatch"):
+                    lk["connection_status"] = resolved_conn
+                elif lk.get("link_status") == "missing_in_latest_scan":
                     missing_in_latest_scan = True
                     lk["connection_status"] = "missing_in_latest_scan"
                 else:
@@ -320,6 +324,23 @@ class FanpageService:
             or missing_in_latest_scan
         )
 
+        # Compute delta between latest 2 observations in page_metric_history (ordered DESC)
+        pts = row.get("recent_metric_points") or row.get("metric_history") or []
+        flw_pts = [p for p in pts if p.get("followers_count") is not None]
+        likes_pts = [p for p in pts if p.get("likes_count") is not None]
+        followers_delta: Optional[int] = None
+        if len(flw_pts) >= 2:
+            followers_delta = int(flw_pts[0]["followers_count"]) - int(flw_pts[1]["followers_count"])
+        likes_delta: Optional[int] = None
+        if len(likes_pts) >= 2:
+            likes_delta = int(likes_pts[0]["likes_count"]) - int(likes_pts[1]["likes_count"])
+        counter_decreased = bool(
+            (followers_delta is not None and followers_delta < 0)
+            or (likes_delta is not None and likes_delta < 0)
+        )
+        if counter_decreased:
+            needs_attention = True
+
         out = dict(row)
         id_ver_status = (
             "verified_id" if row.get("id_status") == "verified" else "url_only"
@@ -354,6 +375,9 @@ class FanpageService:
                 "last_post_age_max_days": normalized.get("last_post_age_max_days"),
                 "last_post_days": normalized.get("last_post_days"),
                 "activity_stale": activity_stale,
+                "followers_delta": followers_delta,
+                "likes_delta": likes_delta,
+                "counter_decreased": counter_decreased,
                 "needs_attention": needs_attention,
                 "is_archived": bool(row.get("is_archived")),
             }
@@ -538,9 +562,15 @@ class FanpageService:
             if field in ("followers_count", "followers"):
                 val = item.get("followers_count")
                 return (1, -1) if val is None else (0, int(val))
+            if field == "followers_delta":
+                val = item.get("followers_delta")
+                return (1, -999999999) if val is None else (0, int(val))
             if field in ("likes_count", "likes"):
                 val = item.get("likes_count")
                 return (1, -1) if val is None else (0, int(val))
+            if field == "likes_delta":
+                val = item.get("likes_delta")
+                return (1, -999999999) if val is None else (0, int(val))
             if field in ("last_synced_at", "last_synced"):
                 return (0, int(item.get("last_synced_at") or 0))
             if field == "updated_at":
@@ -725,6 +755,23 @@ class FanpageService:
             }
         )
 
+        # Evaluate deduplicated alerts on active catalog
+        self.evaluate_alerts(all_rows, now=now)
+        alerts_info = self.repo.list_alerts(status="active", limit=5)
+
+        growing_pages = [
+            {
+                "internal_page_id": r["internal_id"],
+                "page_name": r.get("name"),
+                "followers_count": r.get("followers_count"),
+                "followers_delta": r.get("followers_delta"),
+                "preferred_profile_name": r.get("preferred_profile_name"),
+            }
+            for r in active_catalog
+            if r.get("followers_delta") is not None and int(r["followers_delta"]) != 0
+        ]
+        growing_pages.sort(key=lambda x: int(x["followers_delta"]), reverse=True)
+
         return {
             "total_pages": total,
             "archived_pages": archived_count,
@@ -763,7 +810,248 @@ class FanpageService:
             "profiles": profile_breakdown,
             "tags": all_tags,
             "active_sync_job": self.repo.find_active_sync_job(),
+            "alerts_summary": alerts_info["counts"],
+            "top_growing_pages": growing_pages[:5],
         }
+
+    def evaluate_alerts(
+        self,
+        rows: Optional[List[Dict[str, Any]]] = None,
+        *,
+        now: Optional[datetime.datetime] = None,
+    ) -> Dict[str, int]:
+        """Evaluate catalog & profile health conditions and sync deduplicated alerts."""
+        now_dt = now or datetime.datetime.now(datetime.timezone.utc)
+        catalog = (
+            rows
+            if rows is not None
+            else self._load_enriched_catalog(sync=True, now=now_dt)
+        )
+        candidates: List[Dict[str, Any]] = []
+        seen_keys = set()
+
+        for r in catalog:
+            if r.get("is_archived"):
+                continue
+            internal_id = r["internal_id"]
+            page_name = str(r.get("name") or internal_id)
+            pref_id = r.get("preferred_profile_id")
+            pref_name = str(r.get("preferred_profile_name") or pref_id or "")
+            conn_status = str(r.get("connection_status") or "")
+
+            if conn_status in ("login_required", "needs_relogin"):
+                dkey = f"login_required:{internal_id}:{pref_id or ''}"
+                if dkey not in seen_keys:
+                    seen_keys.add(dkey)
+                    candidates.append(
+                        {
+                            "dedup_key": dkey,
+                            "page_id": internal_id,
+                            "profile_id": pref_id,
+                            "target_name": f"{page_name} ({pref_name})" if pref_name else page_name,
+                            "alert_type": "login_required",
+                            "severity": "critical",
+                            "title": "Cần đăng nhập lại Facebook",
+                            "message": f"Profile '{pref_name or pref_id}' quản lý page '{page_name}' đã mất phiên đăng nhập Facebook.",
+                            "evidence": {"connection_status": conn_status, "profile_id": pref_id},
+                        }
+                    )
+
+            if conn_status == "identity_mismatch":
+                dkey = f"identity_mismatch:{internal_id}:{pref_id or ''}"
+                if dkey not in seen_keys:
+                    seen_keys.add(dkey)
+                    candidates.append(
+                        {
+                            "dedup_key": dkey,
+                            "page_id": internal_id,
+                            "profile_id": pref_id,
+                            "target_name": f"{page_name} ({pref_name})" if pref_name else page_name,
+                            "alert_type": "identity_mismatch",
+                            "severity": "critical",
+                            "title": "Lệch danh tính tài khoản Facebook",
+                            "message": f"Tài khoản đang đăng nhập trong profile '{pref_name or pref_id}' khác với lần quét trước.",
+                            "evidence": {"connection_status": conn_status, "profile_id": pref_id},
+                        }
+                    )
+
+            if r.get("activity_status") == "long_absent":
+                dkey = f"long_absent:{internal_id}"
+                if dkey not in seen_keys:
+                    seen_keys.add(dkey)
+                    min_d = r.get("last_post_age_min_days") or r.get("last_post_days")
+                    candidates.append(
+                        {
+                            "dedup_key": dkey,
+                            "page_id": internal_id,
+                            "profile_id": pref_id,
+                            "target_name": page_name,
+                            "alert_type": "long_absent",
+                            "severity": "warning",
+                            "title": "Quá 7 ngày chưa thấy bài đăng mới",
+                            "message": f"Fanpage '{page_name}' lâu chưa có bài đăng mới (ước lượng ≥ {min_d or 8} ngày).",
+                            "evidence": {
+                                "last_post_at_min": r.get("last_post_at_min"),
+                                "last_post_at_max": r.get("last_post_at_max"),
+                                "last_post_raw": r.get("last_post_raw"),
+                            },
+                        }
+                    )
+
+            if r.get("missing_in_latest_scan"):
+                dkey = f"missing_in_scan:{internal_id}"
+                if dkey not in seen_keys:
+                    seen_keys.add(dkey)
+                    candidates.append(
+                        {
+                            "dedup_key": dkey,
+                            "page_id": internal_id,
+                            "profile_id": pref_id,
+                            "target_name": page_name,
+                            "alert_type": "missing_in_scan",
+                            "severity": "warning",
+                            "title": "Vắng mặt ở lượt quét gần nhất",
+                            "message": f"Fanpage '{page_name}' không xuất hiện trong danh sách của lần quét gần nhất; cần kiểm tra quyền truy cập.",
+                            "evidence": {"profile_id": pref_id},
+                        }
+                    )
+
+            flw_delta = r.get("followers_delta")
+            if flw_delta is not None and int(flw_delta) < 0:
+                dkey = f"follower_drop:{internal_id}"
+                if dkey not in seen_keys:
+                    seen_keys.add(dkey)
+                    candidates.append(
+                        {
+                            "dedup_key": dkey,
+                            "page_id": internal_id,
+                            "profile_id": pref_id,
+                            "target_name": page_name,
+                            "alert_type": "follower_drop",
+                            "severity": "warning",
+                            "title": "Follower giảm giữa hai lần ghi nhận",
+                            "message": f"Fanpage '{page_name}' ghi nhận chênh lệch {flw_delta} follower giữa hai snapshot gần nhất.",
+                            "evidence": {
+                                "followers_count": r.get("followers_count"),
+                                "followers_delta": flw_delta,
+                            },
+                        }
+                    )
+
+            if r.get("data_quality") == "stale":
+                dkey = f"stale_data:{internal_id}"
+                if dkey not in seen_keys:
+                    seen_keys.add(dkey)
+                    candidates.append(
+                        {
+                            "dedup_key": dkey,
+                            "page_id": internal_id,
+                            "profile_id": pref_id,
+                            "target_name": page_name,
+                            "alert_type": "stale_data",
+                            "severity": "info",
+                            "title": "Dữ liệu fanpage đã cũ",
+                            "message": f"Dữ liệu của '{page_name}' đã quá hạn làm mới ({self._stale_hours_fn()} giờ).",
+                            "evidence": {"last_synced_at": r.get("last_synced_at")},
+                        }
+                    )
+
+        now_iso = (
+            now_dt.astimezone(datetime.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        return self.repo.sync_alerts(candidates, now_iso=now_iso)
+
+    def get_page_metrics(
+        self,
+        page_id: str,
+        *,
+        days: int = 28,
+        sync: bool = True,
+        now: Optional[datetime.datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        now_dt = now or datetime.datetime.now(datetime.timezone.utc)
+        if sync:
+            self.sync_from_profiles(now=now_dt)
+        return self.repo.get_page_metrics_series(page_id, days=days, now=now_dt)
+
+    def list_alerts(
+        self,
+        *,
+        status: str = "active",
+        severity: str = "",
+        alert_type: str = "",
+        limit: int = 100,
+        sync: bool = True,
+        now: Optional[datetime.datetime] = None,
+    ) -> Dict[str, Any]:
+        now_dt = now or datetime.datetime.now(datetime.timezone.utc)
+        if sync:
+            all_rows = self._load_enriched_catalog(sync=True, now=now_dt)
+            self.evaluate_alerts(all_rows, now=now_dt)
+        now_iso = (
+            now_dt.astimezone(datetime.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        return self.repo.list_alerts(
+            status=status,
+            severity=severity,
+            alert_type=alert_type,
+            limit=limit,
+            now_iso=now_iso,
+        )
+
+    def update_alert(
+        self,
+        alert_id: int,
+        *,
+        action: str = "acknowledge",
+        snooze_hours: int = 24,
+        now: Optional[datetime.datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        now_iso = (
+            now.astimezone(datetime.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+            if now
+            else None
+        )
+        return self.repo.update_alert(
+            alert_id, action=action, snooze_hours=snooze_hours, now_iso=now_iso
+        )
+
+    def acknowledge_all_alerts(self) -> int:
+        return self.repo.acknowledge_all_alerts()
+
+    def merge_pages(
+        self, target_page_id: str, source_page_id: str
+    ) -> Optional[Dict[str, Any]]:
+        merged = self.repo.merge_pages(target_page_id, source_page_id)
+        if not merged:
+            return None
+        return self.get_page(merged["internal_id"], sync=False)
+
+    def create_backup(self, *, max_backups: int = 10) -> Dict[str, Any]:
+        return self.repo.create_backup(max_backups=max_backups)
+
+    def list_backups(self) -> List[Dict[str, Any]]:
+        return self.repo.list_backups()
+
+    def prune_old_data(
+        self,
+        *,
+        metric_retention_days: int = 365,
+        job_retention_days: int = 30,
+    ) -> Dict[str, int]:
+        return self.repo.prune_old_data(
+            metric_retention_days=metric_retention_days,
+            job_retention_days=job_retention_days,
+        )
 
     def enqueue_sync_job(
         self,

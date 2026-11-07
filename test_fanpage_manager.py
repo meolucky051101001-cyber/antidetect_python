@@ -822,3 +822,452 @@ def test_stage2_job_deduplication_and_cancellation(tmp_path, monkeypatch):
     assert all(it["status"] == "cancelled" for it in canceled_job["items"])
 
 
+# ==============================================================================
+# STAGE 3 TESTS — Chuỗi thời gian, Cảnh báo chống trùng, Phục hồi job & Sao lưu
+# ==============================================================================
+
+
+def test_stage3_timeseries_metrics_and_delta_rules(tmp_path):
+    """Kiểm chứng chuỗi thời gian & chênh lệch kỳ:
+    - Không bịa số 0 cho ngày không quét (chỉ trả về các điểm quan sát thật).
+    - Delta âm không bị ép về 0, đánh dấu counter_decreased=True.
+    - Khi kỳ gốc = 0 hoặc khác độ chính xác (exact vs rounded) -> followers_pct = None.
+    """
+    repo = FanpageRepository(str(tmp_path / "fanpages.sqlite"))
+    now = datetime.datetime(2026, 11, 20, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    t_minus_10d = (now - datetime.timedelta(days=10)).isoformat()
+    t_minus_5d = (now - datetime.timedelta(days=5)).isoformat()
+    t_now = now.isoformat()
+
+    # Lần 1 (10 ngày trước): 1000 followers (exact), 500 likes (exact)
+    repo.sync_profiles_snapshot(
+        [
+            {
+                "id": "prof_ts",
+                "name": "Profile TS",
+                "facebook_pages_synced_at": int((now - datetime.timedelta(days=10)).timestamp()),
+                "facebook_pages": [
+                    {
+                        "id": "1000999888777",
+                        "name": "TS Page",
+                        "url": "https://www.facebook.com/profile.php?id=1000999888777",
+                        "followers": "1.000",
+                        "likes": "500",
+                        "detail_synced": True,
+                        "detail_synced_at": t_minus_10d,
+                        "seen_in_scan_id": "scan_ts_1",
+                    }
+                ],
+            }
+        ],
+        now_iso=t_minus_10d,
+    )
+
+    # Lần 2 (5 ngày trước): tăng lên 1250 followers, 550 likes
+    repo.sync_profiles_snapshot(
+        [
+            {
+                "id": "prof_ts",
+                "name": "Profile TS",
+                "facebook_pages_synced_at": int((now - datetime.timedelta(days=5)).timestamp()),
+                "facebook_pages": [
+                    {
+                        "id": "1000999888777",
+                        "name": "TS Page",
+                        "url": "https://www.facebook.com/profile.php?id=1000999888777",
+                        "followers": "1.250",
+                        "likes": "550",
+                        "detail_synced": True,
+                        "detail_synced_at": t_minus_5d,
+                        "seen_in_scan_id": "scan_ts_2",
+                    }
+                ],
+            }
+        ],
+        now_iso=t_minus_5d,
+    )
+
+    # Lần 3 (hôm nay): giảm xuống 1200 followers (sụt giảm bộ đếm), likes tăng lên 600
+    repo.sync_profiles_snapshot(
+        [
+            {
+                "id": "prof_ts",
+                "name": "Profile TS",
+                "facebook_pages_synced_at": int(now.timestamp()),
+                "facebook_pages": [
+                    {
+                        "id": "1000999888777",
+                        "name": "TS Page",
+                        "url": "https://www.facebook.com/profile.php?id=1000999888777",
+                        "followers": "1.200",
+                        "likes": "600",
+                        "detail_synced": True,
+                        "detail_synced_at": t_now,
+                        "seen_in_scan_id": "scan_ts_3",
+                    }
+                ],
+            }
+        ],
+        now_iso=t_now,
+    )
+
+    series_28d = repo.get_page_metrics_series("fb_1000999888777", days=28, now=now)
+    assert series_28d is not None
+    # Chỉ có đúng 3 điểm quan sát thật, không bịa thêm 25 ngày = 0
+    assert len(series_28d["points"]) == 3
+    # Chênh lệch cả kỳ 28d: từ 1000 -> 1200 (+200, +20.0%), nhưng giữa kỳ có giảm 1250 -> 1200 nên counter_decreased=True
+    assert series_28d["followers_delta"] == 200
+    assert series_28d["followers_pct"] == 20.0
+    assert series_28d["likes_delta"] == 100
+    assert series_28d["likes_pct"] == 20.0
+    assert series_28d["counter_decreased"] is True
+
+    # Trong cửa sổ 7 ngày gần nhất: điểm đầu là 1250 (5 ngày trước), điểm cuối là 1200 (hôm nay) -> delta âm -50 (không ép về 0)
+    series_7d = repo.get_page_metrics_series("fb_1000999888777", days=7, now=now)
+    assert len(series_7d["points"]) == 2
+    assert series_7d["followers_delta"] == -50
+    assert series_7d["followers_pct"] == -4.0
+    assert series_7d["counter_decreased"] is True
+
+    # Kiểm tra list_all_pages_with_links đính kèm recent_metric_points để service tính delta 2 điểm gần nhất (-50)
+    rows = repo.list_all_pages_with_links()
+    assert len(rows) == 1
+    assert len(rows[0]["recent_metric_points"]) == 3
+
+
+def test_stage3_alerts_deduplication_acknowledge_snooze_and_autoresolve(tmp_path, monkeypatch):
+    """Kiểm chứng hệ thống cảnh báo Stage 3:
+    - Sinh cảnh báo từ điều kiện thực tế (needs_relogin, long_absent, counter_decreased).
+    - Đánh giá lại nhiều lần không sinh bản ghi trùng (dedup_key).
+    - Đánh dấu đã xem (acknowledge) hoặc tạm ẩn (snooze) được giữ nguyên khi đánh giá lại.
+    - Khi điều kiện lỗi được khắc phục, cảnh báo tự động chuyển sang resolved.
+    """
+    pm = _make_isolated_pm(tmp_path, monkeypatch)
+    now = datetime.datetime(2026, 11, 20, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    p1 = pm.create_profile(name="Alert Profile", target_os="windows")
+    _seed_profile_pages(
+        pm,
+        p1.id,
+        [
+            {
+                "id": "1000555444333",
+                "name": "Alert Fanpage",
+                "url": "https://www.facebook.com/profile.php?id=1000555444333",
+                "last_post_at_min": (now - datetime.timedelta(days=16)).isoformat(),
+                "last_post_at_max": (now - datetime.timedelta(days=15)).isoformat(),
+                "last_post_observed_at": now.isoformat(),
+                "last_post_precision": "day",
+                "last_post_confidence": "high",
+                "activity_scan_complete": True,
+                "activity_checked_at": now.isoformat(),
+            }
+        ],
+        synced_at=int(now.timestamp()),
+    )
+    pm.apply_facebook_scan(
+        p1.id,
+        {
+            "scan_id": "scan_err_login",
+            "discovery_status": "error",
+            "completion_reason": "LOGIN_LOST",
+            "login_status": False,
+            "observed_count": 0,
+            "pages": [],
+        },
+    )
+
+    mock_launcher = MagicMock()
+    mock_launcher.is_running.return_value = False
+    mock_launcher.active_ports = {}
+
+    svc = FanpageService(
+        profile_manager=pm,
+        launcher=mock_launcher,
+        db_path=str(tmp_path / "fanpages.sqlite"),
+    )
+
+    # 1. Đánh giá cảnh báo lần 1
+    summary1 = svc.get_summary(now=now)
+    alerts_sum1 = summary1["alerts_summary"]
+    assert alerts_sum1["open_count"] >= 2  # login_required + long_absent
+
+    open_alerts = svc.list_alerts(status="open", sync=False)["items"]
+    types = {a["alert_type"] for a in open_alerts}
+    assert "login_required" in types
+    assert "long_absent" in types
+    initial_count = len(open_alerts)
+
+    # 2. Gọi evaluate_alerts / get_summary lần 2 -> số lượng cảnh báo KHÔNG tăng thêm (chống spam)
+    svc.get_summary(now=now)
+    open_alerts_2 = svc.list_alerts(status="open", sync=False)["items"]
+    assert len(open_alerts_2) == initial_count
+
+    # 3. Acknowledge 1 cảnh báo và Snooze 1 cảnh báo
+    login_alert = next(a for a in open_alerts_2 if a["alert_type"] == "login_required")
+    absent_alert = next(a for a in open_alerts_2 if a["alert_type"] == "long_absent")
+
+    updated_ack = svc.update_alert(login_alert["alert_id"], action="acknowledge", now=now)
+    assert updated_ack["status"] == "acknowledged"
+
+    updated_snooze = svc.update_alert(absent_alert["alert_id"], action="snooze", snooze_hours=24, now=now)
+    assert updated_snooze["status"] == "snoozed"
+    assert updated_snooze["snoozed_until"] is not None
+
+    # Đánh giá lại khi điều kiện vẫn còn -> trạng thái acknowledged & snoozed được giữ nguyên
+    svc.evaluate_alerts(now=now)
+    ack_items = svc.list_alerts(status="acknowledged", sync=False, now=now)["items"]
+    snoozed_items = svc.list_alerts(status="snoozed", sync=False, now=now)["items"]
+    assert any(a["alert_id"] == login_alert["alert_id"] for a in ack_items)
+    assert any(a["alert_id"] == absent_alert["alert_id"] for a in snoozed_items)
+
+    # 4. Khắc phục điều kiện: profile đã đăng nhập lại OK và fanpage vừa đăng bài mới (1 ngày trước)
+    pm.apply_facebook_scan(
+        p1.id,
+        {
+            "scan_id": "scan_ok_fixed",
+            "discovery_status": "complete",
+            "completion_reason": "END_REACHED",
+            "login_status": True,
+            "observed_count": 1,
+            "pages": [
+                {
+                    "id": "1000555444333",
+                    "name": "Alert Fanpage",
+                    "url": "https://www.facebook.com/profile.php?id=1000555444333",
+                    "last_post_at_min": (now - datetime.timedelta(days=1)).isoformat(),
+                    "last_post_at_max": (now - datetime.timedelta(days=1)).isoformat(),
+                    "last_post_observed_at": (now + datetime.timedelta(minutes=5)).isoformat(),
+                    "last_post_precision": "day",
+                    "last_post_confidence": "high",
+                    "activity_scan_complete": True,
+                    "activity_checked_at": (now + datetime.timedelta(minutes=5)).isoformat(),
+                }
+            ],
+        },
+    )
+    svc.sync_from_profiles(now=now + datetime.timedelta(minutes=5))
+    svc.evaluate_alerts(now=now + datetime.timedelta(minutes=5))
+
+    # Cả 2 cảnh báo phải tự động chuyển sang resolved
+    active_after_fix = svc.list_alerts(status="active", sync=False)["items"]
+    assert len(active_after_fix) == 0
+    resolved_after_fix = svc.list_alerts(status="resolved", sync=False)["items"]
+    resolved_ids = {a["alert_id"] for a in resolved_after_fix}
+    assert login_alert["alert_id"] in resolved_ids
+    assert absent_alert["alert_id"] in resolved_ids
+
+    # 5. Chu kỳ tái phát lần 2: mất đăng nhập lại -> tạo cảnh báo mới -> tự resolve lần 2 không lỗi UNIQUE
+    pm.apply_facebook_scan(
+        p1.id,
+        {
+            "scan_id": "scan_err_login_2",
+            "discovery_status": "error",
+            "completion_reason": "LOGIN_LOST",
+            "login_status": False,
+            "observed_count": 0,
+            "pages": [],
+        },
+    )
+    svc.sync_from_profiles(now=now + datetime.timedelta(minutes=10))
+    svc.evaluate_alerts(now=now + datetime.timedelta(minutes=10))
+    reopened = svc.list_alerts(status="open", sync=False, now=now + datetime.timedelta(minutes=10))["items"]
+    assert any(a["alert_type"] == "login_required" for a in reopened)
+
+    # Người vận hành chủ động đóng (manual resolve) khi điều kiện vẫn còn -> suppressed=1 giữ không bật lại ngay
+    second_login_alert = next(a for a in reopened if a["alert_type"] == "login_required")
+    svc.update_alert(second_login_alert["alert_id"], action="resolve", now=now + datetime.timedelta(minutes=11))
+    svc.evaluate_alerts(now=now + datetime.timedelta(minutes=12))
+    assert len(svc.list_alerts(status="open", sync=False, now=now + datetime.timedelta(minutes=12))["items"]) == 0
+
+
+def test_stage3_crash_recovery_interrupted_jobs(tmp_path, monkeypatch):
+    """Kiểm chứng phục hồi job dở dang khi ứng dụng khởi động lại (instance mới):
+    - Mục đã completed giữ nguyên completed.
+    - Mục đang running hoặc pending của owner_instance cũ chuyển sang skipped (INTERRUPTED_BY_RESTART).
+    - Job chuyển sang interrupted và có thể retry lại đúng mục chưa xong.
+    """
+    pm = _make_isolated_pm(tmp_path, monkeypatch)
+    p1 = pm.create_profile(name="Prof Done", target_os="windows")
+    p2 = pm.create_profile(name="Prof Interrupted", target_os="windows")
+
+    repo = FanpageRepository(str(tmp_path / "fanpages.sqlite"))
+    job = repo.create_sync_job(
+        job_id="fjob_crashed01",
+        mode="discovery",
+        profile_items=[
+            {"profile_id": p1.id, "profile_name": p1.name},
+            {"profile_id": p2.id, "profile_name": p2.name},
+        ],
+        owner_instance="old_dead_instance_pid_111",
+    )
+    repo.update_sync_job_status("fjob_crashed01", status="running", started_at="2026-11-07T01:00:00+00:00")
+    items = job["items"]
+    # p1 đã hoàn tất trước khi crash, p2 đang running thì tiến trình tắt đột ngột
+    repo.update_sync_job_item(
+        items[0]["item_id"],
+        job_id="fjob_crashed01",
+        status="completed",
+        attempts=1,
+        finished_at="2026-11-07T01:00:05+00:00",
+    )
+    repo.update_sync_job_item(
+        items[1]["item_id"],
+        job_id="fjob_crashed01",
+        status="running",
+        attempts=1,
+        started_at="2026-11-07T01:00:06+00:00",
+    )
+
+    mock_launcher = MagicMock()
+    mock_launcher.is_running.return_value = False
+    mock_launcher.active_ports = {}
+
+    # Khi khởi tạo FanpageService (hoặc FanpageSyncJobManager) ở tiến trình mới -> tự động recover
+    svc = FanpageService(
+        profile_manager=pm,
+        launcher=mock_launcher,
+        db_path=str(tmp_path / "fanpages.sqlite"),
+        owner_instance="new_alive_instance_pid_222",
+    )
+
+    recovered_job = svc.get_sync_job("fjob_crashed01")
+    assert recovered_job is not None
+    assert recovered_job["status"] == "interrupted"
+    rec_items = {it["profile_id"]: it for it in recovered_job["items"]}
+    assert rec_items[p1.id]["status"] == "completed"
+    assert rec_items[p2.id]["status"] == "skipped"
+    assert rec_items[p2.id]["error_code"] == "INTERRUPTED_BY_RESTART"
+
+
+def test_stage3_backup_prune_and_manual_merge_api(tmp_path, monkeypatch):
+    """Kiểm chứng các endpoint Stage 3:
+    - POST /api/fanpages/backup & GET /api/fanpages/backups (sao lưu online SQLite WAL an toàn).
+    - POST /api/fanpages/prune (dọn dữ liệu lịch sử quá hạn).
+    - POST /api/fanpages/{page_id}/merge (gộp thủ công page url_only vào page verified, từ chối nếu lệch FB Page ID).
+    - GET /api/fanpages/{page_id}/metrics & GET /api/fanpage-alerts.
+    """
+    from fastapi.testclient import TestClient
+    import web.app as app_mod
+
+    pm = _make_isolated_pm(tmp_path, monkeypatch)
+    now = datetime.datetime(2026, 11, 20, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    p1 = pm.create_profile(name="Admin Profile 1", target_os="windows")
+    p2 = pm.create_profile(name="Admin Profile 2", target_os="windows")
+
+    # p1 có 1 page đã xác minh ID và 1 page khác cũng đã xác minh ID
+    _seed_profile_pages(
+        pm,
+        p1.id,
+        [
+            {
+                "id": "1000111222333",
+                "name": "Main Verified Page",
+                "url": "https://www.facebook.com/profile.php?id=1000111222333",
+                "followers": "5.000",
+                "detail_synced": True,
+                "detail_synced_at": now.isoformat(),
+            },
+            {
+                "id": "1000999000111",
+                "name": "Second Verified Page",
+                "url": "https://www.facebook.com/profile.php?id=1000999000111",
+                "followers": "2.000",
+                "detail_synced": True,
+                "detail_synced_at": now.isoformat(),
+            },
+        ],
+        synced_at=int(now.timestamp()),
+    )
+    # p2 có 1 page url_only (vanity URL khác của Main Verified Page chưa quét ra ID)
+    _seed_profile_pages(
+        pm,
+        p2.id,
+        [
+            {
+                "id": "",
+                "name": "Main Verified Page Vanity",
+                "url": "https://www.facebook.com/main.verified.vanity.alias",
+            }
+        ],
+        synced_at=int(now.timestamp()),
+    )
+
+    mock_launcher = MagicMock()
+    mock_launcher.is_running.return_value = False
+    mock_launcher.active_ports = {}
+
+    monkeypatch.setattr(app_mod, "profile_manager", pm)
+    monkeypatch.setattr(app_mod, "launcher", mock_launcher)
+    monkeypatch.setattr(app_mod, "DATA_DIR", str(tmp_path))
+    app_mod._fanpage_service_cache.clear()
+
+    client = TestClient(app_mod.app, base_url="http://127.0.0.1:8000")
+    client.post(
+        "/auth/login",
+        headers={"Authorization": "Bearer " + app_mod.app.state.access_key},
+    )
+
+    # 1. Kiểm tra danh sách ban đầu có 3 page (2 verified + 1 url_only)
+    r_list = client.get("/api/fanpages")
+    assert r_list.status_code == 200
+    items = r_list.json()["items"]
+    assert len(items) == 3
+    url_only_page = next(it for it in items if it["id_verification_status"] == "url_only")
+
+    # 2. Thử gộp 2 page đã có 2 FB Page ID khác nhau -> phải bị từ chối 400
+    r_bad_merge = client.post(
+        "/api/fanpages/fb:1000111222333/merge",
+        json={"source_page_id": "fb:1000999000111"},
+    )
+    assert r_bad_merge.status_code == 400
+
+    # 3. Gộp page url_only vào page verified fb:1000111222333 -> thành công
+    r_merge = client.post(
+        "/api/fanpages/fb:1000111222333/merge",
+        json={"source_page_id": url_only_page["internal_page_id"]},
+    )
+    assert r_merge.status_code == 200
+    merged_page = r_merge.json()["page"]
+    assert merged_page["internal_page_id"] == "pg_1000111222333"
+    linked_pids = {lk["profile_id"] for lk in merged_page["linked_profiles"]}
+    assert linked_pids == {p1.id, p2.id}
+
+    # Tổng số page sau khi gộp giảm từ 3 xuống 2
+    assert client.get("/api/fanpages").json()["total"] == 2
+
+    # 4. Kiểm tra GET /api/fanpages/{page_id}/metrics
+    r_metrics = client.get("/api/fanpages/fb:1000111222333/metrics?days=28")
+    assert r_metrics.status_code == 200
+    m_data = r_metrics.json()
+    assert m_data["internal_page_id"] == "pg_1000111222333"
+    assert len(m_data["points"]) >= 1
+
+    # 5. Kiểm tra Sao lưu SQLite WAL an toàn (POST /api/fanpages/backup & GET /api/fanpages/backups)
+    r_backup = client.post("/api/fanpages/backup")
+    assert r_backup.status_code == 200
+    b_info = r_backup.json()["backup"]
+    assert b_info["size_bytes"] > 0
+
+    r_backups = client.get("/api/fanpages/backups")
+    assert r_backups.status_code == 200
+    assert len(r_backups.json()["items"]) == 1
+
+    # 6. Kiểm tra Dọn dữ liệu cũ (POST /api/fanpages/prune)
+    r_prune = client.post(
+        "/api/fanpages/prune",
+        json={"metric_retention_days": 365, "job_retention_days": 30},
+    )
+    assert r_prune.status_code == 200
+    assert r_prune.json()["success"] is True
+
+    # 7. Kiểm tra API cảnh báo (/api/fanpage-alerts & /acknowledge-all)
+    r_alerts = client.get("/api/fanpage-alerts?status=active")
+    assert r_alerts.status_code == 200
+    assert "items" in r_alerts.json()
+
+    r_ack_all = client.post("/api/fanpage-alerts/acknowledge-all")
+    assert r_ack_all.status_code == 200
+    assert r_ack_all.json()["success"] is True
+
+
+

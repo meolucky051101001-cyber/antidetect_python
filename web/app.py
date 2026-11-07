@@ -77,8 +77,11 @@ from .schemas import (
     CdpHealth,
     CheckProxyRequest,
     CreateProfileRequest,
+    FanpageAlertUpdateRequest,
     FanpageBulkUpdateRequest,
+    FanpageMergeRequest,
     FanpageOpenRequest,
+    FanpagePruneRequest,
     FanpageSyncJobCreateRequest,
     FanpageSyncJobRetryRequest,
     FanpageUpdateRequest,
@@ -2400,6 +2403,32 @@ async def bulk_update_fanpages(req: FanpageBulkUpdateRequest):
     return {"success": True, **result}
 
 
+@app.post("/api/fanpages/backup")
+async def create_fanpages_backup_endpoint(max_backups: int = 10):
+    svc = get_fanpage_service()
+    info = await asyncio.to_thread(svc.create_backup, max_backups=max_backups)
+    return {"success": True, "backup": info}
+
+
+@app.get("/api/fanpages/backups")
+async def list_fanpages_backups_endpoint():
+    svc = get_fanpage_service()
+    backups = await asyncio.to_thread(svc.list_backups)
+    return {"success": True, "backups": backups, "items": backups}
+
+
+@app.post("/api/fanpages/prune")
+async def prune_fanpages_data_endpoint(req: Optional[FanpagePruneRequest] = None):
+    req = req or FanpagePruneRequest()
+    svc = get_fanpage_service()
+    stats = await asyncio.to_thread(
+        svc.prune_old_data,
+        metric_retention_days=req.metric_retention_days,
+        job_retention_days=req.job_retention_days,
+    )
+    return {"success": True, **stats}
+
+
 @app.get("/api/fanpages")
 async def list_fanpages_endpoint(
     q: Optional[str] = None,
@@ -2441,6 +2470,31 @@ async def get_fanpage_detail_endpoint(page_id: str):
     if detail is None:
         raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
     return {"success": True, "page": detail}
+
+
+@app.get("/api/fanpages/{page_id}/metrics")
+async def get_fanpage_metrics_endpoint(page_id: str, days: int = 28):
+    svc = get_fanpage_service()
+    series = await asyncio.to_thread(svc.get_page_metrics, page_id, days=days)
+    if series is None:
+        raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
+    return {"success": True, **series}
+
+
+@app.post("/api/fanpages/{page_id}/merge")
+async def merge_fanpage_endpoint(page_id: str, req: FanpageMergeRequest):
+    svc = get_fanpage_service()
+    try:
+        merged = await asyncio.to_thread(
+            svc.merge_pages, page_id, req.source_page_id
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if merged is None:
+        raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
+    return {"success": True, "page": merged}
 
 
 @app.patch("/api/fanpages/{page_id}")
@@ -2687,5 +2741,53 @@ async def retry_fanpage_sync_job_endpoint(
             "job": job,
         },
     )
+
+
+# --- Fanpage Alerts & Operational Health (Giai đoạn 3) ---
+
+
+@app.get("/api/fanpage-alerts")
+async def list_fanpage_alerts_endpoint(
+    status: str = "active",
+    severity: str = "",
+    alert_type: str = "",
+    limit: int = 100,
+):
+    svc = get_fanpage_service()
+    data = await asyncio.to_thread(
+        svc.list_alerts,
+        status=status,
+        severity=severity,
+        alert_type=alert_type,
+        limit=limit,
+    )
+    return {"success": True, **data}
+
+
+@app.post("/api/fanpage-alerts/acknowledge-all")
+async def acknowledge_all_fanpage_alerts_endpoint():
+    svc = get_fanpage_service()
+    count = await asyncio.to_thread(svc.acknowledge_all_alerts)
+    return {"success": True, "acknowledged_count": count}
+
+
+@app.patch("/api/fanpage-alerts/{alert_id}")
+async def update_fanpage_alert_endpoint(
+    alert_id: int, req: FanpageAlertUpdateRequest
+):
+    svc = get_fanpage_service()
+    try:
+        alert = await asyncio.to_thread(
+            svc.update_alert,
+            alert_id,
+            action=req.action,
+            snooze_hours=req.snooze_hours,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if alert is None:
+        raise HTTPException(status_code=404, detail="Cảnh báo không tồn tại.")
+    return {"success": True, "alert": alert}
+
 
 

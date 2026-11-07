@@ -61,9 +61,33 @@ def _verified_internal_id(fb_page_id: str) -> str:
     return f"pg_{fb_page_id}"
 
 
+def _normalize_observed_iso(value: Any) -> Optional[str]:
+    """Normalize a stored ``observed_at`` to ``YYYY-MM-DDTHH:MM:SSZ`` (UTC) or ``None``."""
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if re.fullmatch(r"\d{9,11}", text):
+            dt = datetime.datetime.fromtimestamp(int(text), tz=datetime.timezone.utc)
+        else:
+            dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+    return (
+        dt.astimezone(datetime.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 def _lookup_keys(page_id: Any) -> Tuple[str, str]:
     key = str(page_id or "").strip()
-    if key.startswith("fb_"):
+    if key.startswith("fb_") or key.startswith("fb:"):
         raw = key[3:]
         return f"pg_{raw}", raw
     if key.startswith("pg_") and not key.startswith("pg_url_"):
@@ -354,23 +378,67 @@ class FanpageRepository:
                     if col not in existing_cols:
                         cur.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {col_def}")
 
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS fanpage_alerts (
+                alerts_table_sql = """
+                    CREATE TABLE IF NOT EXISTS {name} (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        dedup_key TEXT DEFAULT NULL,
                         page_id TEXT DEFAULT NULL REFERENCES pages(internal_id) ON DELETE CASCADE,
                         profile_id TEXT DEFAULT NULL,
+                        target_name TEXT NOT NULL DEFAULT '',
                         alert_type TEXT NOT NULL,
                         severity TEXT NOT NULL DEFAULT 'warning',
+                        title TEXT NOT NULL DEFAULT '',
                         message TEXT NOT NULL,
-                        evidence_json TEXT NOT NULL DEFAULT '{}',
+                        evidence_json TEXT NOT NULL DEFAULT '{{}}',
+                        status TEXT NOT NULL DEFAULT 'open',
+                        snoozed_until TEXT DEFAULT NULL,
                         is_read INTEGER NOT NULL DEFAULT 0,
                         is_resolved INTEGER NOT NULL DEFAULT 0,
+                        resolved_at TEXT DEFAULT NULL,
+                        suppressed INTEGER NOT NULL DEFAULT 0,
                         created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        UNIQUE(page_id, profile_id, alert_type, is_resolved)
+                        updated_at TEXT NOT NULL
                     )
-                    """
+                """
+                cur.execute(alerts_table_sql.format(name="fanpage_alerts"))
+                for col, col_def in (
+                    ("dedup_key", "TEXT DEFAULT NULL"),
+                    ("target_name", "TEXT NOT NULL DEFAULT ''"),
+                    ("title", "TEXT NOT NULL DEFAULT ''"),
+                    ("status", "TEXT NOT NULL DEFAULT 'open'"),
+                    ("snoozed_until", "TEXT DEFAULT NULL"),
+                    ("resolved_at", "TEXT DEFAULT NULL"),
+                    ("suppressed", "INTEGER NOT NULL DEFAULT 0"),
+                ):
+                    existing_alert_cols = {
+                        r["name"]
+                        for r in cur.execute("PRAGMA table_info(fanpage_alerts)").fetchall()
+                    }
+                    if col not in existing_alert_cols:
+                        cur.execute(f"ALTER TABLE fanpage_alerts ADD COLUMN {col} {col_def}")
+
+                # Stage 1 schema had UNIQUE(page_id, profile_id, alert_type, is_resolved),
+                # which breaks the second auto-resolve of a recurring alert. SQLite cannot
+                # drop a table constraint, so rebuild the table once (no table references it).
+                legacy_sql_row = cur.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'fanpage_alerts'"
+                ).fetchone()
+                legacy_sql = re.sub(r"\s+", "", str(legacy_sql_row["sql"] if legacy_sql_row else ""))
+                if "UNIQUE(page_id,profile_id,alert_type,is_resolved)" in legacy_sql:
+                    cur.execute("DROP TABLE IF EXISTS fanpage_alerts_rebuild")
+                    cur.execute(alerts_table_sql.format(name="fanpage_alerts_rebuild"))
+                    cols = (
+                        "id, dedup_key, page_id, profile_id, target_name, alert_type, severity, "
+                        "title, message, evidence_json, status, snoozed_until, is_read, "
+                        "is_resolved, resolved_at, suppressed, created_at, updated_at"
+                    )
+                    cur.execute(
+                        f"INSERT INTO fanpage_alerts_rebuild ({cols}) SELECT {cols} FROM fanpage_alerts"
+                    )
+                    cur.execute("DROP TABLE fanpage_alerts")
+                    cur.execute("ALTER TABLE fanpage_alerts_rebuild RENAME TO fanpage_alerts")
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_fanpage_alerts_dedup ON fanpage_alerts(dedup_key, is_resolved)"
                 )
                 cur.execute(
                     "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
@@ -785,6 +853,8 @@ class FanpageRepository:
                             latest_scan_id
                             and seen_in_scan
                             and seen_in_scan != latest_scan_id
+                            and discovery_status not in ("error", "failed")
+                            and connection_status not in ("login_required", "identity_mismatch")
                         ):
                             link_status = "missing_in_latest_scan"
 
@@ -964,9 +1034,19 @@ class FanpageRepository:
                     d = dict(lr)
                     links_by_page.setdefault(d["page_id"], []).append(d)
 
+                recent_metrics_by_page: Dict[str, List[Dict[str, Any]]] = {}
+                for mr in conn.execute(
+                    "SELECT page_id, observed_at, source, followers_count, followers_precision, likes_count, likes_precision FROM page_metric_history ORDER BY observed_at DESC, id DESC"
+                ).fetchall():
+                    pid = mr["page_id"]
+                    bucket = recent_metrics_by_page.setdefault(pid, [])
+                    if len(bucket) < 5:
+                        bucket.append(dict(mr))
+
                 for p in pages:
                     p["tags"] = json.loads(p.get("tags_json") or "[]")
                     p["profile_links"] = links_by_page.get(p["internal_id"], [])
+                    p["recent_metric_points"] = recent_metrics_by_page.get(p["internal_id"], [])
                 return pages
             finally:
                 conn.close()
@@ -1238,6 +1318,7 @@ class FanpageRepository:
                 (job["job_id"],),
             ).fetchall():
                 item = dict(ir)
+                item["item_id"] = item.get("id")
                 try:
                     item["detail"] = json.loads(item.get("detail_json") or "{}")
                 except Exception:
@@ -1445,4 +1526,796 @@ class FanpageRepository:
                 raise
             finally:
                 conn.close()
+
+    # --- Stage 3: Time-Series Metrics, Deduplicated Alerts, Crash Recovery & Backup ---
+
+    def recover_interrupted_jobs(
+        self,
+        *,
+        current_owner_instance: Optional[str] = None,
+        now_iso: Optional[str] = None,
+    ) -> int:
+        """Mark stale queued/running jobs from previous process instances as interrupted.
+
+        Preserves already completed items so ``retry_job`` only re-runs the
+        unfinished items after a restart.
+        """
+        now_str = now_iso or _utc_now_iso()
+        recovered = 0
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                if current_owner_instance:
+                    rows = cur.execute(
+                        """
+                        SELECT job_id FROM sync_jobs
+                        WHERE status IN ('queued', 'running')
+                          AND (owner_instance IS NULL OR owner_instance != ?)
+                        """,
+                        (current_owner_instance,),
+                    ).fetchall()
+                else:
+                    rows = cur.execute(
+                        "SELECT job_id FROM sync_jobs WHERE status IN ('queued', 'running')"
+                    ).fetchall()
+
+                for r in rows:
+                    jid = r["job_id"]
+                    cur.execute(
+                        """
+                        UPDATE sync_job_items
+                        SET status = 'skipped',
+                            error_code = 'INTERRUPTED_BY_RESTART',
+                            error = 'Job bị gián đoạn do ứng dụng khởi động lại; có thể bấm Thử lại.',
+                            finished_at = ?,
+                            updated_at = ?
+                        WHERE job_id = ? AND status IN ('pending', 'running')
+                        """,
+                        (now_str, now_str, jid),
+                    )
+                    self._refresh_job_counters(cur, jid, now_str)
+                    cur.execute(
+                        """
+                        UPDATE sync_jobs
+                        SET status = 'interrupted',
+                            error = 'Gián đoạn khi khởi động lại ứng dụng.',
+                            finished_at = ?,
+                            heartbeat_at = ?
+                        WHERE job_id = ?
+                        """,
+                        (now_str, now_str, jid),
+                    )
+                    recovered += 1
+                conn.commit()
+                return recovered
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def get_page_metrics_series(
+        self,
+        page_id: str,
+        *,
+        days: int = 28,
+        now: Optional[datetime.datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return verified observation points for a page within ``days`` window.
+
+        Strictly follows Section 4 contract:
+        - Only real observed points are returned (never fabricates daily 0s or interpolates missing days).
+        - Computes delta between latest and earliest observation in window.
+        - Never clamps negative deltas to 0; flags ``counter_decreased=True`` when negative.
+        - Percentage is ``None`` when baseline is 0/None or precisions are incompatible.
+        """
+        k_internal, k_fb = _lookup_keys(page_id)
+        if not k_internal:
+            return None
+        safe_days = max(1, min(365, int(days or 28)))
+        now_dt = now or datetime.datetime.now(datetime.timezone.utc)
+        cutoff_dt = now_dt - datetime.timedelta(days=safe_days)
+        cutoff_iso = (
+            cutoff_dt.astimezone(datetime.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+        with self._lock:
+            conn = self._connect()
+            try:
+                page_row = conn.execute(
+                    "SELECT internal_id, fb_page_id, name, followers_count, followers_raw, followers_precision, likes_count, likes_raw, likes_precision FROM pages WHERE internal_id = ? OR fb_page_id = ? LIMIT 1",
+                    (k_internal, k_fb),
+                ).fetchone()
+                if not page_row:
+                    return None
+                internal_id = page_row["internal_id"]
+                rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        """
+                        SELECT id, observed_at, source, scan_id,
+                               followers_count, followers_raw, followers_precision,
+                               likes_count, likes_raw, likes_precision,
+                               last_post_at_min, last_post_at_max, created_date
+                        FROM page_metric_history
+                        WHERE page_id = ?
+                        ORDER BY observed_at ASC, id ASC
+                        """,
+                        (internal_id,),
+                    ).fetchall()
+                ]
+            finally:
+                conn.close()
+
+        # Keep only real observations whose timestamp falls inside the window.
+        # Legacy rows may store epoch seconds or placeholders ("initial"); epoch is
+        # normalized, unparseable timestamps are excluded instead of guessed.
+        window_points: List[Dict[str, Any]] = []
+        for pt in rows:
+            obs_norm = _normalize_observed_iso(pt.get("observed_at"))
+            if obs_norm is None or obs_norm < cutoff_iso:
+                continue
+            pt["observed_at_raw"] = pt.get("observed_at")
+            pt["observed_at"] = obs_norm
+            window_points.append(pt)
+        window_points.sort(key=lambda p: (p["observed_at"], p.get("id") or 0))
+
+        flw_pts = [p for p in window_points if p.get("followers_count") is not None]
+        likes_pts = [p for p in window_points if p.get("likes_count") is not None]
+
+        followers_delta: Optional[int] = None
+        followers_pct: Optional[float] = None
+        followers_decreased = False
+        if len(flw_pts) >= 2:
+            first_f = flw_pts[0]
+            last_f = flw_pts[-1]
+            base_val = int(first_f["followers_count"])
+            curr_val = int(last_f["followers_count"])
+            followers_delta = curr_val - base_val
+            followers_decreased = followers_delta < 0 or any(
+                int(flw_pts[i]["followers_count"]) < int(flw_pts[i - 1]["followers_count"])
+                for i in range(1, len(flw_pts))
+            )
+            if base_val > 0 and first_f.get("followers_precision") == last_f.get("followers_precision"):
+                followers_pct = round((followers_delta / base_val) * 100.0, 2)
+
+        likes_delta: Optional[int] = None
+        likes_pct: Optional[float] = None
+        likes_decreased = False
+        if len(likes_pts) >= 2:
+            first_l = likes_pts[0]
+            last_l = likes_pts[-1]
+            base_val = int(first_l["likes_count"])
+            curr_val = int(last_l["likes_count"])
+            likes_delta = curr_val - base_val
+            likes_decreased = likes_delta < 0 or any(
+                int(likes_pts[i]["likes_count"]) < int(likes_pts[i - 1]["likes_count"])
+                for i in range(1, len(likes_pts))
+            )
+            if base_val > 0 and first_l.get("likes_precision") == last_l.get("likes_precision"):
+                likes_pct = round((likes_delta / base_val) * 100.0, 2)
+
+        return {
+            "page_id": internal_id,
+            "internal_page_id": internal_id,
+            "fb_page_id": page_row["fb_page_id"],
+            "page_name": page_row["name"],
+            "window_days": safe_days,
+            "cutoff_at": cutoff_iso,
+            "point_count": len(window_points),
+            "points": window_points,
+            "followers_delta": followers_delta,
+            "followers_pct": followers_pct,
+            "likes_delta": likes_delta,
+            "likes_pct": likes_pct,
+            "counter_decreased": bool(followers_decreased or likes_decreased),
+            "summary": {
+                "current_followers": page_row["followers_count"],
+                "current_followers_raw": page_row["followers_raw"],
+                "current_followers_precision": page_row["followers_precision"],
+                "followers_delta": followers_delta,
+                "followers_pct": followers_pct,
+                "followers_decreased": followers_decreased,
+                "current_likes": page_row["likes_count"],
+                "current_likes_raw": page_row["likes_raw"],
+                "current_likes_precision": page_row["likes_precision"],
+                "likes_delta": likes_delta,
+                "likes_pct": likes_pct,
+                "likes_decreased": likes_decreased,
+                "counter_decreased": bool(followers_decreased or likes_decreased),
+                "comparison_label": "Chênh lệch giữa hai lần ghi nhận thực tế (không nội suy ngày thiếu)",
+            },
+        }
+
+    def sync_alerts(
+        self,
+        candidates: List[Dict[str, Any]],
+        *,
+        now_iso: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Synchronize evaluated alerts into ``fanpage_alerts`` without duplicating active ones.
+
+        - If ``dedup_key`` already has an unresolved alert (`is_resolved = 0`):
+          updates ``updated_at``, ``message``, ``title``, ``evidence_json``.
+          If status was ``snoozed`` and ``snoozed_until <= now_iso``, re-opens it (`status='open'`).
+          Otherwise preserves ``acknowledged`` or ``snoozed`` status so user is not spammed!
+        - If ``dedup_key`` has no unresolved alert: inserts a new ``status='open'`` row.
+        - Any unresolved alert in DB whose ``dedup_key`` is NOT in ``candidates`` is
+          automatically marked ``status='resolved'``, ``is_resolved=1``, ``resolved_at=now_iso``.
+        """
+        now_str = now_iso or _utc_now_iso()
+        stats = {"created": 0, "updated": 0, "resolved": 0}
+        by_key: Dict[str, Dict[str, Any]] = {}
+        for c in candidates:
+            dkey = str(c.get("dedup_key") or "").strip()
+            if dkey:
+                by_key[dkey] = c
+
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                open_rows = [
+                    dict(r)
+                    for r in cur.execute(
+                        "SELECT * FROM fanpage_alerts WHERE is_resolved = 0 ORDER BY id ASC"
+                    ).fetchall()
+                ]
+                existing_by_key: Dict[str, Dict[str, Any]] = {}
+                for r in open_rows:
+                    dkey = r.get("dedup_key") or (
+                        f"{r.get('alert_type')}:{r.get('page_id') or ''}:{r.get('profile_id') or ''}"
+                    )
+                    if dkey in existing_by_key:
+                        # Resolve accidental duplicate
+                        cur.execute(
+                            "UPDATE fanpage_alerts SET is_resolved = 1, status = 'resolved', resolved_at = ?, updated_at = ? WHERE id = ?",
+                            (now_str, now_str, r["id"]),
+                        )
+                    else:
+                        existing_by_key[dkey] = r
+
+                # Alerts the operator closed manually while the condition was still
+                # active stay suppressed until the condition clears at least once.
+                suppressed_keys = {
+                    str(r["dedup_key"])
+                    for r in cur.execute(
+                        "SELECT DISTINCT dedup_key FROM fanpage_alerts WHERE is_resolved = 1 AND suppressed = 1 AND dedup_key IS NOT NULL"
+                    ).fetchall()
+                }
+
+                # 1. Upsert active candidates
+                for dkey, cand in by_key.items():
+                    ev_json = json.dumps(cand.get("evidence") or {}, ensure_ascii=False)
+                    title = str(cand.get("title") or cand.get("alert_type") or "")
+                    msg = str(cand.get("message") or "")
+                    sev = str(cand.get("severity") or "warning")
+                    target_name = str(cand.get("target_name") or "")
+                    existing = existing_by_key.get(dkey)
+                    if existing:
+                        st = str(existing.get("status") or "open")
+                        snoozed_until = existing.get("snoozed_until")
+                        is_read = int(existing.get("is_read") or 0)
+                        if st == "snoozed" and snoozed_until and snoozed_until <= now_str:
+                            st = "open"
+                            snoozed_until = None
+                            is_read = 0
+                        unchanged = (
+                            existing.get("dedup_key") == dkey
+                            and existing.get("severity") == sev
+                            and (existing.get("target_name") or "") == target_name
+                            and (existing.get("title") or "") == title
+                            and (existing.get("message") or "") == msg
+                            and (existing.get("evidence_json") or "{}") == ev_json
+                            and str(existing.get("status") or "open") == st
+                            and existing.get("snoozed_until") == snoozed_until
+                            and int(existing.get("is_read") or 0) == is_read
+                        )
+                        if unchanged:
+                            # Avoid a write on every summary poll when nothing changed.
+                            continue
+                        cur.execute(
+                            """
+                            UPDATE fanpage_alerts
+                            SET dedup_key = ?,
+                                severity = ?,
+                                target_name = ?,
+                                title = ?,
+                                message = ?,
+                                evidence_json = ?,
+                                status = ?,
+                                snoozed_until = ?,
+                                is_read = ?,
+                                updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                dkey,
+                                sev,
+                                target_name,
+                                title,
+                                msg,
+                                ev_json,
+                                st,
+                                snoozed_until,
+                                is_read,
+                                now_str,
+                                existing["id"],
+                            ),
+                        )
+                        stats["updated"] += 1
+                    elif dkey in suppressed_keys:
+                        continue
+                    else:
+                        cur.execute(
+                            """
+                            INSERT INTO fanpage_alerts (
+                                dedup_key, page_id, profile_id, target_name,
+                                alert_type, severity, title, message,
+                                evidence_json, status, is_read, is_resolved,
+                                created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 0, ?, ?)
+                            """,
+                            (
+                                dkey,
+                                cand.get("page_id"),
+                                cand.get("profile_id"),
+                                target_name,
+                                str(cand.get("alert_type") or "general"),
+                                sev,
+                                title,
+                                msg,
+                                ev_json,
+                                now_str,
+                                now_str,
+                            ),
+                        )
+                        stats["created"] += 1
+
+                # 2. Auto-resolve alerts whose condition cleared
+                for dkey, existing in existing_by_key.items():
+                    if dkey not in by_key:
+                        cur.execute(
+                            """
+                            UPDATE fanpage_alerts
+                            SET status = 'resolved',
+                                is_resolved = 1,
+                                resolved_at = ?,
+                                updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (now_str, now_str, existing["id"]),
+                        )
+                        stats["resolved"] += 1
+
+                # 3. Lift manual suppression once the condition has cleared
+                lift_keys = [k for k in suppressed_keys if k not in by_key]
+                if lift_keys:
+                    placeholders = ", ".join("?" for _ in lift_keys)
+                    cur.execute(
+                        f"UPDATE fanpage_alerts SET suppressed = 0 WHERE suppressed = 1 AND dedup_key IN ({placeholders})",
+                        lift_keys,
+                    )
+
+                conn.commit()
+                return stats
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def _serialize_alert_row(self, row: sqlite3.Row) -> Dict[str, Any]:
+        d = dict(row)
+        d["alert_id"] = d.get("id")
+        d["first_seen_at"] = d.get("created_at")
+        d["last_seen_at"] = d.get("updated_at")
+        try:
+            d["evidence"] = json.loads(d.get("evidence_json") or "{}")
+        except Exception:
+            d["evidence"] = {}
+        return d
+
+    def list_alerts(
+        self,
+        *,
+        status: str = "active",
+        severity: str = "",
+        alert_type: str = "",
+        limit: int = 100,
+        now_iso: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        now_str = now_iso or _utc_now_iso()
+        safe_limit = max(1, min(500, int(limit or 100)))
+        with self._lock:
+            conn = self._connect()
+            try:
+                all_rows = [
+                    self._serialize_alert_row(r)
+                    for r in conn.execute(
+                        """
+                        SELECT * FROM fanpage_alerts
+                        ORDER BY
+                            is_resolved ASC,
+                            CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END ASC,
+                            updated_at DESC,
+                            id DESC
+                        """
+                    ).fetchall()
+                ]
+            finally:
+                conn.close()
+
+        # Compute counts across all alerts
+        open_cnt = 0
+        ack_cnt = 0
+        snoozed_cnt = 0
+        resolved_cnt = 0
+        critical_open_cnt = 0
+        for r in all_rows:
+            if r.get("is_resolved"):
+                resolved_cnt += 1
+            elif r.get("status") == "snoozed" and (not r.get("snoozed_until") or r["snoozed_until"] > now_str):
+                snoozed_cnt += 1
+            elif r.get("status") == "acknowledged" or r.get("is_read"):
+                ack_cnt += 1
+            else:
+                open_cnt += 1
+                if r.get("severity") == "critical":
+                    critical_open_cnt += 1
+
+        st_filter = (status or "active").strip().lower()
+        filtered = []
+        for r in all_rows:
+            is_res = bool(r.get("is_resolved"))
+            st = str(r.get("status") or "open")
+            is_snoozed = st == "snoozed" and bool(r.get("snoozed_until") and r["snoozed_until"] > now_str)
+            if st_filter == "active":
+                if is_res or is_snoozed:
+                    continue
+            elif st_filter == "open":
+                if is_res or is_snoozed or st == "acknowledged" or r.get("is_read"):
+                    continue
+            elif st_filter == "acknowledged":
+                if is_res or st != "acknowledged":
+                    continue
+            elif st_filter == "snoozed":
+                if is_res or not is_snoozed:
+                    continue
+            elif st_filter == "resolved":
+                if not is_res:
+                    continue
+
+            if severity and r.get("severity") != severity.strip().lower():
+                continue
+            if alert_type and r.get("alert_type") != alert_type.strip():
+                continue
+            filtered.append(r)
+
+        return {
+            "items": filtered[:safe_limit],
+            "total": len(filtered),
+            "counts": {
+                "open": open_cnt,
+                "open_count": open_cnt,
+                "critical_open": critical_open_cnt,
+                "acknowledged": ack_cnt,
+                "snoozed": snoozed_cnt,
+                "resolved": resolved_cnt,
+                "active": open_cnt + ack_cnt,
+                "active_count": open_cnt + ack_cnt,
+            },
+        }
+
+    def update_alert(
+        self,
+        alert_id: int,
+        *,
+        action: str = "acknowledge",
+        snooze_hours: int = 24,
+        now_iso: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        act = (action or "acknowledge").strip().lower()
+        if act not in ("acknowledge", "snooze", "resolve", "reopen"):
+            raise ValueError("Hành động cảnh báo không hợp lệ.")
+        now_str = now_iso or _utc_now_iso()
+        try:
+            now_dt = datetime.datetime.fromisoformat(now_str.replace("Z", "+00:00"))
+        except Exception:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                row = cur.execute(
+                    "SELECT * FROM fanpage_alerts WHERE id = ?", (int(alert_id),)
+                ).fetchone()
+                if not row:
+                    conn.rollback()
+                    return None
+
+                if act == "acknowledge":
+                    cur.execute(
+                        """
+                        UPDATE fanpage_alerts
+                        SET status = 'acknowledged', is_read = 1, snoozed_until = NULL, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now_str, int(alert_id)),
+                    )
+                elif act == "snooze":
+                    hrs = max(1, min(720, int(snooze_hours or 24)))
+                    until_iso = (
+                        (now_dt + datetime.timedelta(hours=hrs))
+                        .replace(microsecond=0)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                    cur.execute(
+                        """
+                        UPDATE fanpage_alerts
+                        SET status = 'snoozed', is_read = 1, snoozed_until = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (until_iso, now_str, int(alert_id)),
+                    )
+                elif act == "resolve":
+                    cur.execute(
+                        """
+                        UPDATE fanpage_alerts
+                        SET status = 'resolved', is_read = 1, is_resolved = 1, suppressed = 1, resolved_at = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now_str, now_str, int(alert_id)),
+                    )
+                elif act == "reopen":
+                    cur.execute(
+                        """
+                        UPDATE fanpage_alerts
+                        SET status = 'open', is_read = 0, is_resolved = 0, suppressed = 0, snoozed_until = NULL, resolved_at = NULL, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now_str, int(alert_id)),
+                    )
+                conn.commit()
+                updated = conn.execute(
+                    "SELECT * FROM fanpage_alerts WHERE id = ?", (int(alert_id),)
+                ).fetchone()
+                return self._serialize_alert_row(updated) if updated else None
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def acknowledge_all_alerts(self, *, now_iso: Optional[str] = None) -> int:
+        now_str = now_iso or _utc_now_iso()
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    UPDATE fanpage_alerts
+                    SET status = 'acknowledged', is_read = 1, updated_at = ?
+                    WHERE is_resolved = 0 AND status = 'open'
+                    """,
+                    (now_str,),
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+            finally:
+                conn.close()
+
+    def merge_pages(
+        self,
+        target_page_id: str,
+        source_page_id: str,
+        *,
+        now_iso: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Explicit operator-confirmed merge of ``source_page_id`` into ``target_page_id`` (Section 9.3)."""
+        t_int, t_fb = _lookup_keys(target_page_id)
+        s_int, s_fb = _lookup_keys(source_page_id)
+        now_str = now_iso or _utc_now_iso()
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                t_row = cur.execute(
+                    "SELECT * FROM pages WHERE internal_id = ? OR fb_page_id = ? LIMIT 1",
+                    (t_int, t_fb),
+                ).fetchone()
+                s_row = cur.execute(
+                    "SELECT * FROM pages WHERE internal_id = ? OR fb_page_id = ? LIMIT 1",
+                    (s_int, s_fb),
+                ).fetchone()
+                if not t_row or not s_row:
+                    conn.rollback()
+                    raise KeyError("Không tìm thấy fanpage nguồn hoặc fanpage đích.")
+                if t_row["internal_id"] == s_row["internal_id"]:
+                    conn.rollback()
+                    raise ValueError("Không thể gộp một fanpage vào chính nó.")
+                if (
+                    t_row["fb_page_id"]
+                    and s_row["fb_page_id"]
+                    and t_row["fb_page_id"] != s_row["fb_page_id"]
+                ):
+                    conn.rollback()
+                    raise ValueError(
+                        "Hai fanpage đã có Facebook Page ID xác minh khác nhau; không được gộp."
+                    )
+                fb_id = t_row["fb_page_id"] or s_row["fb_page_id"] or ""
+                merged_id = self._merge_page_records(
+                    cur,
+                    old_id=s_row["internal_id"],
+                    new_id=t_row["internal_id"],
+                    fb_page_id=fb_id,
+                    now_iso=now_str,
+                )
+                if s_row["canonical_url"]:
+                    cur.execute(
+                        """
+                        INSERT OR IGNORE INTO page_aliases (alias_url, page_id, source, verified, created_at)
+                        VALUES (?, ?, 'manual_merge', ?, ?)
+                        """,
+                        (
+                            s_row["canonical_url"],
+                            merged_id,
+                            1 if fb_id else 0,
+                            now_str,
+                        ),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        return self.get_page_detail(merged_id)
+
+    def create_backup(
+        self,
+        *,
+        backup_dir: Optional[str] = None,
+        max_backups: int = 10,
+    ) -> Dict[str, Any]:
+        """Create a WAL-safe online backup using ``sqlite3.Connection.backup()`` (Section 8.1)."""
+        bdir = os.path.abspath(
+            backup_dir or os.path.join(os.path.dirname(self.db_path), "backups")
+        )
+        os.makedirs(bdir, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        backup_name = f"fanpages_{stamp}.sqlite"
+        dest_path = os.path.join(bdir, backup_name)
+
+        with self._lock:
+            src_conn = self._connect()
+            dst_conn = sqlite3.connect(dest_path)
+            try:
+                src_conn.backup(dst_conn)
+            finally:
+                dst_conn.close()
+                src_conn.close()
+
+        # Retention: keep at most max_backups files
+        safe_max = max(1, int(max_backups or 10))
+        files = sorted(
+            [
+                os.path.join(bdir, fn)
+                for fn in os.listdir(bdir)
+                if fn.startswith("fanpages_") and fn.endswith(".sqlite")
+            ]
+        )
+        removed = 0
+        while len(files) > safe_max:
+            old_fp = files.pop(0)
+            try:
+                os.remove(old_fp)
+                removed += 1
+            except OSError:
+                pass
+
+        size_bytes = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+        return {
+            "filename": backup_name,
+            "path": dest_path,
+            "size_bytes": size_bytes,
+            "created_at": _utc_now_iso(),
+            "pruned_old_backups": removed,
+        }
+
+    def list_backups(self, *, backup_dir: Optional[str] = None) -> List[Dict[str, Any]]:
+        bdir = os.path.abspath(
+            backup_dir or os.path.join(os.path.dirname(self.db_path), "backups")
+        )
+        if not os.path.isdir(bdir):
+            return []
+        out = []
+        for fn in sorted(os.listdir(bdir), reverse=True):
+            if not (fn.startswith("fanpages_") and fn.endswith(".sqlite")):
+                continue
+            fp = os.path.join(bdir, fn)
+            try:
+                st = os.stat(fp)
+                out.append(
+                    {
+                        "filename": fn,
+                        "path": fp,
+                        "size_bytes": st.st_size,
+                        "modified_at": datetime.datetime.fromtimestamp(
+                            st.st_mtime, tz=datetime.timezone.utc
+                        )
+                        .replace(microsecond=0)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                    }
+                )
+            except OSError:
+                continue
+        return out
+
+    def prune_old_data(
+        self,
+        *,
+        metric_retention_days: int = 365,
+        job_retention_days: int = 30,
+        now: Optional[datetime.datetime] = None,
+    ) -> Dict[str, int]:
+        """Retention cleanup for metric snapshots, finished sync jobs, and resolved alerts."""
+        now_dt = now or datetime.datetime.now(datetime.timezone.utc)
+        metric_cutoff = (
+            (now_dt - datetime.timedelta(days=max(7, int(metric_retention_days or 365))))
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        job_cutoff = (
+            (now_dt - datetime.timedelta(days=max(1, int(job_retention_days or 30))))
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                cur.execute(
+                    "DELETE FROM page_metric_history WHERE observed_at < ? AND observed_at LIKE '____-__-__%'",
+                    (metric_cutoff,),
+                )
+                metrics_deleted = cur.rowcount
+                cur.execute(
+                    "DELETE FROM sync_jobs WHERE status NOT IN ('queued', 'running') AND created_at < ?",
+                    (job_cutoff,),
+                )
+                jobs_deleted = cur.rowcount
+                cur.execute(
+                    "DELETE FROM fanpage_alerts WHERE is_resolved = 1 AND updated_at < ?",
+                    (job_cutoff,),
+                )
+                alerts_deleted = cur.rowcount
+                conn.commit()
+                return {
+                    "metrics_deleted": metrics_deleted,
+                    "jobs_deleted": jobs_deleted,
+                    "alerts_deleted": alerts_deleted,
+                }
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
 

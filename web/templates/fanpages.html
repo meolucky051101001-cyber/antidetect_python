@@ -25,7 +25,7 @@
                 <div>
                     <div class="flex items-center space-x-2">
                         <h1 class="text-lg font-bold tracking-tight">Fanpage Manager</h1>
-                        <span class="text-xs font-semibold px-2 py-0.5 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-full">Stage 2 Sync &amp; Basic</span>
+                        <span class="text-xs font-semibold px-2 py-0.5 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-full">Stage 3 Complete</span>
                     </div>
                     <p class="text-xs text-slate-400">Danh mục fanpage hợp nhất, chống trùng đa profile & kiểm chứng độ tin cậy dữ liệu</p>
                 </div>
@@ -51,6 +51,15 @@
             </button>
             <button onclick="reloadFanpageCatalog()" class="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition" title="Đồng bộ lại từ cache profile & làm mới bảng">
                 <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+            </button>
+            <button onclick="openAlertsModal()" class="relative flex items-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg text-xs font-medium rounded-lg transition" title="Trung tâm cảnh báo Fanpage (chống trùng, đã xem, tạm ẩn)">
+                <i data-lucide="bell" class="w-4 h-4 text-rose-400"></i>
+                <span>Cảnh Báo</span>
+                <span id="header-alert-badge" class="hidden px-1.5 py-0.5 text-[10px] font-bold bg-rose-500 text-white rounded-full leading-none">0</span>
+            </button>
+            <button onclick="createDatabaseBackup()" class="flex items-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg text-xs font-medium rounded-lg transition" title="Sao lưu an toàn SQLite WAL của danh mục fanpage">
+                <i data-lucide="database-backup" class="w-4 h-4 text-sky-400"></i>
+                <span class="hidden lg:inline">Sao Lưu DB</span>
             </button>
             <button onclick="openSyncJobModal()" class="flex items-center space-x-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-semibold rounded-lg shadow-md shadow-amber-500/20 transition" title="Mở hàng đợi đồng bộ Fanpage bất đồng bộ (Discovery / Basic)">
                 <i data-lucide="layers" class="w-4 h-4"></i>
@@ -250,6 +259,8 @@
                         <option value="page_name:asc">Sắp xếp: Tên A → Z</option>
                         <option value="page_name:desc">Sắp xếp: Tên Z → A</option>
                         <option value="followers:desc">Follower: Cao → Thấp</option>
+                        <option value="followers_delta:desc">Biến động Follower: Tăng mạnh nhất</option>
+                        <option value="followers_delta:asc">Biến động Follower: Giảm nhiều nhất</option>
                         <option value="likes:desc">Like: Cao → Thấp</option>
                         <option value="last_post:asc">Bài đăng: Mới nhất trước</option>
                         <option value="last_post:desc">Bài đăng: Lâu nhất trước</option>
@@ -414,6 +425,25 @@
                     </div>
                 </div>
 
+                <!-- Chuỗi Thời Gian & Chênh Lệch Kỳ (Stage 3 Time-Series) -->
+                <div id="detail-timeseries-box" class="bg-slate-900/40 border border-borderBg rounded-xl p-4 space-y-3">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                            <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Chuỗi Thời Gian &amp; Chênh Lệch Kỳ (Stage 3)</div>
+                            <div class="text-[10px] text-slate-500">Chỉ vẽ các điểm quan sát thật sự tồn tại — không bịa số 0 cho ngày chưa quét</div>
+                        </div>
+                        <select id="detail-metrics-days" onchange="onDetailMetricsWindowChange()" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1 text-xs text-slate-200">
+                            <option value="7">7 ngày gần nhất</option>
+                            <option value="28" selected>28 ngày gần nhất</option>
+                            <option value="90">90 ngày gần nhất</option>
+                        </select>
+                    </div>
+                    <div id="detail-metrics-delta-summary" class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs"></div>
+                    <div id="detail-metrics-chart" class="bg-slate-950/70 border border-borderBg/60 rounded-lg p-3 min-h-[120px] flex items-center justify-center text-slate-500 text-xs">
+                        Đang tải chuỗi thời gian...
+                    </div>
+                </div>
+
                 <!-- Chỉnh sửa thông tin quản trị nội bộ -->
                 <div class="bg-slate-900/40 border border-borderBg rounded-xl p-4 space-y-3">
                     <div class="flex items-center justify-between">
@@ -536,6 +566,61 @@
 
             <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
                 <button type="button" onclick="closeSyncJobModal()" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Trung Tâm Cảnh Báo Fanpage (Stage 3 Alerts) -->
+    <div id="alertsModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="bg-cardBg border border-borderBg rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col max-h-[88vh]">
+            <div class="px-5 py-4 border-b border-borderBg flex items-center justify-between bg-slate-900/60">
+                <div class="flex items-center space-x-2.5">
+                    <i data-lucide="bell" class="w-5 h-5 text-rose-400"></i>
+                    <div>
+                        <h3 class="text-sm font-semibold text-white">Trung Tâm Cảnh Báo Fanpage (Stage 3)</h3>
+                        <p class="text-[11px] text-slate-400">Gộp theo khóa định danh chống spam · Tự đóng khi điều kiện đã hết · Hỗ trợ Đã xem &amp; Tạm ẩn</p>
+                    </div>
+                </div>
+                <button type="button" onclick="closeAlertsModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+            </div>
+
+            <div class="p-5 overflow-y-auto space-y-4 flex-1 text-xs">
+                <div class="flex flex-wrap items-center justify-between gap-2 bg-slate-900/50 border border-borderBg rounded-xl p-3">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="alert-filter-status" onchange="loadAlertsList()" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                            <option value="active" selected>Trạng thái: Đang mở &amp; Đã xem</option>
+                            <option value="open">Chỉ cảnh báo mới (Chưa xem)</option>
+                            <option value="acknowledged">Đã đánh dấu xem</option>
+                            <option value="snoozed">Đang tạm ẩn (Snoozed)</option>
+                            <option value="resolved">Đã xử lý xong (Resolved)</option>
+                            <option value="all">Tất cả cảnh báo</option>
+                        </select>
+                        <select id="alert-filter-severity" onchange="loadAlertsList()" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                            <option value="">Mức độ: Tất cả</option>
+                            <option value="critical">Nghiêm trọng (Critical)</option>
+                            <option value="warning">Cảnh báo (Warning)</option>
+                            <option value="info">Thông tin (Info)</option>
+                        </select>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <button type="button" onclick="acknowledgeAllAlerts()" class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 font-semibold rounded-lg transition">
+                            Đánh dấu đã xem tất cả
+                        </button>
+                        <button type="button" onclick="loadAlertsList()" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition">
+                            Làm mới
+                        </button>
+                    </div>
+                </div>
+
+                <div id="alerts-list-container" class="space-y-2.5">
+                    <div class="text-slate-500 italic">Đang tải danh sách cảnh báo...</div>
+                </div>
+            </div>
+
+            <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
+                <button type="button" onclick="closeAlertsModal()" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
             </div>
         </div>
     </div>
