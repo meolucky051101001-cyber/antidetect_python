@@ -1,4 +1,4 @@
-# HANDOFF — Antidetect Python (cập nhật 2026-11-05; đợt sửa ổn định F1–F4 chưa commit)
+# HANDOFF — Antidetect Python (cập nhật 2026-11-07; đã commit F1–F4 + nghiệm thu Soak 12h)
 
 Điểm bắt đầu cho model/người tiếp nhận. Mô tả **trạng thái thật hiện tại**.
 Đọc hết mục "Quy tắc an toàn" trước khi sửa code.
@@ -7,17 +7,20 @@
 
 ## 1. Trạng thái một câu
 
-Tool hoàn chỉnh ở mức production-ready có điều kiện: **HEAD `d3f70d1`** trên
-nhánh `master`; **working tree đang có thay đổi F1–F4 chưa commit** (xem mục
-1.1). Đo trên working tree 2026-11-05: **407 pytest passed + 1 skipped**
-(Playwright UI smoke skip vì chưa đặt `ANTIDETECT_RUN_UI_SMOKE=1`), ruff và
-`compileall` sạch; **coverage chưa đo lại** trong đợt này. **E2E smoke 24/24
-và Playwright UI smoke 1/1 chưa chạy lại trên working tree này** — số gần
-nhất đo 2026-10-26 trên code trước đó. Baseline commit `42e61e8` (2026-11-04)
-đo 301 passed + 1 skipped, coverage 71%.
+Tool hoàn chỉnh ở mức production-ready có điều kiện: **codebase tại `93a76ab`**
+trên nhánh `master`, **working tree sạch** (đợt sửa ổn định F1–F4 `b3795eb` và
+soak runner `0d52f4c`/`93a76ab` đã commit; xem mục 1.1). Đo ngày 2026-11-07 trên
+data tạm riêng: **407 pytest passed + 1 skipped** (Playwright UI smoke skip vì
+chưa đặt `ANTIDETECT_RUN_UI_SMOKE=1`), ruff và `compileall` sạch; **Soak 12h
+trên data tạm cô lập đạt PASS** (`1439` samples, `71` lifecycle cycles, `143`
+tab cycles, `2` copy cycles, `2` memory_shed bảo vệ RAM, `0` errors, `0`
+orphan_processes). **Coverage chưa đo lại** trong đợt này (lần cuối 71%, gate
+58% trên commit `42e61e8` ngày 2026-11-04). **E2E smoke 24/24 và Playwright UI
+smoke 1/1 chưa chạy lại trên HEAD hiện tại** — số gần nhất đo 2026-10-26.
 Roadmap P0 + P1 + P2 đã commit (`61ab5ec`); sau đó bổ sung fingerprint health
 center + pre-launch gate (`8093392`), hardening proxy/launch (`51bb963`), fix
-CI httpx2 (`313faab`) và fix scrape Fanpage (`0390ee8`).
+CI httpx2 (`313faab`), fix scrape Fanpage (`0390ee8`), và đợt ổn định F1–F4 +
+soak runner (`b3795eb`..`93a76ab`).
 Fingerprint đạt "không phân biệt được khỏi Chrome thật trên máy" trong phạm vi
 đã đo (CreepJS/Iphey bằng baseline clean; Pixelscan masking detected chỉ ở chế
 độ Unique — đúng thiết kế). Dashboard quản lý đầy đủ; scheduler có lease
@@ -27,37 +30,51 @@ bulk job xuyên instance (`data/bulk_jobs.json`) và nâng cấp/rollback có ch
 Ed25519 (`tools/release.py`/`tools/update.py`, version **1.1.0**, không auto
 update).
 
-### 1.1. Đợt sửa ổn định F1–F4 — 05/11/2026 (CHƯA COMMIT)
+### 1.1. Đợt sửa ổn định F1–F4 & Soak Runner — 05–07/11/2026 (ĐÃ COMMIT)
 
-- **F1:** `antidetect/cdp_health.py` + guard trong launcher; Chrome sống và CDP
+- **F1 (`b3795eb`):** `antidetect/cdp_health.py` + guard trong launcher; Chrome sống và CDP
   healthy là hai tín hiệu riêng; `degraded`/`recovery_required` không bị báo
   thành healthy; `--detach` ghi `DETACHED_OWNER_EXITED` và dashboard hiện
   “Không có CDP (detached)”.
-- **F2:** `antidetect/profile_copy.py` + `profile_locks.py`; copy staging →
+- **F2 (`b3795eb`):** `antidetect/profile_copy.py` + `profile_locks.py`; copy staging →
   verify → promote → secret → metadata, journal `data/copy_operations/`,
   `Idempotency-Key`/`X-Operation-Id`; không publish clone dở dang; lifecycle
   lock dùng chung launch/stop/delete/duplicate.
-- **F3:** timestamp bài đăng theo khoảng + mốc quan sát, legacy
+- **F3 (`b3795eb`):** timestamp bài đăng theo khoảng + mốc quan sát, legacy
   `last_post_days` quy đổi tại thời điểm đọc, `activity_stale` 48h cấu hình
   được, cache trả `login_status=unknown`.
-- **F4:** `antidetect/fanpage_scan.py` + scan meta
+- **F4 (`b3795eb`):** `antidetect/fanpage_scan.py` + scan meta
   `data/facebook_scan_meta.json`; completion chỉ khi có bằng chứng
   (`TOTAL_MATCH`/`END_MARKER`/`EMPTY_CONFIRMED`), partial + retained count,
   merge theo trường, scan lock xuyên process; refresh **không xóa cache**,
   xóa bằng `DELETE /api/profiles/{id}/facebook/pages` hoặc nút “Xóa cache”.
   `force=1` được giữ như đường tương thích để xóa khi kết quả rỗng có bằng chứng.
-- **Bằng chứng:** 407 passed + 1 skipped; ruff/compileall sạch;
-  `data/profiles.json` vẫn đúng hash baseline (xem
-  `docs/VERIFICATION_STABILITY_FIX_2026-11-05.md`).
-- **Chưa chạy:** Facebook thật (discovery/deep/identity), UI smoke/E2E,
-  Playwright UI, soak 24–72h, copy hàng GB/antivirus. Không coi các mục này là
-  PASS. Không commit/push trong đợt này.
+- **Soak runner (`0d52f4c`, `93a76ab`):** `tools/soak_test.py` chỉ chạy trên
+  data tạm trong `%TEMP%` (từ chối `data/` thật), ẩn cửa sổ Chrome (`SW_HIDE`),
+  chống sleep máy (`SetThreadExecutionState`), tự dừng profile + dashboard khi
+  finalize, fail khi mất Chrome hoặc lệch trạng thái.
+- **Bằng chứng kiểm thử (2026-11-07):**
+  - Unit/API/storage suite: **407 passed + 1 skipped**; ruff/compileall sạch;
+    `data/profiles.json` giữ nguyên hash baseline
+    `B26426E4E9945CEEB81D163637D589D25F7D98789D031D6DA21CD252410B8ABA` (xem thêm
+    `docs/VERIFICATION_STABILITY_FIX_2026-11-05.md`).
+  - **Soak 12h (2026-11-06 23:48:52 → 2026-11-07 11:49:03 UTC+7): PASS**
+    (`passed=true`, `completed_duration=true`, `duration_seconds=43210.9`,
+    `samples=1439`, `lifecycle_cycles=71`, `tab_cycles=143`, `copy_cycles=2`,
+    `tabs_opened=294`, `tabs_closed=219`, `memory_shed=2`, `errors=0`,
+    `orphan_processes=0`, `api_latency_p95_ms=2673.4`). Lịch sử các run trước:
+    run 24h ngày 05/11 failed sớm sau ~55 phút; run 5h ngày 06/11 chạy 4h59m10s
+    (`597` samples, `0` lỗi, `1` copy_cycle, `0` orphan) và dừng êm theo yêu cầu
+    chủ tool trước deadline ~49s.
+- **Chưa chạy:** Facebook thật (discovery/deep/identity), chạy lại UI smoke/E2E
+  trên HEAD mới, soak dài hạn 24–72h, SOCKS5 thật, DataDome+Turnstile thật, copy
+  hàng GB với antivirus. Không coi các mục này là PASS.
 
 ## 2. Git & lịch sử
 
 ```text
-HEAD:  d3f70d1 docs: refresh handoff after repo relocation (2026-11-04)
-Tree:  CÓ thay đổi chưa commit cho F1–F4 (2026-11-05); không tự commit/push
+HEAD:  93a76ab (+ commit docs cập nhật HANDOFF.md ngày 2026-11-07)
+Tree:  Sạch (0 modified, 0 untracked)
 ```
 
 Lịch sử gần nhất:
@@ -84,15 +101,18 @@ Lịch sử gần nhất:
 | `0390ee8` | fix(facebook): `profile.php` URL, prefix avatar, parse ngày tạo VI/EN |
 | `42e61e8` | docs handoff data snapshot 2026-11-01 |
 | `d3f70d1` | docs: refresh handoff after repo relocation (2026-11-04) |
+| `b3795eb` | fix(stability): harden CDP health, profile copy, and fanpage discovery (F1–F4) |
+| `0d52f4c` | test(soak): add 24h soak runner and tighten E2E repeat-start check |
+| `93a76ab` | test(soak): harden runner against external Chrome close and false passes |
 
-## 3. Dữ liệu thật `data/` — đã kiểm tra toàn vẹn (cập nhật 2026-11-04)
+## 3. Dữ liệu thật `data/` — đã kiểm tra toàn vẹn (cập nhật 2026-11-07)
 
 - **9 profile đủ**, 9/9 id khớp backup mới nhất
   `data/backups/profiles_20261102_010106_870f5c.json` (tạo 2026-11-02
   01:01:06). So với backup đó, một profile (`4978808c…`) khác
   `fingerprint`/`revision`/`updated_at` — dấu vết của lần lưu ngay sau backup,
   không phải test ghi nhầm.
-- Hash `profiles.json` hiện tại (đo 2026-11-04):
+- Hash `profiles.json` hiện tại (đo lại 2026-11-07):
   `B26426E4E9945CEEB81D163637D589D25F7D98789D031D6DA21CD252410B8ABA`.
   Baseline trước (2026-11-01) là `23E81C47…12F35`. Drift **hợp lệ về ngữ
   nghĩa**: thêm 2 profile (7 → 9) và đổi fingerprint profile `4978808c…`;
@@ -107,7 +127,7 @@ Lịch sử gần nhất:
   gián đoạn/AV giữ file) — không ảnh hưởng `profiles.json`; có thể dọn khi
   dashboard không chạy.
 - `data/updates/` **không** tồn tại trên repo thật.
-- Test ngày 2026-11-04 (pytest + coverage) chỉ dùng data tạm — hash
+- Test ngày 2026-11-04..07 (pytest + soak 12h) chỉ dùng data tạm — hash
   `profiles.json` trước/sau không đổi. Các đợt P1/P2 (2026-10-26) cũng chỉ
   dùng data tạm + bản cài trong `%TEMP%`.
 
@@ -209,8 +229,11 @@ Lịch sử gần nhất:
    lệch khi FB đổi giao diện. Raw text được giữ để đối chiếu. Đợt F3/F4
    (2026-11-05) đã có contract + test fixture nhưng **vẫn chưa chạy page
    thật**; xem `docs/VERIFICATION_STABILITY_FIX_2026-11-05.md`.
-2. **Soak 24h / >20 profile đồng thời / SOCKS5 thật / DataDome+Turnstile
-   thật** — chưa test; CI chỉ chạy unit + coverage, không chạy E2E/soak.
+2. **Soak dài hạn 24–72h / >20 profile đồng thời / SOCKS5 thật / DataDome+Turnstile
+   thật** — **Soak 12h trên data tạm cô lập đã PASS** (2026-11-07: `1439` samples,
+   `71` lifecycle, `143` tab, `2` copy, `2` memory_shed, `0` lỗi, `0` orphan),
+   nhưng soak 24–72h, >20 profile đồng thời, SOCKS5 thật và DataDome+Turnstile
+   thật chưa test; CI chỉ chạy unit + coverage, không chạy E2E/soak.
 3. **Refactor còn lại (P1 đã làm một phần):** launcher launch/stop/CDP core
    vẫn ~1.9k dòng; `web/app.py` ~1.4k dòng còn route + singleton; `index.html`
    còn ~68 inline handler; CSP chưa bỏ được `script-src-attr 'unsafe-inline'`.
@@ -239,15 +262,17 @@ Lịch sử gần nhất:
 
 ```powershell
 cd C:\Projects\Tools\Antidetect Python
-python -m pytest -q                                        # 407 passed + 1 skipped (working tree 2026-11-05)
+python -m pytest -q                                        # 407 passed + 1 skipped (đo lại 2026-11-07 trên data tạm)
 python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing
-                                                           # chưa đo lại 2026-11-05; lần cuối 71%, gate 58%
-python -m ruff check .                                     # correctness-only, sạch (2026-11-05)
-python -m compileall -q antidetect web tools run.py        # sạch (2026-11-05)
+                                                           # chưa đo lại 2026-11-07; lần cuối 71%, gate 58%
+python -m ruff check .                                     # correctness-only, sạch (2026-11-07)
+python -m compileall -q antidetect web tools run.py        # sạch (2026-11-07)
 $env:ANTIDETECT_RUN_UI_SMOKE = "1"
 python -m pytest test_ui_smoke.py -q                       # 1 passed (lần cuối 2026-10-26; Chrome thật, data tạm)
 $env:ANTIDETECT_DATA_DIR = "$env:TEMP\opencode\ad-live-r4"
 python tools\e2e_smoke.py                                  # 24/24 (lần cuối 2026-10-26; tự chặn data/ thật)
+python tools\soak_test.py status --state "<results>\soak_state.json"   # kiểm tra trạng thái soak
+python tools\soak_test.py stop --state "<results>\soak_state.json"     # yêu cầu dừng êm soak
 python tools\verify_live.py --profile 9a636166-8668-46c7-86ba-6d193071d05d
 python tools\detector_audit.py --profile 9a636166-8668-46c7-86ba-6d193071d05d --wait 14
 python tools\leak_audit.py --profile 9a636166-8668-46c7-86ba-6d193071d05d --no-dns
