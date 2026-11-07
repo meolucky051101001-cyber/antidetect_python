@@ -302,6 +302,9 @@ class FanpageRepository:
                         failed_items INTEGER NOT NULL DEFAULT 0,
                         partial_items INTEGER NOT NULL DEFAULT 0,
                         skipped_items INTEGER NOT NULL DEFAULT 0,
+                        options_json TEXT NOT NULL DEFAULT '{}',
+                        owner_instance TEXT DEFAULT NULL,
+                        heartbeat_at TEXT DEFAULT NULL,
                         created_at TEXT NOT NULL,
                         started_at TEXT DEFAULT NULL,
                         finished_at TEXT DEFAULT NULL,
@@ -315,14 +318,41 @@ class FanpageRepository:
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         job_id TEXT NOT NULL REFERENCES sync_jobs(job_id) ON DELETE CASCADE,
                         profile_id TEXT NOT NULL,
+                        profile_name TEXT NOT NULL DEFAULT '',
                         page_id TEXT DEFAULT NULL,
                         status TEXT NOT NULL DEFAULT 'pending',
                         attempts INTEGER NOT NULL DEFAULT 0,
+                        error_code TEXT DEFAULT NULL,
                         error TEXT DEFAULT NULL,
+                        detail_json TEXT NOT NULL DEFAULT '{}',
+                        started_at TEXT DEFAULT NULL,
+                        finished_at TEXT DEFAULT NULL,
                         updated_at TEXT NOT NULL
                     )
                     """
                 )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sync_job_items_job ON sync_job_items(job_id)"
+                )
+
+                # Safe column migrations for existing databases
+                for tbl, col, col_def in (
+                    ("pages", "category", "TEXT DEFAULT NULL"),
+                    ("sync_jobs", "options_json", "TEXT NOT NULL DEFAULT '{}'"),
+                    ("sync_jobs", "owner_instance", "TEXT DEFAULT NULL"),
+                    ("sync_jobs", "heartbeat_at", "TEXT DEFAULT NULL"),
+                    ("sync_job_items", "profile_name", "TEXT NOT NULL DEFAULT ''"),
+                    ("sync_job_items", "error_code", "TEXT DEFAULT NULL"),
+                    ("sync_job_items", "detail_json", "TEXT NOT NULL DEFAULT '{}'"),
+                    ("sync_job_items", "started_at", "TEXT DEFAULT NULL"),
+                    ("sync_job_items", "finished_at", "TEXT DEFAULT NULL"),
+                ):
+                    existing_cols = {
+                        r["name"]
+                        for r in cur.execute(f"PRAGMA table_info({tbl})").fetchall()
+                    }
+                    if col not in existing_cols:
+                        cur.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {col_def}")
 
                 cur.execute(
                     """
@@ -722,6 +752,11 @@ class FanpageRepository:
                                     now_str,
                                     target_id,
                                 ),
+                            )
+                        if entry.get("category"):
+                            cur.execute(
+                                "UPDATE pages SET category = COALESCE(?, category) WHERE internal_id = ?",
+                                (str(entry.get("category"))[:120], target_id),
                             )
                         stats["pages_upserted"] += 1
                         seen_page_ids_for_profile.add(target_id)
@@ -1144,3 +1179,270 @@ class FanpageRepository:
                 raise
             finally:
                 conn.close()
+
+    # --- Sync Jobs & Queue Management (Stage 2) ---
+
+    def _refresh_job_counters(self, cur: sqlite3.Cursor, job_id: str, now_iso: str) -> None:
+        rows = cur.execute(
+            "SELECT status, COUNT(*) AS cnt FROM sync_job_items WHERE job_id = ? GROUP BY status",
+            (job_id,),
+        ).fetchall()
+        counts = {r["status"]: int(r["cnt"]) for r in rows}
+        total = sum(counts.values())
+        completed = counts.get("completed", 0)
+        failed = counts.get("failed", 0)
+        partial = counts.get("partial", 0)
+        skipped = counts.get("skipped", 0) + counts.get("cancelled", 0)
+        cur.execute(
+            """
+            UPDATE sync_jobs
+            SET total_items = ?,
+                completed_items = ?,
+                failed_items = ?,
+                partial_items = ?,
+                skipped_items = ?,
+                heartbeat_at = ?
+            WHERE job_id = ?
+            """,
+            (total, completed, failed, partial, skipped, now_iso, job_id),
+        )
+
+    def _serialize_job_row(
+        self, conn: sqlite3.Connection, row: sqlite3.Row, include_items: bool = True
+    ) -> Dict[str, Any]:
+        job = dict(row)
+        job["id"] = job.get("job_id")
+        try:
+            job["options"] = json.loads(job.get("options_json") or "{}")
+        except Exception:
+            job["options"] = {}
+        total = int(job.get("total_items") or 0)
+        completed_cnt = int(job.get("completed_items") or 0)
+        failed_cnt = int(job.get("failed_items") or 0)
+        partial_cnt = int(job.get("partial_items") or 0)
+        skipped_cnt = int(job.get("skipped_items") or 0)
+        done = completed_cnt + failed_cnt + partial_cnt + skipped_cnt
+        job["processed_items"] = done
+        job["progress_pct"] = round((done / total) * 100, 1) if total > 0 else 100.0
+        job["counts"] = {
+            "total": total,
+            "completed": completed_cnt,
+            "failed": failed_cnt,
+            "partial": partial_cnt,
+            "skipped": skipped_cnt,
+        }
+        if include_items:
+            items = []
+            for ir in conn.execute(
+                "SELECT * FROM sync_job_items WHERE job_id = ? ORDER BY id ASC",
+                (job["job_id"],),
+            ).fetchall():
+                item = dict(ir)
+                try:
+                    item["detail"] = json.loads(item.get("detail_json") or "{}")
+                except Exception:
+                    item["detail"] = {}
+                items.append(item)
+            job["items"] = items
+        return job
+
+    def create_sync_job(
+        self,
+        job_id: str,
+        mode: str,
+        profile_items: List[Dict[str, Any]],
+        *,
+        options: Optional[Dict[str, Any]] = None,
+        owner_instance: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        now_str = _utc_now_iso()
+        opts_json = json.dumps(options or {}, ensure_ascii=False)
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                cur.execute(
+                    """
+                    INSERT INTO sync_jobs (
+                        job_id, mode, status, total_items,
+                        completed_items, failed_items, partial_items, skipped_items,
+                        options_json, owner_instance, heartbeat_at, created_at
+                    ) VALUES (?, ?, 'queued', ?, 0, 0, 0, 0, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        mode,
+                        len(profile_items),
+                        opts_json,
+                        owner_instance,
+                        now_str,
+                        now_str,
+                    ),
+                )
+                for p_item in profile_items:
+                    cur.execute(
+                        """
+                        INSERT INTO sync_job_items (
+                            job_id, profile_id, profile_name, page_id,
+                            status, attempts, detail_json, updated_at
+                        ) VALUES (?, ?, ?, ?, 'pending', 0, '{}', ?)
+                        """,
+                        (
+                            job_id,
+                            str(p_item["profile_id"]),
+                            str(p_item.get("profile_name") or p_item["profile_id"]),
+                            p_item.get("page_id"),
+                            now_str,
+                        ),
+                    )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM sync_jobs WHERE job_id = ?", (job_id,)
+                ).fetchone()
+                return self._serialize_job_row(conn, row, include_items=True)
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def find_active_sync_job(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT * FROM sync_jobs
+                    WHERE status IN ('queued', 'running')
+                    ORDER BY created_at DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return self._serialize_job_row(conn, row, include_items=True)
+            finally:
+                conn.close()
+
+    def get_sync_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM sync_jobs WHERE job_id = ?", (job_id,)
+                ).fetchone()
+                if not row:
+                    return None
+                return self._serialize_job_row(conn, row, include_items=True)
+            finally:
+                conn.close()
+
+    def list_sync_jobs(self, limit: int = 20) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(100, int(limit or 20)))
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM sync_jobs ORDER BY created_at DESC LIMIT ?",
+                    (safe_limit,),
+                ).fetchall()
+                return [
+                    self._serialize_job_row(conn, r, include_items=True)
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+
+    def update_sync_job_status(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        error: Optional[str] = None,
+        started_at: Optional[str] = None,
+        finished_at: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        now_str = _utc_now_iso()
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                self._refresh_job_counters(cur, job_id, now_str)
+                cur.execute(
+                    """
+                    UPDATE sync_jobs
+                    SET status = ?,
+                        error = COALESCE(?, error),
+                        started_at = COALESCE(?, started_at),
+                        finished_at = COALESCE(?, finished_at),
+                        heartbeat_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (status, error, started_at, finished_at, now_str, job_id),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM sync_jobs WHERE job_id = ?", (job_id,)
+                ).fetchone()
+                return self._serialize_job_row(conn, row, include_items=True) if row else None
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def update_sync_job_item(
+        self,
+        item_id: int,
+        *,
+        job_id: str,
+        status: str,
+        attempts: Optional[int] = None,
+        error_code: Optional[str] = None,
+        error: Optional[str] = None,
+        detail: Optional[Dict[str, Any]] = None,
+        started_at: Optional[str] = None,
+        finished_at: Optional[str] = None,
+    ) -> None:
+        now_str = _utc_now_iso()
+        detail_str = json.dumps(detail, ensure_ascii=False) if detail is not None else None
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                cur.execute(
+                    """
+                    UPDATE sync_job_items
+                    SET status = ?,
+                        attempts = COALESCE(?, attempts),
+                        error_code = ?,
+                        error = ?,
+                        detail_json = COALESCE(?, detail_json),
+                        started_at = COALESCE(?, started_at),
+                        finished_at = COALESCE(?, finished_at),
+                        updated_at = ?
+                    WHERE id = ? AND job_id = ?
+                    """,
+                    (
+                        status,
+                        attempts,
+                        error_code,
+                        error,
+                        detail_str,
+                        started_at,
+                        finished_at,
+                        now_str,
+                        int(item_id),
+                        job_id,
+                    ),
+                )
+                self._refresh_job_counters(cur, job_id, now_str)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+

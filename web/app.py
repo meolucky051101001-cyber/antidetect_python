@@ -79,6 +79,8 @@ from .schemas import (
     CreateProfileRequest,
     FanpageBulkUpdateRequest,
     FanpageOpenRequest,
+    FanpageSyncJobCreateRequest,
+    FanpageSyncJobRetryRequest,
     FanpageUpdateRequest,
     ImportCookiesRequest,
     ImportProfilesRequest,
@@ -195,6 +197,8 @@ async def lifespan(_app: FastAPI):
                 "start_all": _scheduler_start_all,
                 "stop_all": launcher.stop_all,
                 "sync_location_proxy": _scheduler_sync_all_locations,
+                "sync_fanpages": _scheduler_sync_fanpages,
+                "sync_fanpages_deep": _scheduler_sync_fanpages_deep,
             },
             history_path=os.path.join(DATA_DIR, "schedule_runs.json"),
         )
@@ -1369,6 +1373,32 @@ def _scheduler_sync_all_locations(profile_ids=None):
     return {"synced": done, "skipped": skipped, "total": len(profiles)}
 
 
+def _scheduler_sync_fanpages(profile_ids=None):
+    """Callback scheduler: đưa job đồng bộ danh sách fanpage (discovery) vào hàng đợi."""
+    svc = get_fanpage_service()
+    job, deduplicated = svc.enqueue_sync_job(
+        mode="discovery",
+        profile_ids=profile_ids,
+        auto_start=True,
+        triggered_by="scheduler",
+        run_async=True,
+    )
+    return {"job_id": job.get("id"), "deduplicated": deduplicated}
+
+
+def _scheduler_sync_fanpages_deep(profile_ids=None):
+    """Callback scheduler: đưa job đồng bộ chi tiết fanpage (basic) vào hàng đợi."""
+    svc = get_fanpage_service()
+    job, deduplicated = svc.enqueue_sync_job(
+        mode="basic",
+        profile_ids=profile_ids,
+        auto_start=True,
+        triggered_by="scheduler",
+        run_async=True,
+    )
+    return {"job_id": job.get("id"), "deduplicated": deduplicated}
+
+
 @app.post("/api/profiles/{profile_id}/sync-location-proxy")
 async def sync_location_from_proxy(profile_id: str):
     """Giai đoạn 1 anti-detection: đồng bộ timezone/geo/locale theo IP proxy.
@@ -2241,6 +2271,18 @@ _fanpage_service_cache: Dict[str, FanpageService] = {}
 _fanpage_service_lock = threading.Lock()
 
 
+def _check_profile_launch_gate_for_job(profile: Profile) -> tuple[bool, Optional[str]]:
+    gate_mode = _launch_gate_mode()
+    if gate_mode == "off":
+        return True, None
+    profiles = profile_manager.list_profiles()
+    browser_paths = _resolve_browser_paths(profiles)
+    gate = _evaluate_launch_gate(
+        profile, profiles, browser_paths, gate_mode, False
+    )
+    return bool(gate.allowed), gate.message
+
+
 def get_fanpage_service() -> FanpageService:
     """Khởi tạo lười (lazy) FanpageService gắn với thư mục data của profile_manager hiện hành.
 
@@ -2267,6 +2309,8 @@ def get_fanpage_service() -> FanpageService:
                 profile_manager=profile_manager,
                 launcher=launcher,
                 db_path=os.path.join(data_dir, "fanpages.sqlite"),
+                launch_gate_check=_check_profile_launch_gate_for_job,
+                owner_instance=getattr(app.state, "instance_id", None),
             )
             _fanpage_service_cache[data_dir] = svc
         return svc
@@ -2556,4 +2600,92 @@ async def open_fanpage_in_profile(
         "profile_name": p.name,
         "opened_url": open_url,
     }
+
+
+# --- Fanpage Sync Jobs (Giai đoạn 2) ---
+
+
+@app.post("/api/fanpage-sync/jobs", status_code=202)
+async def create_fanpage_sync_job_endpoint(req: FanpageSyncJobCreateRequest):
+    svc = get_fanpage_service()
+    try:
+        job, deduplicated = await asyncio.to_thread(
+            svc.enqueue_sync_job,
+            mode=req.mode,
+            profile_ids=req.profile_ids,
+            page_ids=req.page_ids,
+            auto_start=req.auto_start,
+            only_running=req.only_running,
+            force_new=req.force_new,
+            triggered_by="user",
+            run_async=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(
+        status_code=202,
+        content={
+            "success": True,
+            "deduplicated": deduplicated,
+            "job": job,
+        },
+    )
+
+
+@app.get("/api/fanpage-sync/jobs")
+async def list_fanpage_sync_jobs_endpoint(limit: int = 20):
+    svc = get_fanpage_service()
+    jobs = await asyncio.to_thread(svc.list_sync_jobs, limit=limit)
+    active = await asyncio.to_thread(svc.repo.find_active_sync_job)
+    return {
+        "success": True,
+        "active_job": active,
+        "jobs": jobs,
+    }
+
+
+@app.get("/api/fanpage-sync/jobs/{job_id}")
+async def get_fanpage_sync_job_endpoint(job_id: str):
+    svc = get_fanpage_service()
+    job = await asyncio.to_thread(svc.get_sync_job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job đồng bộ không tồn tại.")
+    return {"success": True, "job": job}
+
+
+@app.post("/api/fanpage-sync/jobs/{job_id}/cancel")
+async def cancel_fanpage_sync_job_endpoint(job_id: str):
+    svc = get_fanpage_service()
+    job = await asyncio.to_thread(svc.cancel_sync_job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job đồng bộ không tồn tại.")
+    return {"success": True, "job": job}
+
+
+@app.post("/api/fanpage-sync/jobs/{job_id}/retry", status_code=202)
+async def retry_fanpage_sync_job_endpoint(
+    job_id: str, req: Optional[FanpageSyncJobRetryRequest] = None
+):
+    req = req or FanpageSyncJobRetryRequest()
+    svc = get_fanpage_service()
+    try:
+        job, deduplicated = await asyncio.to_thread(
+            svc.retry_sync_job,
+            job_id,
+            auto_start=req.auto_start,
+            run_async=True,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Job đồng bộ không tồn tại.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(
+        status_code=202,
+        content={
+            "success": True,
+            "deduplicated": deduplicated,
+            "job": job,
+        },
+    )
+
 

@@ -144,3 +144,17 @@ class FanpageOpenRequest(BaseModel):
     target: str = "page"  # page | transparency
     force: bool = False
 
+
+class FanpageSyncJobCreateRequest(BaseModel):
+    mode: str = "discovery"  # discovery | basic
+    profile_ids: Optional[List[str]] = None
+    page_ids: Optional[List[str]] = None
+    auto_start: bool = False
+    only_running: bool = False
+    force_new: bool = False
+
+
+class FanpageSyncJobRetryRequest(BaseModel):
+    auto_start: Optional[bool] = None
+
+

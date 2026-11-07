@@ -20,7 +20,13 @@ from .storage import InterProcessLock, _replace_with_retry
 from .applog import get_logger
 from . import metrics
 
-VALID_ACTIONS = ("start_all", "stop_all", "sync_location_proxy")
+VALID_ACTIONS = (
+    "start_all",
+    "stop_all",
+    "sync_location_proxy",
+    "sync_fanpages",
+    "sync_fanpages_deep",
+)
 MAX_RULES = 20
 
 log = get_logger("scheduler")

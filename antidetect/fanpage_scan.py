@@ -107,6 +107,12 @@ MERGE_FIELDS = frozenset(
         "detail_synced_at",
         "ready",
         "age_days",
+        "followers",
+        "followers_raw",
+        "likes",
+        "likes_raw",
+        "category",
+        "access_state",
     }
 )
 

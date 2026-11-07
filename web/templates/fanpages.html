@@ -25,7 +25,7 @@
                 <div>
                     <div class="flex items-center space-x-2">
                         <h1 class="text-lg font-bold tracking-tight">Fanpage Manager</h1>
-                        <span class="text-xs font-semibold px-2 py-0.5 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-full">Stage 1 Catalog</span>
+                        <span class="text-xs font-semibold px-2 py-0.5 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-full">Stage 2 Sync &amp; Basic</span>
                     </div>
                     <p class="text-xs text-slate-400">Danh mục fanpage hợp nhất, chống trùng đa profile & kiểm chứng độ tin cậy dữ liệu</p>
                 </div>
@@ -52,6 +52,10 @@
             <button onclick="reloadFanpageCatalog()" class="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition" title="Đồng bộ lại từ cache profile & làm mới bảng">
                 <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             </button>
+            <button onclick="openSyncJobModal()" class="flex items-center space-x-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-semibold rounded-lg shadow-md shadow-amber-500/20 transition" title="Mở hàng đợi đồng bộ Fanpage bất đồng bộ (Discovery / Basic)">
+                <i data-lucide="layers" class="w-4 h-4"></i>
+                <span>Đồng Bộ Fanpage</span>
+            </button>
             <button onclick="exportCurrentCsv()" class="flex items-center space-x-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg text-xs font-medium rounded-lg transition" title="Xuất danh sách theo bộ lọc hiện tại ra CSV (UTF-8 BOM, mở trực tiếp bằng Excel)">
                 <i data-lucide="download" class="w-4 h-4 text-emerald-400"></i>
                 <span>Xuất CSV</span>
@@ -65,6 +69,25 @@
 
     <!-- Main Content -->
     <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+
+        <!-- Active Sync Job Progress Banner (Stage 2) -->
+        <div id="active-sync-banner" class="hidden bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div class="flex items-center space-x-3 min-w-0">
+                <span class="inline-block w-4 h-4 border-2 border-amber-400/30 border-t-amber-400 rounded-full animate-spin shrink-0"></span>
+                <div class="min-w-0">
+                    <div id="active-sync-title" class="text-xs font-semibold text-amber-300 truncate">Đang chạy job đồng bộ fanpage...</div>
+                    <div id="active-sync-subtitle" class="text-[11px] text-slate-400 truncate">Đang cập nhật tiến độ...</div>
+                </div>
+            </div>
+            <div class="flex items-center space-x-2 shrink-0">
+                <button type="button" onclick="openSyncJobModal()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition">
+                    Chi tiết tiến độ
+                </button>
+                <button type="button" onclick="cancelActiveSyncJob()" class="px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/30 rounded-lg text-xs font-medium transition">
+                    Hủy Job
+                </button>
+            </div>
+        </div>
 
         <!-- KPI Overview Cards (3.1 Tổng quan) -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -257,6 +280,10 @@
                 <button type="button" onclick="clearPageSelection()" class="text-slate-400 hover:text-white underline">Bỏ chọn</button>
             </div>
             <div class="flex flex-wrap items-center gap-2">
+                <button type="button" onclick="enqueueSyncForSelectedPages()" class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 rounded-lg text-xs font-semibold transition flex items-center space-x-1">
+                    <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                    <span>Đồng bộ chi tiết (Basic)</span>
+                </button>
                 <button type="button" onclick="bulkAddTagPrompt()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition flex items-center space-x-1">
                     <i data-lucide="tag" class="w-3.5 h-3.5 text-amber-400"></i>
                     <span>Gắn Tag</span>
@@ -368,6 +395,10 @@
                         <button type="button" onclick="openPageInBrowserFromDetail('transparency')" class="px-3 py-1.5 bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white border border-violet-500/30 font-medium rounded-lg transition" title="Mở mục Tính minh bạch của Trang (about_profile_transparency)">
                             <span>Tính minh bạch</span>
                         </button>
+                        <button type="button" onclick="enqueueSyncForDetailPage()" class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 font-semibold rounded-lg transition flex items-center space-x-1" title="Đưa profile của fanpage này vào hàng đợi quét chi tiết (Basic)">
+                            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                            <span>Quét Basic</span>
+                        </button>
                     </div>
                 </div>
 
@@ -435,6 +466,76 @@
 
             <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
                 <button type="button" onclick="closePageDetailModal()" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Hàng Đợi Đồng Bộ Fanpage (Stage 2 Sync Jobs) -->
+    <div id="syncJobModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="bg-cardBg border border-borderBg rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col max-h-[88vh]">
+            <div class="px-5 py-4 border-b border-borderBg flex items-center justify-between bg-slate-900/60">
+                <div class="flex items-center space-x-2.5">
+                    <i data-lucide="layers" class="w-5 h-5 text-amber-400"></i>
+                    <div>
+                        <h3 class="text-sm font-semibold text-white">Hàng Đợi Đồng Bộ Fanpage (Stage 2)</h3>
+                        <p class="text-[11px] text-slate-400">Quét danh sách (Discovery) hoặc chi tiết (Basic) bất đồng bộ · Giới hạn đồng thời · Không bao giờ tự đóng trình duyệt người dùng đang mở</p>
+                    </div>
+                </div>
+                <button type="button" onclick="closeSyncJobModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+            </div>
+
+            <div class="p-5 overflow-y-auto space-y-5 flex-1 text-xs">
+                <!-- Tạo Job Đồng Bộ Mới -->
+                <div class="bg-slate-900/50 border border-borderBg rounded-xl p-4 space-y-3">
+                    <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Tạo Lượt Đồng Bộ Mới</div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-[11px] text-slate-400 mb-1">Chế độ thu thập</label>
+                            <select id="sync-job-mode" class="w-full bg-slate-950 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200">
+                                <option value="discovery">Discovery (Nhanh — đọc danh sách fanpage)</option>
+                                <option value="basic">Basic (Chi tiết — ngày tạo, bài đăng gần nhất, follower/like, ID)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] text-slate-400 mb-1">Phạm vi Profile</label>
+                            <select id="sync-job-scope" class="w-full bg-slate-950 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200">
+                                <option value="all">Toàn bộ profile trong hệ thống</option>
+                                <option value="running">Chỉ các profile đang mở trình duyệt</option>
+                                <option value="filtered">Theo profile đang chọn ở bộ lọc hiện tại</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+                        <label class="inline-flex items-center space-x-2 text-xs text-slate-300 cursor-pointer">
+                            <input type="checkbox" id="sync-job-auto-start" class="accent-amber-500 rounded">
+                            <span>Tự mở trình duyệt cho profile đang đóng (và tự đóng lại sau khi quét xong)</span>
+                        </label>
+                        <button type="button" onclick="startNewSyncJob()" class="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg shadow-md shadow-amber-500/20 transition flex items-center space-x-1.5 shrink-0">
+                            <i data-lucide="play" class="w-3.5 h-3.5"></i>
+                            <span>Bắt Đầu Đồng Bộ</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Danh sách Job gần đây & Tiến độ chi tiết -->
+                <div class="space-y-3">
+                    <div class="flex items-center justify-between">
+                        <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Tiến Độ &amp; Lịch Sử Job Đồng Bộ</div>
+                        <button type="button" onclick="loadSyncJobs()" class="text-xs text-blue-400 hover:text-blue-300 flex items-center space-x-1">
+                            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                            <span>Làm mới</span>
+                        </button>
+                    </div>
+                    <div id="sync-jobs-container" class="space-y-3">
+                        <div class="text-slate-500 italic">Đang tải lịch sử job đồng bộ...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
+                <button type="button" onclick="closeSyncJobModal()" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
             </div>
         </div>
     </div>

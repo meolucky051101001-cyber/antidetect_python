@@ -331,11 +331,24 @@ _FB_PAGE_METRICS_JS = r"""
             title: (document.title || '').slice(0, 120),
             times: [],
             createdRaw: null,
+            followersRaw: null,
+            likesRaw: null,
+            category: null,
+            observedPageId: pageId || null,
+            accessState: 'ok',
             feedReady: false,
             articleCount: 0,
             parserVersion: PARSER
         };
         const seen = new Set();
+        try {
+            const pathLower = String(location.pathname || '').toLowerCase();
+            if (pathLower.indexOf('/checkpoint') === 0) {
+                out.accessState = 'checkpoint';
+            } else if (pathLower.indexOf('/login') === 0 || (document.querySelector('input[name="email"]') && document.querySelector('input[name="pass"]'))) {
+                out.accessState = 'login_required';
+            }
+        } catch (e) {}
         try {
             const articles = Array.from(document.querySelectorAll('div[role="article"]'));
             out.articleCount = articles.length;
@@ -389,8 +402,8 @@ _FB_PAGE_METRICS_JS = r"""
             const txt = document.body ? (document.body.innerText || '') : '';
             const m = txt.match(new RegExp(CREATED_LABEL.source + '[^\\n]{0,100}', 'i'));
             if (m) out.createdRaw = m[0].slice(0, 140);
-            if (!out.createdRaw) {
-                const html = document.documentElement ? (document.documentElement.outerHTML || '') : '';
+            const html = document.documentElement ? (document.documentElement.outerHTML || '') : '';
+            if (!out.createdRaw && html) {
                 const idx = html.indexOf('"field_type":"creation_date"');
                 if (idx !== -1) {
                     const snippet = html.slice(Math.max(0, idx - 220), idx + 120);
@@ -398,6 +411,31 @@ _FB_PAGE_METRICS_JS = r"""
                     if (matches.length > 0) out.createdRaw = matches[matches.length - 1][1];
                 }
             }
+            if (!out.observedPageId && html) {
+                const idMatch = html.match(/"pageID"\s*:\s*"(\d{5,})"/)
+                    || html.match(/"delegate_page"\s*:\s*\{\s*"id"\s*:\s*"(\d{5,})"/)
+                    || html.match(/fb:\/\/(?:page|profile)\/(\d{5,})/);
+                if (idMatch) out.observedPageId = idMatch[1];
+            }
+            // Đọc follower/like/category từ vùng header/intro (ngoài bài viết role="article")
+            const headerLinks = Array.from(document.querySelectorAll('a[href], span')).filter(el => !el.closest('div[role="article"]'));
+            const flwRx = /\b(\d[\d.,]*\s*(?:k|m|b|nghìn|nghin|ngàn|ngan|vạn|van|tr|triệu|trieu|tỷ|ty)?)\s*(?:người\s+theo\s+dõi|nguoi\s+theo\s+doi|followers?)\b/i;
+            const likeRx = /\b(\d[\d.,]*\s*(?:k|m|b|nghìn|nghin|ngàn|ngan|vạn|van|tr|triệu|trieu|tỷ|ty)?)\s*(?:lượt\s+thích|người\s+thích|likes?)\b/i;
+            for (const el of headerLinks) {
+                if (out.followersRaw && out.likesRaw) break;
+                const t = (el.textContent || '').trim().replace(/\s+/g, ' ');
+                if (!t || t.length > 64) continue;
+                if (!out.followersRaw) {
+                    const mf = t.match(flwRx);
+                    if (mf) out.followersRaw = mf[0].slice(0, 60);
+                }
+                if (!out.likesRaw) {
+                    const ml = t.match(likeRx);
+                    if (ml) out.likesRaw = ml[0].slice(0, 60);
+                }
+            }
+            const catMatch = txt.match(/(?:^|\n)\s*(?:Trang|Page)\s*[·•]\s*([^\n·•]{2,60})/i);
+            if (catMatch) out.category = catMatch[1].trim();
         } catch (e) {}
         return out;
     };
@@ -1363,6 +1401,11 @@ async def fetch_pages_deep_cdp(
                     "times": [],
                     "created_raw": None,
                     "last_post_raw": None,
+                    "followers_raw": None,
+                    "likes_raw": None,
+                    "category": None,
+                    "observed_page_id": None,
+                    "access_state": "ok",
                     "title": None,
                     "observed_at": to_utc_iso(utc_now()),
                     "completed": False,
@@ -1371,11 +1414,16 @@ async def fetch_pages_deep_cdp(
                     "parser_version": PARSER_VERSION,
                 }
                 if page_url:
-                    # 1) Trang chính page: mốc thời gian bài đăng (feed).
+                    # 1) Trang chính page: mốc thời gian bài đăng (feed) + follower/like header.
                     main_metrics = await _navigate_and_evaluate(page_url)
                     if main_metrics:
                         entry["times"] = main_metrics.get("times") or []
                         entry["title"] = main_metrics.get("title")
+                        entry["followers_raw"] = main_metrics.get("followersRaw")
+                        entry["likes_raw"] = main_metrics.get("likesRaw")
+                        entry["category"] = main_metrics.get("category")
+                        entry["observed_page_id"] = main_metrics.get("observedPageId")
+                        entry["access_state"] = main_metrics.get("accessState") or "ok"
                         entry["feed_ready"] = bool(main_metrics.get("feedReady"))
                         entry["article_count"] = main_metrics.get("articleCount") or 0
                         entry["completed"] = bool(main_metrics.get("feedReady"))
@@ -1389,6 +1437,13 @@ async def fetch_pages_deep_cdp(
                         entry["created_raw"] = about_metrics["createdRaw"]
                     elif main_metrics and main_metrics.get("createdRaw"):
                         entry["created_raw"] = main_metrics["createdRaw"]
+                    if about_metrics:
+                        if not entry["observed_page_id"] and about_metrics.get("observedPageId"):
+                            entry["observed_page_id"] = about_metrics["observedPageId"]
+                        if not entry["followers_raw"] and about_metrics.get("followersRaw"):
+                            entry["followers_raw"] = about_metrics["followersRaw"]
+                        if not entry["likes_raw"] and about_metrics.get("likesRaw"):
+                            entry["likes_raw"] = about_metrics["likesRaw"]
                 results[page_url] = entry
         return results
     finally:
@@ -1492,13 +1547,34 @@ def merge_page_details(
             page["last_post_raw"] = best["raw"]
             page["last_post_quality"] = "approximate"
 
-        page["created_raw"] = info.get("created_raw")
+        if info.get("created_raw"):
+            page["created_raw"] = info.get("created_raw")
+        elif "created_raw" not in page:
+            page["created_raw"] = None
         created = parse_fb_created_date(page.get("created_raw"))
         if created:
             page["created_date"] = created.isoformat()
+        if info.get("followers_raw") or info.get("followers"):
+            flw_raw = info.get("followers_raw") or info.get("followers")
+            page["followers"] = flw_raw
+            page["followers_raw"] = flw_raw
+        if info.get("likes_raw") or info.get("likes"):
+            lk_raw = info.get("likes_raw") or info.get("likes")
+            page["likes"] = lk_raw
+            page["likes_raw"] = lk_raw
+        if info.get("category"):
+            page["category"] = str(info["category"])[:120]
+        obs_page_id = str(info.get("observed_page_id") or "").strip()
+        if obs_page_id and re.fullmatch(r"\d{5,}", obs_page_id) and not page.get("id"):
+            page["id"] = obs_page_id
+            page["id_status"] = "verified"
+        if info.get("access_state"):
+            page["access_state"] = info["access_state"]
         synced = bool(
             candidates
             or info.get("created_raw")
+            or info.get("followers_raw")
+            or info.get("likes_raw")
             or info.get("title")
             or info.get("feed_ready")
         )

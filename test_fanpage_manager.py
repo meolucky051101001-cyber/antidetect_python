@@ -1,4 +1,5 @@
-"""Tests cho Fanpage Manager Giai đoạn 1 (Catalog SQLite, Deduplication, F3/F4, REST API, CSV Export)."""
+"""Tests cho Fanpage Manager Giai đoạn 1 & 2 (Catalog SQLite, Deduplication, F3/F4, Basic Collector, Async Sync Jobs, REST API, CSV Export)."""
+import datetime
 import os
 import sys
 from unittest.mock import MagicMock
@@ -440,3 +441,384 @@ def test_fanpage_manager_api_and_csp(tmp_path, monkeypatch):
         json={"profile_id": "profile-khong-lien-ket"},
     )
     assert r_bad_open.status_code == 400
+
+
+# ==============================================================================
+# STAGE 2 TESTS — Basic Collector & Async Sync Job Queue / API / Scheduler
+# ==============================================================================
+
+
+def test_stage2_merge_page_details_extracts_basic_metrics_and_promotes_id():
+    from antidetect.facebook import merge_page_details
+    from antidetect.fanpages.repository import parse_compact_metric
+
+    now = datetime.datetime(2026, 11, 7, 12, 0, tzinfo=datetime.timezone.utc)
+    url = "https://www.facebook.com/VanityBrandPage"
+    data = {
+        "pages": [
+            {
+                "id": None,
+                "name": "Page Vanity Chưa Có ID",
+                "url": url,
+                "created_raw": "15 tháng 1, 2024",
+                "created_date": "2024-01-15",
+            }
+        ]
+    }
+    details = {
+        url: {
+            "created_raw": "",  # Không đọc được ngày tạo ở lần quét này -> phải giữ nguyên created_raw cũ
+            "times": [{"n": 3, "u": "h", "raw": "3 giờ", "own": True}],
+            "followers_raw": "12,5K người theo dõi",
+            "likes_raw": "9.800 lượt thích",
+            "category": "Trang tin tức & truyền thông",
+            "observed_page_id": "1000888999111",
+            "access_state": "ok",
+            "completed": True,
+            "feed_ready": True,
+        }
+    }
+
+    merge_page_details(data, details, clock=now)
+    item = data["pages"][0]
+    assert item["id"] == "1000888999111"
+    assert item["id_status"] == "verified"
+    assert item["created_raw"] == "15 tháng 1, 2024"
+    assert item["created_date"] == "2024-01-15"
+    assert item["followers_raw"] == "12,5K người theo dõi"
+    assert parse_compact_metric(item["followers"]) == (12500, "12,5K người theo dõi", "rounded")
+    assert item["likes_raw"] == "9.800 lượt thích"
+    assert parse_compact_metric(item["likes"]) == (9800, "9.800 lượt thích", "exact")
+    assert item["category"] == "Trang tin tức & truyền thông"
+    assert item["access_state"] == "ok"
+
+
+def test_stage2_job_browser_ownership_never_stops_user_opened_browser(tmp_path, monkeypatch):
+    """Quy tắc cốt lõi Stage 2:
+    - Profile do người dùng mở sẵn (is_running=True) -> tuyệt đối KHÔNG được gọi launcher.stop() sau khi quét.
+    - Profile đang đóng + auto_start=False -> đánh dấu skipped (PROFILE_CLOSED).
+    - Profile đang đóng + auto_start=True -> job tự launch() VÀ bắt buộc tự stop() trong finally.
+    """
+    pm = _make_isolated_pm(tmp_path, monkeypatch)
+    p_open = pm.create_profile(name="User Opened Profile", target_os="windows")
+    p_closed = pm.create_profile(name="Closed Profile", target_os="windows")
+
+    running_state = {p_open.id: True, p_closed.id: False}
+    mock_launcher = MagicMock()
+    mock_launcher.is_running.side_effect = lambda pid: running_state.get(pid, False)
+
+    def _fake_launch(pid, open_url=None):
+        running_state[pid] = True
+        return {"success": True, "port": 9222}
+
+    def _fake_stop(pid):
+        running_state[pid] = False
+        return {"success": True}
+
+    mock_launcher.launch.side_effect = _fake_launch
+    mock_launcher.stop.side_effect = _fake_stop
+    mock_launcher.fetch_facebook_pages.return_value = {
+        "logged_in": True,
+        "login_status": True,
+        "discovery_status": "complete",
+        "completion_reason": "END_OF_LIST",
+        "account_id_observed": "1000111222",
+        "observed_count": 1,
+        "pages": [
+            {
+                "id": "1000999888777",
+                "name": "Page Test Ownership",
+                "url": "https://www.facebook.com/profile.php?id=1000999888777",
+                "followers": 3400,
+                "followers_raw": "3,4K người theo dõi",
+                "likes": 3100,
+                "likes_raw": "3,1K lượt thích",
+                "category": "Sáng tạo số",
+                "detail_synced": True,
+            }
+        ],
+    }
+
+    svc = FanpageService(
+        profile_manager=pm,
+        launcher=mock_launcher,
+        db_path=str(tmp_path / "fanpages.sqlite"),
+        retry_delay_s=0.01,
+    )
+
+    # 1. Chạy với auto_start=False: p_open phải completed và KHÔNG bị stop; p_closed phải skipped
+    job1, dedup1 = svc.enqueue_sync_job(
+        mode="basic",
+        profile_ids=[p_open.id, p_closed.id],
+        auto_start=False,
+        run_async=False,
+    )
+    assert dedup1 is False
+    assert job1["status"] == "completed_with_warnings"
+    by_pid = {it["profile_id"]: it for it in job1["items"]}
+    assert by_pid[p_open.id]["status"] == "completed"
+    assert by_pid[p_open.id]["detail"]["opened_by_job"] is False
+    assert by_pid[p_closed.id]["status"] == "skipped"
+    assert by_pid[p_closed.id]["error_code"] == "PROFILE_CLOSED"
+    mock_launcher.launch.assert_not_called()
+    mock_launcher.stop.assert_not_called()
+
+    # 2. Retry job1 với auto_start=True -> chỉ chạy lại p_closed, tự launch và tự stop p_closed
+    job2, dedup2 = svc.retry_sync_job(job1["id"], auto_start=True, run_async=False)
+    assert dedup2 is False
+    assert job2["status"] == "completed"
+    assert len(job2["items"]) == 1
+    item_closed = job2["items"][0]
+    assert item_closed["profile_id"] == p_closed.id
+    assert item_closed["status"] == "completed"
+    assert item_closed["detail"]["opened_by_job"] is True
+    mock_launcher.launch.assert_called_once_with(p_closed.id)
+    mock_launcher.stop.assert_called_once_with(p_closed.id)
+    # p_open vẫn đang mở, tuyệt đối không bị stop
+    assert running_state[p_open.id] is True
+    assert running_state[p_closed.id] is False
+
+
+def test_stage2_job_error_classification_and_transient_retry(tmp_path, monkeypatch):
+    """Kiểm chứng phân loại lỗi và retry:
+    - LOGIN_LOST -> dừng ngay ở attempt 1 (không retry).
+    - Lỗi tạm thời (RuntimeError / CDP) -> retry tối đa 1 + max_retries lần; nếu lần thử thứ 2 thành công thì báo completed.
+    """
+    pm = _make_isolated_pm(tmp_path, monkeypatch)
+    p_login_lost = pm.create_profile(name="Login Lost Profile", target_os="windows")
+    p_flaky = pm.create_profile(name="Flaky Profile", target_os="windows")
+
+    mock_launcher = MagicMock()
+    mock_launcher.is_running.return_value = True
+
+    attempts_counter = {p_login_lost.id: 0, p_flaky.id: 0}
+
+    def _side_effect(pid, timeout, deep):
+        attempts_counter[pid] += 1
+        if pid == p_login_lost.id:
+            return {
+                "logged_in": False,
+                "login_status": False,
+                "discovery_status": "failed",
+                "completion_reason": "LOGIN_LOST",
+                "pages": [],
+            }
+        if attempts_counter[pid] == 1:
+            raise RuntimeError("CDP websocket timeout tạm thời")
+        return {
+            "logged_in": True,
+            "login_status": True,
+            "discovery_status": "complete",
+            "completion_reason": "END_OF_LIST",
+            "observed_count": 1,
+            "pages": [
+                {
+                    "id": "1000222333444",
+                    "name": "Page Flaky Recovered",
+                    "url": "https://www.facebook.com/profile.php?id=1000222333444",
+                }
+            ],
+        }
+
+    mock_launcher.fetch_facebook_pages.side_effect = _side_effect
+
+    svc = FanpageService(
+        profile_manager=pm,
+        launcher=mock_launcher,
+        db_path=str(tmp_path / "fanpages.sqlite"),
+        max_retries=2,
+        retry_delay_s=0.01,
+    )
+
+    job, _ = svc.enqueue_sync_job(
+        mode="discovery",
+        profile_ids=[p_login_lost.id, p_flaky.id],
+        run_async=False,
+    )
+    assert job["status"] == "completed_with_errors"
+    by_pid = {it["profile_id"]: it for it in job["items"]}
+
+    # LOGIN_LOST không được retry (attempts == 1)
+    assert by_pid[p_login_lost.id]["status"] == "failed"
+    assert by_pid[p_login_lost.id]["error_code"] == "LOGIN_LOST"
+    assert by_pid[p_login_lost.id]["attempts"] == 1
+
+    # Flaky thành công ở lần thử thứ 2
+    assert by_pid[p_flaky.id]["status"] == "completed"
+    assert by_pid[p_flaky.id]["attempts"] == 2
+
+
+def test_stage2_sync_job_api_endpoints_and_scheduler_actions(tmp_path, monkeypatch):
+    """Kiểm chứng các endpoint /api/fanpage-sync/jobs*, deduplication, cancel, retry và scheduler VALID_ACTIONS."""
+    from fastapi.testclient import TestClient
+    import web.app as app_mod
+    from antidetect.scheduler import ScheduleStore, VALID_ACTIONS
+
+    assert "sync_fanpages" in VALID_ACTIONS
+    assert "sync_fanpages_deep" in VALID_ACTIONS
+
+    sched_store = ScheduleStore(str(tmp_path / "schedules.json"))
+    rule = sched_store.add("Đồng bộ Fanpage sáng", "08:30", "sync_fanpages_deep")
+    assert rule["action"] == "sync_fanpages_deep"
+
+    pm = _make_isolated_pm(tmp_path, monkeypatch)
+    p1 = pm.create_profile(name="API Sync Profile 1", target_os="windows")
+
+    mock_launcher = MagicMock()
+    mock_launcher.is_running.return_value = False
+    mock_launcher.active_ports = {}
+
+    monkeypatch.setattr(app_mod, "profile_manager", pm)
+    monkeypatch.setattr(app_mod, "launcher", mock_launcher)
+    monkeypatch.setattr(app_mod, "DATA_DIR", str(tmp_path))
+    app_mod._fanpage_service_cache.clear()
+
+    client = TestClient(app_mod.app, base_url="http://127.0.0.1:8000")
+    r_login = client.post(
+        "/auth/login",
+        headers={"Authorization": "Bearer " + app_mod.app.state.access_key},
+    )
+    assert r_login.status_code == 200
+
+    # 1. Tạo job với auto_start=False khi profile đang đóng -> item sẽ skipped
+    r_create = client.post(
+        "/api/fanpage-sync/jobs",
+        json={"mode": "basic", "profile_ids": [p1.id], "auto_start": False},
+    )
+    assert r_create.status_code == 202
+    create_data = r_create.json()
+    assert create_data["success"] is True
+    job_id = create_data["job"]["id"]
+
+    # Chờ worker thread hoàn tất (rất nhanh vì profile đang đóng -> skipped ngay)
+    final_job = None
+    for _ in range(30):
+        r_get = client.get(f"/api/fanpage-sync/jobs/{job_id}")
+        assert r_get.status_code == 200
+        final_job = r_get.json()["job"]
+        if final_job["status"] not in ("queued", "running"):
+            break
+        import time
+        time.sleep(0.02)
+
+    assert final_job is not None
+    assert final_job["status"] == "completed_with_warnings"
+    assert final_job["items"][0]["status"] == "skipped"
+    assert final_job["items"][0]["error_code"] == "PROFILE_CLOSED"
+
+    # 2. GET /api/fanpage-sync/jobs
+    r_list = client.get("/api/fanpage-sync/jobs")
+    assert r_list.status_code == 200
+    assert any(j["id"] == job_id for j in r_list.json()["jobs"])
+
+    # 3. Chuẩn bị mock launch + fetch để retry job thành công
+    mock_launcher.launch.return_value = {"success": True, "port": 9333}
+    mock_launcher.stop.return_value = {"success": True}
+    mock_launcher.fetch_facebook_pages.return_value = {
+        "logged_in": True,
+        "login_status": True,
+        "discovery_status": "complete",
+        "completion_reason": "END_OF_LIST",
+        "observed_count": 1,
+        "pages": [
+            {
+                "id": "1000777666555",
+                "name": "Page Từ Retry Job",
+                "url": "https://www.facebook.com/profile.php?id=1000777666555",
+                "followers": 8900,
+                "followers_raw": "8,9K người theo dõi",
+                "detail_synced": True,
+            }
+        ],
+    }
+
+    r_retry = client.post(
+        f"/api/fanpage-sync/jobs/{job_id}/retry",
+        json={"auto_start": True},
+    )
+    assert r_retry.status_code == 202
+    retry_job_id = r_retry.json()["job"]["id"]
+    assert retry_job_id != job_id
+
+    retry_final = None
+    for _ in range(40):
+        r_get2 = client.get(f"/api/fanpage-sync/jobs/{retry_job_id}")
+        assert r_get2.status_code == 200
+        retry_final = r_get2.json()["job"]
+        if retry_final["status"] not in ("queued", "running"):
+            break
+        import time
+        time.sleep(0.02)
+
+    assert retry_final is not None
+    assert retry_final["status"] == "completed"
+    mock_launcher.launch.assert_called_once_with(p1.id)
+    mock_launcher.stop.assert_called_once_with(p1.id)
+
+    # Kiểm tra page đã được đồng bộ vào catalog SQLite sau khi job hoàn tất
+    r_pages = client.get("/api/fanpages")
+    assert r_pages.status_code == 200
+    items = r_pages.json()["items"]
+    assert len(items) == 1
+    assert items[0]["fb_page_id"] == "1000777666555"
+    assert items[0]["followers_count"] == 8900
+
+    # Retry lại một job đã completed hoàn toàn -> phải trả 400
+    r_retry_bad = client.post(f"/api/fanpage-sync/jobs/{retry_job_id}/retry")
+    assert r_retry_bad.status_code == 400
+
+
+def test_stage2_job_deduplication_and_cancellation(tmp_path, monkeypatch):
+    """Kiểm chứng deduplication khi đã có job đang queued/running và hủy job qua /cancel."""
+    from fastapi.testclient import TestClient
+    import web.app as app_mod
+
+    pm = _make_isolated_pm(tmp_path, monkeypatch)
+    p1 = pm.create_profile(name="Cancelable Profile 1", target_os="windows")
+    p2 = pm.create_profile(name="Cancelable Profile 2", target_os="windows")
+
+    mock_launcher = MagicMock()
+    mock_launcher.is_running.return_value = True
+    mock_launcher.active_ports = {}
+
+    monkeypatch.setattr(app_mod, "profile_manager", pm)
+    monkeypatch.setattr(app_mod, "launcher", mock_launcher)
+    monkeypatch.setattr(app_mod, "DATA_DIR", str(tmp_path))
+    app_mod._fanpage_service_cache.clear()
+
+    svc = app_mod.get_fanpage_service()
+    # Tạo sẵn 1 job ở trạng thái queued trong DB để mô phỏng job đang chạy/chờ
+    queued_job = svc.repo.create_sync_job(
+        job_id="fjob_active_test01",
+        mode="discovery",
+        profile_items=[
+            {"profile_id": p1.id, "profile_name": p1.name},
+            {"profile_id": p2.id, "profile_name": p2.name},
+        ],
+    )
+    assert queued_job["status"] == "queued"
+
+    client = TestClient(app_mod.app, base_url="http://127.0.0.1:8000")
+    client.post(
+        "/auth/login",
+        headers={"Authorization": "Bearer " + app_mod.app.state.access_key},
+    )
+
+    # Gọi tạo job mới khi đang có job active (force_new=False) -> trả về job cũ với deduplicated=True
+    r_dup = client.post(
+        "/api/fanpage-sync/jobs",
+        json={"mode": "discovery", "force_new": False},
+    )
+    assert r_dup.status_code == 202
+    dup_data = r_dup.json()
+    assert dup_data["deduplicated"] is True
+    assert dup_data["job"]["id"] == "fjob_active_test01"
+
+    # Hủy job đang active qua POST /api/fanpage-sync/jobs/{job_id}/cancel
+    r_cancel = client.post("/api/fanpage-sync/jobs/fjob_active_test01/cancel")
+    assert r_cancel.status_code == 200
+    canceled_job = r_cancel.json()["job"]
+    assert canceled_job["status"] == "cancelled"
+    assert all(it["status"] == "cancelled" for it in canceled_job["items"])
+
+

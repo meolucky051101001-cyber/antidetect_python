@@ -11,7 +11,7 @@ import csv
 import datetime
 import io
 import os
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from antidetect.facebook import (
     DEFAULT_DISPLAY_TIMEZONE,
@@ -27,6 +27,7 @@ from antidetect.fanpage_scan import (
     STATUS_PARTIAL,
 )
 
+from .jobs import FanpageSyncJobManager
 from .repository import FanpageRepository
 
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
@@ -76,6 +77,11 @@ class FanpageService:
         *,
         db_path: Optional[str] = None,
         stale_hours_fn: Optional[Callable[[], int]] = None,
+        launch_gate_check: Optional[Callable[[Any], Tuple[bool, Optional[str]]]] = None,
+        max_concurrent_profiles: int = 2,
+        max_retries: int = 2,
+        retry_delay_s: float = 0.5,
+        owner_instance: Optional[str] = None,
     ) -> None:
         self.profile_manager = profile_manager
         self.launcher = launcher
@@ -85,6 +91,17 @@ class FanpageService:
         self.db_path = db_path or os.path.join(data_dir, "fanpages.sqlite")
         self.repo = FanpageRepository(self.db_path)
         self._stale_hours_fn = stale_hours_fn or (lambda: STALE_AFTER_HOURS)
+        self.jobs = FanpageSyncJobManager(
+            repo=self.repo,
+            profile_manager=self.profile_manager,
+            launcher=self.launcher,
+            on_profile_synced=self.sync_from_profiles,
+            launch_gate_check=launch_gate_check,
+            max_concurrent_profiles=max_concurrent_profiles,
+            max_retries=max_retries,
+            retry_delay_s=retry_delay_s,
+            owner_instance=owner_instance,
+        )
 
     def _resolve_profile_connection(
         self,
@@ -437,15 +454,36 @@ class FanpageService:
 
         if connection_status:
             conn = connection_status.strip().lower()
-            result = [r for r in result if r.get("connection_status") == conn]
+            conn_aliases = {
+                "needs_relogin": {"needs_relogin", "login_required"},
+                "login_required": {"needs_relogin", "login_required"},
+                "ok": {"ok", "profile_open"},
+                "profile_open": {"ok", "profile_open"},
+            }
+            target_conns = conn_aliases.get(conn, {conn})
+            result = [r for r in result if r.get("connection_status") in target_conns]
 
         if data_quality:
             qual = data_quality.strip().lower()
-            result = [r for r in result if r.get("data_quality") == qual]
+            qual_aliases = {
+                "verified": {"verified", "fresh"},
+                "fresh": {"verified", "fresh"},
+            }
+            target_quals = qual_aliases.get(qual, {qual})
+            result = [r for r in result if r.get("data_quality") in target_quals]
 
         if age_ready is not None and str(age_ready).strip() != "":
-            want_ready = str(age_ready).strip().lower() in ("1", "true", "yes")
-            result = [r for r in result if bool(r.get("age_threshold_ready")) == want_ready]
+            age_val = str(age_ready).strip().lower()
+            if age_val == "unknown":
+                result = [r for r in result if r.get("age_days") is None]
+            else:
+                want_ready = age_val in ("1", "true", "yes")
+                result = [
+                    r
+                    for r in result
+                    if r.get("age_days") is not None
+                    and bool(r.get("age_threshold_ready")) == want_ready
+                ]
 
         if q and q.strip():
             needle = q.strip().lower()
@@ -724,7 +762,53 @@ class FanpageService:
             },
             "profiles": profile_breakdown,
             "tags": all_tags,
+            "active_sync_job": self.repo.find_active_sync_job(),
         }
+
+    def enqueue_sync_job(
+        self,
+        *,
+        mode: str = "discovery",
+        profile_ids: Optional[List[str]] = None,
+        page_ids: Optional[List[str]] = None,
+        auto_start: bool = False,
+        only_running: bool = False,
+        force_new: bool = False,
+        triggered_by: str = "user",
+        run_async: bool = True,
+    ) -> Tuple[Dict[str, Any], bool]:
+        return self.jobs.enqueue_job(
+            mode=mode,
+            profile_ids=profile_ids,
+            page_ids=page_ids,
+            auto_start=auto_start,
+            only_running=only_running,
+            force_new=force_new,
+            triggered_by=triggered_by,
+            run_async=run_async,
+        )
+
+    def get_sync_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        return self.repo.get_sync_job(job_id)
+
+    def list_sync_jobs(self, limit: int = 20) -> List[Dict[str, Any]]:
+        return self.repo.list_sync_jobs(limit=limit)
+
+    def cancel_sync_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        return self.jobs.cancel_job(job_id)
+
+    def retry_sync_job(
+        self,
+        job_id: str,
+        *,
+        auto_start: Optional[bool] = None,
+        run_async: bool = True,
+    ) -> Tuple[Dict[str, Any], bool]:
+        return self.jobs.retry_job(
+            job_id,
+            auto_start=auto_start,
+            run_async=run_async,
+        )
 
     def get_page(
         self,

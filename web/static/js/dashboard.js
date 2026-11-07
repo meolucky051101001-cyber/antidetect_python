@@ -1557,7 +1557,11 @@
             }
         }
         function actionLabel(a) {
-            return a === 'start_all' ? 'Mở tất cả' : a === 'stop_all' ? 'Đóng tất cả' : 'Sync vị trí theo proxy';
+            if (a === 'start_all') return 'Mở tất cả';
+            if (a === 'stop_all') return 'Đóng tất cả';
+            if (a === 'sync_fanpages') return 'Đồng bộ danh sách Fanpage';
+            if (a === 'sync_fanpages_deep') return 'Đồng bộ chi tiết Fanpage';
+            return 'Sync vị trí theo proxy';
         }
         async function createSchedule() {
             const time = document.getElementById('sched-time').value;

@@ -145,8 +145,8 @@ function renderAgeThresholdBadge(item) {
 
 function renderQualityBadge(item) {
     const q = item.data_quality;
-    if (q === 'verified') {
-        return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">Đã xác minh</span>';
+    if (q === 'verified' || q === 'fresh') {
+        return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">Đã xác minh (fresh)</span>';
     }
     if (q === 'stale') {
         return '<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30">Dữ liệu cũ (stale)</span>';
@@ -159,11 +159,17 @@ function renderQualityBadge(item) {
 
 function renderConnectionBadge(item) {
     const c = item.connection_status;
-    if (c === 'ok') {
-        return '<span class="text-[11px] text-emerald-400 flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Quét đầy đủ</span>';
+    if (c === 'ok' || c === 'profile_open') {
+        return '<span class="text-[11px] text-emerald-400 flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Profile đang mở</span>';
     }
-    if (c === 'needs_relogin') {
+    if (c === 'needs_relogin' || c === 'login_required') {
         return '<span class="text-[11px] text-rose-400 font-semibold flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span>Cần kiểm tra đăng nhập</span>';
+    }
+    if (c === 'identity_mismatch') {
+        return '<span class="text-[11px] text-rose-400 font-semibold flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span>Lệch tài khoản FB</span>';
+    }
+    if (c === 'cdp_degraded') {
+        return '<span class="text-[11px] text-amber-300 flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>CDP không ổn định</span>';
     }
     if (c === 'partial_discovery') {
         return '<span class="text-[11px] text-amber-300 flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>Discovery chưa trọn vẹn</span>';
@@ -174,7 +180,7 @@ function renderConnectionBadge(item) {
     if (c === 'profile_deleted') {
         return '<span class="text-[11px] text-rose-300 flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span>Profile gốc đã xóa</span>';
     }
-    return '<span class="text-[11px] text-slate-400 flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-slate-500"></span>Từ cache (chưa xác nhận)</span>';
+    return '<span class="text-[11px] text-slate-400 flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-slate-500"></span>Profile đang đóng (từ cache)</span>';
 }
 
 function getFilterQueryParams(pageOverride) {
@@ -229,6 +235,7 @@ async function loadSummaryAndFilters() {
         currentSummary = data;
         renderSummaryCards(data);
         populateFilterDropdowns(data);
+        updateActiveSyncBanner(data.active_sync_job || null);
     } catch (e) {
         // Không chặn bảng khi lỗi mạng tạm
     }
@@ -819,6 +826,305 @@ async function savePageDetail() {
         await applyFilters(currentPage);
     } catch (e) {
         showToast('Lỗi kết nối khi lưu: ' + e, 'error');
+    }
+}
+
+// --- Stage 2: Fanpage Sync Jobs Queue & Progress ---
+
+let activeSyncJob = null;
+let syncPollTimer = null;
+
+function updateActiveSyncBanner(job) {
+    activeSyncJob = job || null;
+    const banner = document.getElementById('active-sync-banner');
+    const titleEl = document.getElementById('active-sync-title');
+    const subEl = document.getElementById('active-sync-subtitle');
+    if (!banner || !titleEl || !subEl) return;
+
+    if (!job || (job.status !== 'queued' && job.status !== 'running')) {
+        banner.classList.add('hidden');
+        stopSyncJobPolling();
+        return;
+    }
+
+    const modeLabel = job.mode === 'basic' ? 'Basic (Chi tiết)' : 'Discovery (Danh sách)';
+    const counts = job.counts || {};
+    const done = Number(job.completed_items || 0);
+    const total = Number(job.total_items || 0);
+    titleEl.innerText = `Đang chạy Job ${job.id} · Chế độ: ${modeLabel} (${done}/${total} profile)`;
+    subEl.innerText = `Hoàn tất: ${counts.completed || 0} · Một phần: ${counts.partial || 0} · Bỏ qua: ${counts.skipped || 0} · Lỗi: ${counts.failed || 0}`;
+    banner.classList.remove('hidden');
+    ensureSyncJobPolling();
+}
+
+function ensureSyncJobPolling() {
+    if (syncPollTimer) return;
+    syncPollTimer = setInterval(async () => {
+        await pollActiveSyncJob();
+    }, 2000);
+}
+
+function stopSyncJobPolling() {
+    if (syncPollTimer) {
+        clearInterval(syncPollTimer);
+        syncPollTimer = null;
+    }
+}
+
+async function pollActiveSyncJob() {
+    try {
+        const res = await fetch('/api/fanpage-sync/jobs?limit=10', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        const wasRunning = !!(activeSyncJob && (activeSyncJob.status === 'queued' || activeSyncJob.status === 'running'));
+        updateActiveSyncBanner(data.active_job || null);
+
+        const modal = document.getElementById('syncJobModal');
+        if (modal && !modal.classList.contains('hidden')) {
+            renderSyncJobsList(data.jobs || []);
+        }
+
+        if (wasRunning && !data.active_job) {
+            showToast('Job đồng bộ fanpage đã hoàn tất!', 'success');
+            await applyFilters(currentPage || 1);
+        } else if (data.active_job) {
+            await applyFilters(currentPage || 1);
+        }
+    } catch (e) {}
+}
+
+async function openSyncJobModal() {
+    const modal = document.getElementById('syncJobModal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        safeCreateIcons();
+    }
+    await loadSyncJobs();
+}
+
+function closeSyncJobModal() {
+    const modal = document.getElementById('syncJobModal');
+    if (modal) {
+        modal.classList.add('hidden');
+    }
+}
+
+async function loadSyncJobs() {
+    const container = document.getElementById('sync-jobs-container');
+    try {
+        const res = await fetch('/api/fanpage-sync/jobs?limit=15', { cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            if (container) container.innerHTML = `<div class="text-rose-400">${escapeHtml(data.detail || 'Không tải được danh sách job.')}</div>`;
+            return;
+        }
+        updateActiveSyncBanner(data.active_job || null);
+        renderSyncJobsList(data.jobs || []);
+    } catch (e) {
+        if (container) container.innerHTML = `<div class="text-rose-400">Lỗi kết nối: ${escapeHtml(String(e))}</div>`;
+    }
+}
+
+function renderJobStatusBadge(status) {
+    if (status === 'completed') {
+        return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">Hoàn tất</span>';
+    }
+    if (status === 'running' || status === 'queued') {
+        return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30">Đang chạy</span>';
+    }
+    if (status === 'completed_with_warnings' || status === 'partial') {
+        return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/30">Hoàn tất (có bỏ qua/một phần)</span>';
+    }
+    if (status === 'completed_with_errors') {
+        return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30">Hoàn tất (có lỗi)</span>';
+    }
+    if (status === 'cancelled') {
+        return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-600/30 text-slate-300 border border-slate-500/40">Đã hủy</span>';
+    }
+    if (status === 'skipped') {
+        return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-600/30 text-slate-300 border border-slate-500/40">Bỏ qua</span>';
+    }
+    return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/15 text-rose-300 border border-rose-500/30">Lỗi</span>';
+}
+
+function renderSyncJobsList(jobs) {
+    const container = document.getElementById('sync-jobs-container');
+    if (!container) return;
+    if (!jobs || !jobs.length) {
+        container.innerHTML = '<div class="text-slate-500 italic py-4 text-center">Chưa có job đồng bộ nào được tạo.</div>';
+        return;
+    }
+
+    container.innerHTML = jobs.map(job => {
+        const isActive = job.status === 'queued' || job.status === 'running';
+        const items = job.items || [];
+        const hasRetryable = !isActive && items.some(it =>
+            it.status === 'failed' || it.status === 'partial' || it.status === 'skipped' || it.status === 'cancelled'
+        );
+        const modeText = job.mode === 'basic' ? 'Basic (Chi tiết)' : 'Discovery (Danh sách)';
+        const counts = job.counts || {};
+
+        const itemsHtml = items.map(it => {
+            const detail = it.detail || {};
+            const summaryText = detail.summary || it.error || '';
+            return `
+                <div class="flex flex-wrap items-center justify-between gap-2 py-1.5 border-t border-borderBg/50 text-[11px]">
+                    <div class="flex items-center space-x-2 min-w-0">
+                        <span class="font-medium text-slate-200 truncate">${escapeHtml(it.profile_name || it.profile_id)}</span>
+                        ${renderJobStatusBadge(it.status)}
+                        <span class="text-[10px] font-mono text-slate-500">lần thử: ${Number(it.attempts || 0)}</span>
+                    </div>
+                    <div class="text-slate-400 text-[11px] truncate max-w-md" title="${escapeHtml(summaryText)}">
+                        ${escapeHtml(summaryText || 'Đang chờ...')}
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        return `
+            <div class="bg-slate-900/50 border border-borderBg rounded-xl p-3.5 space-y-2.5">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="font-mono font-semibold text-slate-200">${escapeHtml(job.id)}</span>
+                        ${renderJobStatusBadge(job.status)}
+                        <span class="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 border border-borderBg">${escapeHtml(modeText)}</span>
+                        <span class="text-[11px] text-slate-400">${Number(job.completed_items || 0)}/${Number(job.total_items || 0)} profile</span>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        ${isActive ? `
+                            <button type="button" onclick="cancelSyncJobById('${escapeHtml(job.id)}')" class="px-2.5 py-1 bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/30 rounded-lg text-[11px] font-medium transition">
+                                Hủy Job
+                            </button>
+                        ` : ''}
+                        ${hasRetryable ? `
+                            <button type="button" onclick="retrySyncJobById('${escapeHtml(job.id)}')" class="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 rounded-lg text-[11px] font-semibold transition">
+                                Thử lại mục lỗi / bỏ qua
+                            </button>
+                        ` : ''}
+                    </div>
+                </div>
+                <div class="text-[11px] text-slate-500">
+                    Tạo lúc: ${escapeHtml(formatIsoVi(job.created_at))} · Hoàn tất: ${counts.completed || 0} · Một phần: ${counts.partial || 0} · Bỏ qua: ${counts.skipped || 0} · Lỗi: ${counts.failed || 0}
+                </div>
+                ${itemsHtml ? `<div class="pt-1">${itemsHtml}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+    safeCreateIcons();
+}
+
+async function startNewSyncJob() {
+    const mode = document.getElementById('sync-job-mode')?.value || 'discovery';
+    const scope = document.getElementById('sync-job-scope')?.value || 'all';
+    const autoStart = !!document.getElementById('sync-job-auto-start')?.checked;
+
+    const payload = {
+        mode,
+        auto_start: autoStart,
+        only_running: scope === 'running',
+    };
+    if (scope === 'filtered') {
+        const filteredProfileId = document.getElementById('filter-profile')?.value || '';
+        if (!filteredProfileId) {
+            showToast('Hãy chọn 1 profile ở bộ lọc ngoài bảng hoặc đổi phạm vi sang Toàn bộ profile.', 'warning');
+            return;
+        }
+        payload.profile_ids = [filteredProfileId];
+    }
+
+    await enqueueSyncJobRequest(payload);
+}
+
+async function enqueueSyncForSelectedPages() {
+    const ids = Array.from(selectedPageIds);
+    if (!ids.length) return;
+    await enqueueSyncJobRequest({
+        mode: 'basic',
+        page_ids: ids,
+        auto_start: true,
+    });
+}
+
+async function enqueueSyncForDetailPage() {
+    const internalId = document.getElementById('detail-internal-id')?.value;
+    const profileId = document.getElementById('detail-open-profile-select')?.value || '';
+    if (!internalId) return;
+    const payload = {
+        mode: 'basic',
+        auto_start: true,
+    };
+    if (profileId) {
+        payload.profile_ids = [profileId];
+    } else {
+        payload.page_ids = [internalId];
+    }
+    await enqueueSyncJobRequest(payload);
+}
+
+async function enqueueSyncJobRequest(payload) {
+    try {
+        const res = await fetch('/api/fanpage-sync/jobs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Không tạo được job đồng bộ.', 'error');
+            return;
+        }
+        if (data.deduplicated) {
+            showToast('Đang có một job đồng bộ đang chạy; đã gắn vào tiến trình hiện tại.', 'info');
+        } else {
+            showToast(`Đã đưa job đồng bộ (${data.job?.id || ''}) vào hàng đợi.`, 'success');
+        }
+        updateActiveSyncBanner(data.job || null);
+        await loadSyncJobs();
+    } catch (e) {
+        showToast('Lỗi kết nối khi tạo job đồng bộ: ' + e, 'error');
+    }
+}
+
+async function cancelActiveSyncJob() {
+    if (!activeSyncJob || !activeSyncJob.id) return;
+    await cancelSyncJobById(activeSyncJob.id);
+}
+
+async function cancelSyncJobById(jobId) {
+    try {
+        const res = await fetch(`/api/fanpage-sync/jobs/${encodeURIComponent(jobId)}/cancel`, {
+            method: 'POST',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Không hủy được job.', 'error');
+            return;
+        }
+        showToast(`Đã gửi yêu cầu hủy job ${jobId}.`, 'info');
+        await loadSyncJobs();
+        await applyFilters(currentPage || 1);
+    } catch (e) {
+        showToast('Lỗi khi hủy job: ' + e, 'error');
+    }
+}
+
+async function retrySyncJobById(jobId) {
+    try {
+        const res = await fetch(`/api/fanpage-sync/jobs/${encodeURIComponent(jobId)}/retry`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auto_start: true }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Không thử lại được job.', 'error');
+            return;
+        }
+        showToast(`Đã tạo job thử lại (${data.job?.id || ''}).`, 'success');
+        updateActiveSyncBanner(data.job || null);
+        await loadSyncJobs();
+    } catch (e) {
+        showToast('Lỗi khi thử lại job: ' + e, 'error');
     }
 }
 
