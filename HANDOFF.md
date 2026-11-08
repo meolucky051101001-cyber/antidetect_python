@@ -1,4 +1,4 @@
-# HANDOFF — Antidetect Python (cập nhật 2026-11-07; đã commit F1–F4 + nghiệm thu Soak 12h)
+# HANDOFF — Antidetect Python (cập nhật 2026-11-08; đã commit Fanpages 1-3, Tab Persistence, Soak Hardening)
 
 Điểm bắt đầu cho model/người tiếp nhận. Mô tả **trạng thái thật hiện tại**.
 Đọc hết mục "Quy tắc an toàn" trước khi sửa code.
@@ -7,30 +7,40 @@
 
 ## 1. Trạng thái một câu
 
-Tool hoàn chỉnh ở mức production-ready có điều kiện: **codebase tại `93a76ab`**
-trên nhánh `master`, **working tree sạch** (đợt sửa ổn định F1–F4 `b3795eb` và
-soak runner `0d52f4c`/`93a76ab` đã commit; xem mục 1.1). Đo ngày 2026-11-07 trên
-data tạm riêng: **407 pytest passed + 1 skipped** (Playwright UI smoke skip vì
-chưa đặt `ANTIDETECT_RUN_UI_SMOKE=1`), ruff và `compileall` sạch; **Soak 12h
-trên data tạm cô lập đạt PASS** (`1439` samples, `71` lifecycle cycles, `143`
-tab cycles, `2` copy cycles, `2` memory_shed bảo vệ RAM, `0` errors, `0`
-orphan_processes). **Coverage chưa đo lại** trong đợt này (lần cuối 71%, gate
-58% trên commit `42e61e8` ngày 2026-11-04). **E2E smoke 24/24 và Playwright UI
-smoke 1/1 chưa chạy lại trên HEAD hiện tại** — số gần nhất đo 2026-10-26.
-Roadmap P0 + P1 + P2 đã commit (`61ab5ec`); sau đó bổ sung fingerprint health
-center + pre-launch gate (`8093392`), hardening proxy/launch (`51bb963`), fix
-CI httpx2 (`313faab`), fix scrape Fanpage (`0390ee8`), và đợt ổn định F1–F4 +
-soak runner (`b3795eb`..`93a76ab`).
-Fingerprint đạt "không phân biệt được khỏi Chrome thật trên máy" trong phạm vi
-đã đo (CreepJS/Iphey bằng baseline clean; Pixelscan masking detected chỉ ở chế
-độ Unique — đúng thiết kế). Dashboard quản lý đầy đủ; scheduler có lease
-heartbeat, run history bền vững và `run_id` idempotency; logging rotating +
-metrics API; launcher/stealth/web/dashboard đã tách module theo P1. P2 đã có
-bulk job xuyên instance (`data/bulk_jobs.json`) và nâng cấp/rollback có chữ ký
-Ed25519 (`tools/release.py`/`tools/update.py`, version **1.1.0**, không auto
-update).
+Tool hoàn chỉnh ở mức production-ready có điều kiện: **codebase tại `352186c`**
+trên nhánh `master`, **working tree sạch** (đã push đồng bộ `origin/master`). Đo ngày 2026-11-08 trên
+data tạm riêng: **447 pytest passed + 1 skipped** (Playwright UI smoke skip vì
+chưa đặt `ANTIDETECT_RUN_UI_SMOKE=1`), ruff và `compileall` sạch; **Soak 12.3h
+trên data tạm cô lập đạt PASS** (`1472` samples, `73` lifecycle cycles, `147`
+tab cycles, `2` copy cycles, `1` memory_shed bảo vệ RAM, `0` errors, `0`
+orphan_processes). Tính năng **tự động lưu và khôi phục tab hoạt động** (`9012b18`)
+và **hệ thống Fanpages Giai đoạn 1-3** (`7de76f7`..`73ebff5`) đã hoàn thành và tích hợp đầy đủ.
 
-### 1.1. Đợt sửa ổn định F1–F4 & Soak Runner — 05–07/11/2026 (ĐÃ COMMIT)
+### 1.1. Các đợt nâng cấp mới nhất — 07–08/11/2026 (ĐÃ COMMIT)
+
+- **Fanpages Giai đoạn 1–3 (`7de76f7`, `dd8f549`, `73ebff5`):** Catalog gom nhóm,
+  chuẩn hóa định danh page, lọc trùng lặp đa tầng, API CRUD + UI Dashboard; Collector
+  thu thập cơ bản, hàng đợi đồng bộ bất đồng bộ (`sync job queue`); Time-series metrics,
+  cảnh báo trùng lặp (deduplicated alerts), cơ chế tự phục hồi và sao lưu tự động.
+- **Tab Persistence & Restoration (`9012b18`):** `session_tabs` trong `profiles.json`;
+  khi tắt profile tự động lưu toàn bộ URL các tab đang duyệt; khi mở lại profile
+  tự động mở lại đúng danh sách tab qua CDP Target API.
+- **Hardening Stop Grace Period & Soak Runner (`352186c`):** Polling 4.0s sau
+  `taskkill /F` trong `launcher.py`, nới rộng timeout lock `launcher.stop` lên 4.0s,
+  loại trừ false positive `missing_chrome` trong `soak_test.py`, offset lệch pha giữa
+  `tab_cycle` và `lifecycle_cycle` để triệt tiêu race condition khi RAM hệ thống thấp.
+- **Bằng chứng kiểm thử (2026-11-08):**
+  - Unit/API/storage suite: **447 passed + 1 skipped** (31s); ruff/compileall sạch;
+    `data/profiles.json` giữ nguyên hash baseline
+    `B26426E4E9945CEEB81D163637D589D25F7D98789D031D6DA21CD252410B8ABA`.
+  - **Soak 12.3h (2026-11-08 00:39 → 12:56 UTC+7): PASS** (dừng theo lệnh người dùng:
+    `samples=1472`, `lifecycle_cycles=73`, `tab_cycles=147`, `copy_cycles=2`,
+    `tabs_opened=709`, `tabs_closed=704`, `memory_shed=1`, `errors=0`,
+    `orphan_processes=0`, server RSS ổn định ~54.7MB).
+  - **Soak hiện tại (`antidetect-soak-20261108-134451`):** Khởi chạy lúc 13:44 ngày 08/11/2026,
+    5/5 profile healthy, 0 lỗi, đang chạy ngầm trong `%TEMP%`.
+
+### 1.2. Đợt sửa ổn định F1–F4 & Soak Runner — 05–07/11/2026 (ĐÃ COMMIT)
 
 - **F1 (`b3795eb`):** `antidetect/cdp_health.py` + guard trong launcher; Chrome sống và CDP
   healthy là hai tín hiệu riêng; `degraded`/`recovery_required` không bị báo
