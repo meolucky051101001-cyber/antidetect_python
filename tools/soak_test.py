@@ -289,6 +289,9 @@ class SoakRunner:
         self.args = args
         self.hours = float(args.hours)
         self.target_profiles = max(1, int(args.profiles))
+        self.min_active = min(
+            max(0, int(getattr(args, "min_active", 0))), self.target_profiles
+        )
         self.port = int(args.port or _free_port())
         self.base = f"http://127.0.0.1:{self.port}"
         self.data_dir = os.path.abspath(args.data_dir)
@@ -317,6 +320,7 @@ class SoakRunner:
         self._tabs_opened = 0
         self._tabs_closed = 0
         self._shed_count = 0
+        self._shed_blocked_logged = False
         self._cycle_index = 0
         self._copy_index = 0
         self._api_latencies = []
@@ -339,6 +343,7 @@ class SoakRunner:
             "data_dir": self.data_dir,
             "results_dir": self.results_dir,
             "target_profiles": self.target_profiles,
+            "min_active": self.min_active,
             "profiles": [],
             "counters": {
                 "samples": 0,
@@ -703,6 +708,7 @@ class SoakRunner:
                 self._low_memory_samples += 1
             else:
                 self._low_memory_samples = 0
+                self._shed_blocked_logged = False
         artifacts = self._artifact_counts()
         sample = {
             "at": _now_iso(),
@@ -776,6 +782,16 @@ class SoakRunner:
         active = [item for item in self.profiles if item["active"]]
         if not active:
             return
+        if len(active) <= self.min_active:
+            self._low_memory_samples = 0
+            if not self._shed_blocked_logged:
+                self._shed_blocked_logged = True
+                self._event(
+                    "shed_blocked_min_active",
+                    active=len(active),
+                    available_mb=round(self._available_mb() or 0, 1),
+                )
+            return
         chrome = _chrome_processes(self._chrome_map())
         victim = max(
             active,
@@ -842,6 +858,15 @@ class SoakRunner:
                     break
             self._save()
             return
+        if len(active) < self.min_active:
+            for profile in self.profiles:
+                if not profile["active"] and self._start_profile(profile):
+                    break
+            self._save()
+            return
+        if len(active) <= self.min_active:
+            self._event("lifecycle_skipped_min_active", active=len(active))
+            return
         profile = active[self._cycle_index % len(active)]
         self._cycle_index += 1
         stopped = self._stop_profile(profile, "cycle")
@@ -856,7 +881,7 @@ class SoakRunner:
         if self.critical:
             return
         candidates = [item for item in self.profiles if item["active"]]
-        if not candidates:
+        if not candidates or len(candidates) <= self.min_active:
             return
         source = candidates[self._copy_index % len(candidates)]
         self._copy_index += 1
@@ -1023,6 +1048,7 @@ class SoakRunner:
             "completed_duration": completed,
             "duration_seconds": round(duration, 1),
             "planned_hours": self.hours,
+            "min_active": self.min_active,
             "stop_requested": self.stop_requested,
             "critical_reason": self.critical_reason,
             "samples": self._sample_count,
@@ -1129,6 +1155,7 @@ def main(argv=None):
     run_parser = sub.add_parser("run", help="Chạy soak")
     run_parser.add_argument("--hours", type=float, default=24.0)
     run_parser.add_argument("--profiles", type=int, default=5)
+    run_parser.add_argument("--min-active", type=int, default=0)
     run_parser.add_argument("--port", type=int, default=0)
     run_parser.add_argument("--data-dir", default="")
     run_parser.add_argument("--results-dir", default="")
