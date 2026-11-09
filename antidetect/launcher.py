@@ -513,6 +513,24 @@ class BrowserLauncher:
                 time.sleep(0.2)
         return identity
 
+    def _identity_for_owner(self, pid, user_data_dir, timeout: float = 5.0):
+        """Retry unknown identity for up to ``timeout`` seconds."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        identity = self._identity_for(pid, user_data_dir)
+        while identity["state"] == "unknown" and time.monotonic() < deadline:
+            time.sleep(0.25)
+            identity = self._identity_for(pid, user_data_dir)
+        return identity
+
+    def _wait_identity_gone(self, pid, user_data_dir, timeout: float) -> str:
+        """Poll until the PID is absent; unknown is retried, never success."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        state = self._identity_for(pid, user_data_dir)["state"]
+        while state not in ("absent", "mismatch") and time.monotonic() < deadline:
+            time.sleep(0.25)
+            state = self._identity_for(pid, user_data_dir)["state"]
+        return state
+
     def _clear_process(self, profile_id):
         record = self._runtime_store.get(profile_id) or {}
         requested = self._requested_ports.pop(profile_id, None) or record.get("requested_port")
@@ -2490,6 +2508,7 @@ class BrowserLauncher:
                 if identity["state"] != "owned":
                     return _stop_failed("Chưa xác minh được tiến trình của profile; không gửi lệnh tắt.")
             try:
+                exited = False
                 if sys.platform == "win32":
                     # First request normal closure; always continue to /F when
                     # graceful taskkill fails or the process does not exit. The
@@ -2498,7 +2517,7 @@ class BrowserLauncher:
                     last_error = ""
                     for force in (False, True):
                         if not proc:
-                            current = self._identity_for_stop(pid, user_data_dir)
+                            current = self._identity_for_owner(pid, user_data_dir)
                             if current["state"] in ("absent", "mismatch"):
                                 break
                             if current["state"] == "unknown":
@@ -2515,7 +2534,12 @@ class BrowserLauncher:
                                 timeout=8,
                                 creationflags=flags,
                             )
-                            if result.returncode != 0:
+                            if result.returncode == 0:
+                                # taskkill không /F báo lỗi với process con của
+                                # Chrome; lỗi đó không được dính vào kết quả khi
+                                # lượt /F sau đã thành công.
+                                last_error = ""
+                            else:
                                 stderr = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
                                 last_error = stderr or f"taskkill exit {result.returncode}"
                         except (OSError, subprocess.SubprocessError) as e:
@@ -2528,15 +2552,14 @@ class BrowserLauncher:
                                 pass
                             if proc.poll() is not None:
                                 break
-                        else:
-                            for _ in range(10):
-                                if self._identity_for(pid, user_data_dir)["state"] in ("absent", "mismatch"):
-                                    break
-                                time.sleep(0.2)
-                            if self._identity_for(pid, user_data_dir)["state"] in ("absent", "mismatch"):
-                                break
-                    # Cho thêm grace period để Windows hoàn tất reap tiến trình sau lệnh taskkill /F
-                    if proc and proc.poll() is None:
+                        elif self._wait_identity_gone(pid, user_data_dir, 4.0) in (
+                            "absent",
+                            "mismatch",
+                        ):
+                            break
+                    # Windows có thể giữ PID hiện thêm vài giây sau taskkill /F.
+                    final_state = ""
+                    if proc:
                         for _ in range(8):
                             try:
                                 proc.wait(timeout=0.5)
@@ -2544,14 +2567,23 @@ class BrowserLauncher:
                                 pass
                             if proc.poll() is not None:
                                 break
-                    elif not proc and self._identity_for(pid, user_data_dir)["state"] not in ("absent", "mismatch"):
-                        for _ in range(10):
-                            if self._identity_for(pid, user_data_dir)["state"] in ("absent", "mismatch"):
-                                break
-                            time.sleep(0.2)
-                    if not (proc.poll() is not None if proc else self._identity_for(pid, user_data_dir)["state"] in ("absent", "mismatch")):
+                        exited = proc.poll() is not None
+                    else:
+                        final_state = self._wait_identity_gone(pid, user_data_dir, 10.0)
+                        if final_state not in ("absent", "mismatch"):
+                            # Một lần CIM timeout không chứng minh browser còn
+                            # sống; hỏi lại lần cuối trước khi giữ trạng thái.
+                            final_state = self._identity_for_owner(
+                                pid, user_data_dir, 5.0
+                            )["state"]
+                        exited = final_state in ("absent", "mismatch")
+                    if not exited:
                         detail = f" ({last_error})" if last_error else ""
-                        return _stop_failed(f"Windows chưa dừng được trình duyệt{detail}. Dữ liệu trạng thái được giữ nguyên.")
+                        state_note = "" if proc else f" [xác minh cuối: {final_state}]"
+                        return _stop_failed(
+                            f"Windows chưa dừng được trình duyệt{detail}{state_note}. "
+                            "Dữ liệu trạng thái được giữ nguyên."
+                        )
                 elif proc:
                     proc.terminate()
                     try:
@@ -2559,9 +2591,9 @@ class BrowserLauncher:
                     except subprocess.TimeoutExpired:
                         proc.kill()
                         proc.wait(timeout=5)
+                    exited = proc.poll() is not None
                 else:
                     return _stop_failed("Không xác minh được quyền sở hữu tiến trình.")
-                exited = proc.poll() is not None if proc else self._identity_for(pid, user_data_dir)["state"] in ("absent", "mismatch")
                 if not exited:
                     return _stop_failed("Trình duyệt vẫn đang chạy; chưa thể báo đã dừng.")
             except (OSError, subprocess.SubprocessError):

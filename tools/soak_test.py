@@ -39,6 +39,10 @@ EVENTS_FILENAME = "soak_events.jsonl"
 METRICS_FILENAME = "soak_metrics.jsonl"
 STOP_FILENAME = "STOP"
 MAX_ERRORS = 100
+# 409 này thường chỉ là CDP chưa sẵn sàng dưới áp lực RAM; thử lại một lần
+# trước khi ghi error để retry thành công không bị tính là lỗi chức năng.
+TRANSIENT_TAB_CONFLICT_CODES = {"CDP_STARTING", "CDP_UNHEALTHY", "PROFILE_BUSY"}
+OPEN_TAB_RETRY_DELAY = 2.0
 
 
 def _now_iso():
@@ -807,6 +811,48 @@ class SoakRunner:
         )
         self._stop_profile(victim, "memory_shed")
 
+    def _open_soak_tab(self, profile, url):
+        """POST start?url, retry once on a transient CDP conflict."""
+        path = (
+            f"/api/profiles/{profile['id']}/start?"
+            f"{urllib.parse.urlencode({'url': url})}"
+        )
+
+        def _post():
+            status, body, _latency, error = _http(
+                self.base, "POST", path, token=self.token, timeout=60
+            )
+            ok = status == 200 and bool(body.get("success"))
+            code = body.get("code") if isinstance(body, dict) else None
+            health = body.get("cdp_health") if isinstance(body, dict) else None
+            reason = health.get("reason") if isinstance(health, dict) else None
+            detail = (
+                (body.get("detail") or body.get("error") or reason or error)
+                if isinstance(body, dict)
+                else error
+            )
+            return ok, status, code, detail
+
+        ok, status, code, detail = _post()
+        first_code = code
+        if not ok and first_code in TRANSIENT_TAB_CONFLICT_CODES:
+            time.sleep(OPEN_TAB_RETRY_DELAY)
+            ok, status, code, detail = _post()
+            if ok:
+                self._event(
+                    "open_tab_retry_ok",
+                    profile=profile["name"],
+                    code=first_code,
+                )
+        if ok:
+            return True, None, None
+        parts = [f"HTTP {status}"]
+        if code:
+            parts.append(str(code))
+        if detail:
+            parts.append(str(detail))
+        return False, " | ".join(parts), code
+
     def _tab_cycle(self):
         opened = 0
         closed = 0
@@ -816,20 +862,15 @@ class SoakRunner:
             if not profile["active"] or not profile.get("port"):
                 continue
             url = f"{self.soak_base}/soak?profile={profile['id']}"
-            status, body, _latency, error = _http(
-                self.base,
-                "POST",
-                f"/api/profiles/{profile['id']}/start?{urllib.parse.urlencode({'url': url})}",
-                token=self.token,
-                timeout=60,
-            )
-            if status == 200 and body.get("success"):
+            ok, failure, code = self._open_soak_tab(profile, url)
+            if ok:
                 opened += 1
                 _hide_pid(profile.get("pid"))
             else:
                 self._error(
                     "open_tab",
-                    f"{profile['name']}: {error or body.get('detail') or body.get('error')}",
+                    f"{profile['name']}: {failure}",
+                    code=code,
                 )
             try:
                 _pages, closed_here, close_error = _close_soak_tabs(

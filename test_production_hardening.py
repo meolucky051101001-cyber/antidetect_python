@@ -314,6 +314,119 @@ def test_stop_retries_transient_unknown_identity(monkeypatch):
         launcher.unregister_cleanup()
 
 
+def test_stop_does_not_report_stale_graceful_taskkill_error(monkeypatch):
+    m = ProfileManager()
+    launcher = BrowserLauncher(m)
+    p = m.create_profile("stop-force-stderr")
+    user_data_dir = os.path.join(storage_module.DATA_DIR, "profiles", p.id, "user_data")
+    launcher._runtime_store.upsert(
+        p.id, pid=424242, port=9333, user_data_dir=user_data_dir
+    )
+
+    monkeypatch.setattr(
+        launcher_module,
+        "read_browser_identity",
+        lambda _pid, _udd: {"state": "owned", "port": 9333, "created": "c1"},
+    )
+    # Browser vẫn còn sống sau /F để buộc stop trả 409 và lộ message.
+    monkeypatch.setattr(launcher, "_wait_identity_gone", lambda *_a, **_k: "owned")
+    taskkills = []
+
+    def fake_run(args, **_kwargs):
+        taskkills.append(args)
+        if "/F" in args:
+            return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout=b"",
+            stderr=(
+                b"ERROR: child process could not be terminated. Reason: This "
+                b"process can only be terminated forcefully (with /F option)."
+            ),
+        )
+
+    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+    try:
+        result = launcher.stop(p.id)
+        assert result["success"] is False
+        assert result["code"] == "STOP_FAILED"
+        assert any("/F" in args for args in taskkills)
+        # Lỗi WM_CLOSE của lượt graceful không được dính vào kết quả /F.
+        assert "can only be terminated forcefully" not in result["error"]
+        assert "xác minh cuối: owned" in result["error"]
+    finally:
+        launcher.unregister_cleanup()
+        launcher._runtime_store.remove(p.id)
+        m.delete_profile(p.id)
+
+
+def test_stop_confirms_exit_after_transient_final_identity(monkeypatch):
+    m = ProfileManager()
+    launcher = BrowserLauncher(m)
+    p = m.create_profile("stop-final-rescue")
+    user_data_dir = os.path.join(storage_module.DATA_DIR, "profiles", p.id, "user_data")
+    launcher._runtime_store.upsert(
+        p.id, pid=424242, port=9333, user_data_dir=user_data_dir
+    )
+    identities = iter(
+        [
+            {"state": "owned", "port": 9333, "created": "c1"},
+            {"state": "owned", "port": 9333, "created": "c1"},
+            {"state": "owned", "port": 9333, "created": "c1"},
+            {"state": "absent", "port": None, "created": None},
+        ]
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "read_browser_identity",
+        lambda _pid, _udd: next(
+            identities, {"state": "absent", "port": None, "created": None}
+        ),
+    )
+    # Các vòng chờ sau taskkill đều thấy owned (Windows reap chậm); lần hỏi
+    # quyết định cuối cùng mới thấy absent — stop phải báo thành công.
+    monkeypatch.setattr(launcher, "_wait_identity_gone", lambda *_a, **_k: "owned")
+    monkeypatch.setattr(
+        launcher_module.subprocess,
+        "run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args, 0, stdout=b"", stderr=b""
+        ),
+    )
+    try:
+        result = launcher.stop(p.id)
+        assert result["success"] is True
+        assert launcher._runtime_store.get(p.id) is None
+    finally:
+        launcher.unregister_cleanup()
+        launcher._runtime_store.remove(p.id)
+        m.delete_profile(p.id)
+
+
+def test_wait_identity_gone_retries_unknown_without_failing(monkeypatch):
+    m = ProfileManager()
+    launcher = BrowserLauncher(m)
+    states = iter(
+        [
+            {"state": "unknown", "port": None, "created": None},
+            {"state": "unknown", "port": None, "created": None},
+            {"state": "absent", "port": None, "created": None},
+        ]
+    )
+    monkeypatch.setattr(
+        launcher,
+        "_identity_for",
+        lambda *_a, **_k: next(
+            states, {"state": "absent", "port": None, "created": None}
+        ),
+    )
+    try:
+        assert launcher._wait_identity_gone(123, "C:/tmp/udd", 2.0) == "absent"
+    finally:
+        launcher.unregister_cleanup()
+
+
 @pytest.mark.parametrize("recovered_state", ["owned", "unknown"])
 def test_recovered_runtime_requires_stop_before_reuse(monkeypatch, recovered_state):
     m = ProfileManager()
