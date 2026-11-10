@@ -2235,6 +2235,16 @@ async def stop_profile(profile_id: str):
     return res
 
 
+@app.post("/api/profiles/{profile_id}/stop/owned")
+async def stop_owned_profile(profile_id: str, expected_launch_id: str):
+    if not expected_launch_id.strip():
+        raise HTTPException(status_code=400, detail="Thiếu định danh phiên profile.")
+    res = await asyncio.to_thread(launcher.stop, profile_id, expected_launch_id=expected_launch_id)
+    if not res.get("success"):
+        raise HTTPException(status_code=409, detail=res.get("error", "Không thể dừng phiên profile."))
+    return res
+
+
 @app.post("/api/proxy/check")
 async def check_proxy_endpoint(req: CheckProxyRequest):
     if req.profile_id and not req.password:
