@@ -2424,12 +2424,17 @@ class BrowserLauncher:
                     "error": "Lỗi khởi chạy trình duyệt. Vui lòng thử lại.",
                 }
 
-    def stop(self, profile_id: str) -> Dict[str, Any]:
+    def stop(self, profile_id: str, *, expected_launch_id: Optional[str] = None) -> Dict[str, Any]:
         """Instrumented entrypoint; see ``_stop_impl`` for the real flow."""
         metrics.inc("stop_attempts")
         try:
             with self._lifecycle_locks.acquire(profile_id, timeout=4.0):
-                result = self._stop_impl(profile_id)
+                with self._launch_locks[profile_id]:
+                    current = self.cdp_health.current_launch_id(profile_id)
+                    if expected_launch_id is not None and current != expected_launch_id:
+                        result = {"success": False, "code": "SESSION_CHANGED", "error": "Phiên profile đã thay đổi."}
+                    else:
+                        result = self._stop_impl(profile_id)
         except ProfileLockTimeout:
             result = {
                 "success": False,
