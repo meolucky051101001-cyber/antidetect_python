@@ -124,7 +124,7 @@ def test_cleanup_on_exit_only_stops_own_processes(monkeypatch):
     launcher = BrowserLauncher(m)
     stopped = []
 
-    def fake_stop(profile_id):
+    def fake_stop(profile_id, **kwargs):
         stopped.append(profile_id)
         return {"success": True}
 
@@ -136,6 +136,7 @@ def test_cleanup_on_exit_only_stops_own_processes(monkeypatch):
     assert stopped == [], "atexit không được dừng browser theo runtime store"
 
     launcher.active_processes["own-profile"] = object()  # đủ cho iteration
+    launcher.cdp_health.begin_launch("own-profile", launcher.instance_id)
     launcher._cleanup_on_exit()
     assert stopped == ["own-profile"]
     launcher.unregister_cleanup()
@@ -283,6 +284,20 @@ def test_identity_unknown_is_not_cached(monkeypatch):
     second = process_identity.read_browser_identity(424242, user_data_dir)
     assert second["state"] == "owned"
     assert second["port"] == 9333
+
+
+def test_conditional_stop_cannot_stop_replacement_session(monkeypatch):
+    launcher = BrowserLauncher(ProfileManager())
+    try:
+        monkeypatch.setattr(launcher.cdp_health, "current_launch_id", lambda _: "replacement")
+        stopped = []
+        monkeypatch.setattr(launcher, "_stop_impl", lambda profile_id: stopped.append(profile_id) or {"success": True})
+        assert launcher.stop("profile", expected_launch_id="old")["code"] == "SESSION_CHANGED"
+        assert stopped == []
+        assert launcher.stop("profile", expected_launch_id="replacement")["success"] is True
+        assert stopped == ["profile"]
+    finally:
+        launcher.unregister_cleanup()
 
 
 def test_stop_retries_transient_unknown_identity(monkeypatch):
@@ -663,11 +678,23 @@ def test_ui_schedule_scope_and_browser_pin_present():
 
 
 def test_cli_delete_stops_browser_first():
-    src = open(os.path.join(BASE_DIR, "cli.py"), encoding="utf-8").read()
-    block = src[src.index('args.command == "delete"'):]
-    stop_pos = block.index("launcher.stop(args.id)")
-    delete_pos = block.index("manager.delete_profile(args.id)")
-    assert stop_pos < delete_pos, "CLI phải dừng browser trước khi xóa profile"
+    from antidetect.profile_lifecycle import stop_and_delete
+
+    m = ProfileManager()
+    p = m.create_profile("delete-transaction")
+    events = []
+    class Launcher:
+        def stop(self, profile_id):
+            assert m.get_profile(profile_id) is not None
+            events.append("stopped")
+            return {"success": True}
+    try:
+        assert stop_and_delete(m, Launcher(), p.id)["success"]
+        assert events == ["stopped"]
+        assert m.get_profile(p.id) is None
+    finally:
+        if m.get_profile(p.id):
+            m.delete_profile(p.id)
 
 
 def test_ensure_profiles_file_uses_unique_tmp():
@@ -1932,6 +1959,7 @@ def test_scheduler_heartbeat_renews_lease_during_long_callback(tmp_path):
             )
         )
         done.set()
+        return {"success": True}
 
     scheduler = Scheduler(
         store,
@@ -1980,33 +2008,24 @@ def test_scheduler_run_history_persists_and_caps(tmp_path):
 
 
 def test_scheduler_callback_failure_releases_claim_for_retry(tmp_path):
-    from datetime import datetime
-    from antidetect.scheduler import ScheduleStore, Scheduler
+    from datetime import datetime, timedelta
+    from antidetect.scheduler import ActionResult, ScheduleStore
 
-    store = ScheduleStore(str(tmp_path / "schedules.json"))
-    store.add("Retry", datetime.now().strftime("%H:%M"), "start_all",
-              profile_ids=["selected"])
-    attempts = []
-    succeeded = threading.Event()
-
-    def fail_once(ids):
-        attempts.append(ids)
-        if len(attempts) == 1:
-            raise RuntimeError("fail once")
-        succeeded.set()
-
-    scheduler = Scheduler(store, {"start_all": fail_once}, check_interval=0.02)
-    scheduler.start()
-    try:
-        assert succeeded.wait(3)
-    finally:
-        scheduler.stop()
-        scheduler.join(timeout=2)
-    assert not scheduler.is_alive()
-    assert attempts == [["selected"], ["selected"]]
-    stored = store.list()[0]
-    assert stored["last_run_date"] is not None
-    assert "_run_claim" not in stored
+    path = str(tmp_path / "schedules.json")
+    store = ScheduleStore(path)
+    now = datetime.now().replace(second=0, microsecond=0)
+    rule = store.add("Retry", now.strftime("%H:%M"), "start_all", profile_ids=["selected"])
+    assert store.claim_due(rule["id"], now, 60, "first")
+    result = store.finish_result(rule["id"], "first", ActionResult("failed", "NETWORK_ERROR", retryable=True), now)
+    assert result["attempts"] == 1 and result["terminal"] is False
+    # Persisted delay survives restart, without blocking the runner thread.
+    restarted = ScheduleStore(path)
+    assert restarted.claim_due(rule["id"], now + timedelta(seconds=29), 60, "early") is None
+    assert restarted.claim_due(rule["id"], now + timedelta(seconds=30), 60, "second")
+    result = restarted.finish_result(rule["id"], "second", ActionResult("succeeded"), now + timedelta(seconds=30))
+    assert result["attempts"] == 2 and result["terminal"] is True
+    assert restarted.list()[0]["last_run_date"] == now.strftime("%Y-%m-%d")
+    assert restarted.claim_due(rule["id"], now + timedelta(seconds=300), 60, "duplicate") is None
 
 
 def test_schedule_api_corruption_returns_503_without_overwrite(tmp_path):

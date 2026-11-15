@@ -222,7 +222,7 @@ def test_stop_server_keeps_pid_when_identity_unverified(pid_file, monkeypatch):
     monkeypatch.setattr(sc, "read_server_info", lambda: {"pid": 7})
     monkeypatch.setattr(sc, "verify_server_identity", lambda info: False)
     monkeypatch.setattr(sc, "get_process_details", lambda pid: _details())
-    monkeypatch.setattr(sc, "remove_server_info", lambda: removed.append(True))
+    monkeypatch.setattr(sc, "remove_server_info", lambda **kwargs: removed.append(True))
 
     result = sc.stop_server()
 
@@ -236,7 +236,7 @@ def test_stop_server_cleans_stale_pid(pid_file, monkeypatch):
     monkeypatch.setattr(sc, "read_server_info", lambda: {"pid": 7})
     monkeypatch.setattr(sc, "verify_server_identity", lambda info: False)
     monkeypatch.setattr(sc, "get_process_details", lambda pid: None)
-    monkeypatch.setattr(sc, "remove_server_info", lambda: removed.append(True))
+    monkeypatch.setattr(sc, "remove_server_info", lambda **kwargs: removed.append(True))
 
     result = sc.stop_server()
 
@@ -255,7 +255,7 @@ def test_stop_server_refuses_other_instance(pid_file, monkeypatch):
         lambda port: {"application": "antidetect-python", "instance_id": "B"},
     )
     monkeypatch.setattr(
-        sc, "remove_server_info", lambda: pytest.fail("must not remove")
+        sc, "remove_server_info", lambda **kwargs: pytest.fail("must not remove")
     )
 
     result = sc.stop_server()
@@ -282,7 +282,7 @@ def test_stop_server_shutdown_api_success(pid_file, monkeypatch):
 
     monkeypatch.setattr(runtime_auth, "read_runtime", lambda: {"access_key": "k"})
     monkeypatch.setattr(sc, "_wait_for_process_exit", lambda pid, timeout: True)
-    monkeypatch.setattr(sc, "remove_server_info", lambda: removed.append(True))
+    monkeypatch.setattr(sc, "remove_server_info", lambda **kwargs: removed.append(True))
 
     result = sc.stop_server()
 
@@ -307,7 +307,7 @@ def test_stop_server_refuses_409_without_kill(pid_file, monkeypatch):
 
     monkeypatch.setattr(sc.urllib.request, "urlopen", conflict)
     monkeypatch.setattr(
-        sc, "remove_server_info", lambda: pytest.fail("must not remove")
+        sc, "remove_server_info", lambda **kwargs: pytest.fail("must not remove")
     )
     monkeypatch.setattr(
         sc, "_wait_for_process_exit", lambda pid, timeout: pytest.fail("must not wait")
@@ -340,7 +340,7 @@ def test_stop_server_falls_back_to_verified_kill(pid_file, monkeypatch):
         sc.subprocess, "run", lambda *a, **k: killed.append(a[0] if a else None)
     )
     monkeypatch.setattr(sc, "_wait_for_process_exit", lambda pid, timeout: True)
-    monkeypatch.setattr(sc, "remove_server_info", lambda: removed.append(True))
+    monkeypatch.setattr(sc, "remove_server_info", lambda **kwargs: removed.append(True))
 
     result = sc.stop_server()
 

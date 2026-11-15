@@ -3,6 +3,15 @@
         let editingProfile = null;
         let systemOptions = null;
 
+        function apiErrorMessage(data, fallback) {
+            const detail = data && data.detail;
+            if (typeof detail === 'string') return detail;
+            if (Array.isArray(detail)) {
+                return detail.map(item => `${(item.loc || []).join('.')}: ${item.msg || 'Dữ liệu không hợp lệ'}`).join('; ') || fallback;
+            }
+            return (detail && detail.message) || (data && data.error) || fallback;
+        }
+
         const POPULAR_TIMEZONES = [
             { id: "Asia/Ho_Chi_Minh", name: "Việt Nam (GMT+7)" },
             { id: "Asia/Bangkok", name: "Thái Lan (GMT+7)" },
@@ -73,7 +82,9 @@
                 const data = await res.json();
                 if (res.ok) {
                     const hasRunning = data.profiles && data.profiles.some(p => p.running);
-                    if (hasRunning) {
+                    if (data.success === false) {
+                        showToast(data.message || 'Một số profile đã thay đổi; hãy kiểm tra dữ liệu mới.', 'warning');
+                    } else if (hasRunning) {
                         showToast(data.message + ' (Lưu ý: Hãy khởi động lại các profile đang mở để áp dụng tọa độ mới)', 'warning');
                     } else {
                         showToast(data.message || 'Đã chuyển thành công!', 'success');
@@ -81,7 +92,8 @@
                     closeSwitchAllLocationModal();
                     refreshProfiles();
                 } else {
-                    showToast('Lỗi: ' + (data.detail || 'Không thể chuyển vị trí'), 'error');
+                    showToast('Lỗi: ' + apiErrorMessage(data, 'Không thể chuyển vị trí'), 'error');
+                    if (res.status === 409) refreshProfiles();
                 }
             } catch (e) {
                 showToast('Lỗi kết nối: ' + e, 'error');
@@ -944,7 +956,11 @@
                 const res = await fetch(`/api/profiles/${id}/sync-location-proxy`, { method: 'POST' });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) {
-                    showToast(data.detail || 'Không đồng bộ được vị trí theo proxy.', 'warning');
+                    showToast(apiErrorMessage(data, 'Không đồng bộ được vị trí theo proxy.'), 'warning');
+                    if (res.status === 409) {
+                        closeEditModal();
+                        await refreshProfiles();
+                    }
                     return;
                 }
                 // Cập nhật các ô trong modal theo giá trị mới.
@@ -965,6 +981,10 @@
                     ? ' (' + Object.keys(data.changes).join(', ') + ')'
                     : '';
                 showToast(data.message + changeText, 'success');
+                // Geo sync persists a new revision. Reopen from server data before
+                // a later edit can submit the old modal snapshot.
+                closeEditModal();
+                await refreshProfiles();
             } catch (err) {
                 showToast('Lỗi kết nối: ' + err, 'error');
             }
@@ -1048,7 +1068,8 @@
                     showToast('Đã đổi dấu vân tay mới thành công!', 'success');
                     refreshProfiles();
                 } else {
-                    showToast(data.detail || 'Lỗi khi đổi dấu vân tay', 'error');
+                    showToast(apiErrorMessage(data, 'Lỗi khi đổi dấu vân tay'), 'error');
+                    if (res.status === 409) await refreshProfiles();
                 }
             } catch (err) {
                 showToast('Lỗi kết nối: ' + err, 'error');
@@ -1313,7 +1334,7 @@
                     if (res.ok) done += 1;
                 } catch (e) {}
             }
-            showToast(`Đã reset FP ${done}/${ids.length} profile.`, 'success');
+            showToast(`Đã reset FP ${done}/${ids.length} profile.`, done === ids.length ? 'success' : 'warning');
             refreshProfiles();
         }
 
@@ -1522,9 +1543,14 @@
             el.innerHTML = events.map(ev => {
                 const at = String(ev.at || '').replace('T', ' ').slice(0, 19);
                 const err = ev.error ? String(ev.error) : '';
+                const labels = {succeeded: 'Thành công', success: 'Thành công', partial: 'Một phần', failed: 'Thất bại', skipped: 'Bỏ qua', accepted: 'Đã xếp hàng'};
+                const status = labels[ev.status] || (err ? 'Thất bại' : 'Đã xử lý (lịch sử cũ)');
+                const jobLabels = {queued: 'đang chờ', running: 'đang chạy', cancelling: 'đang hủy', cancelled: 'đã hủy', completed: 'hoàn tất', completed_with_errors: 'hoàn tất có lỗi', completed_with_warnings: 'hoàn tất có cảnh báo', failed: 'thất bại', interrupted: 'bị gián đoạn', unavailable: 'chưa có trạng thái'};
+                const jobDetail = ev.job_id ? 'Job: ' + ev.job_id + (ev.job_status ? ' (' + (jobLabels[ev.job_status] || ev.job_status) + ')' : '') : '';
+                const detail = [status, jobDetail, ev.attempt ? 'Lần thử ' + ev.attempt : '', ev.next_retry_at ? 'Có lịch thử lại' : '', err].filter(Boolean).join(' · ');
                 return `<div class="flex items-start gap-2 ${err ? 'text-red-400' : 'text-slate-400'}">
                     <span class="font-mono text-slate-500 shrink-0">${escapeHtml(at)}</span>
-                    <span class="min-w-0 truncate" title="${escapeHtml(err || 'OK')}">${escapeHtml(ev.rule || '—')} · ${escapeHtml(actionLabel(ev.action))}${err ? ' · Lỗi: ' + escapeHtml(err) : ' · OK'}</span>
+                    <span class="min-w-0 truncate" title="${escapeHtml(detail)}">${escapeHtml(ev.rule || '—')} · ${escapeHtml(actionLabel(ev.action))} · ${escapeHtml(detail)}</span>
                 </div>`;
             }).join('');
         }
@@ -2458,7 +2484,7 @@
                     refreshProfiles();
                 } else {
                     const err = await res.json();
-                    showToast('Lỗi tạo profile: ' + (err.detail || 'Không xác định'), 'error');
+                    showToast('Lỗi tạo profile: ' + apiErrorMessage(err, 'Không xác định'), 'error');
                 }
             } catch (err) {
                 showToast('Lỗi kết nối: ' + err, 'error');
@@ -2710,7 +2736,7 @@
                     refreshProfiles();
                 } else {
                     const err = await res.json();
-                    showToast('Lỗi lưu cấu hình: ' + (err.detail || 'Không xác định'), 'error');
+                    showToast('Lỗi lưu cấu hình: ' + apiErrorMessage(err, 'Không xác định'), 'error');
                 }
             } catch (err) {
                 showToast('Lỗi kết nối: ' + err, 'error');

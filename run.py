@@ -213,6 +213,6 @@ if __name__ == "__main__":
     finally:
         if wrote_pid:
             try:
-                remove_server_info()
+                remove_server_info(expected_instance_id=app.state.instance_id)
             except Exception:
                 pass

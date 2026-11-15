@@ -454,6 +454,22 @@ def test_dashboard_ui_smoke(live_server):
             ).wait_for(timeout=30000)
 
             assert _profile_status(page, profile_id) == "stopped"
+
+            # Fanpage job rendering must expose cleanup warnings and pending
+            # cancellation without contacting Facebook or launching profiles.
+            page.goto(f"{live_server.base}/fanpages", wait_until="domcontentloaded")
+            page.wait_for_function("() => typeof renderSyncJobsList === 'function'")
+            page.evaluate("""() => {
+                document.getElementById('syncJobModal').classList.remove('hidden');
+                renderSyncJobsList([
+                    {id: 'fixture-warning', mode: 'discovery', status: 'completed_with_warnings',
+                     items: [{profile_name: 'Cleanup fixture', status: 'completed',
+                              detail: {summary: 'Quét thành công', cleanup: {status: 'failed', error: 'stop fixture'}}}]},
+                    {id: 'fixture-cancel', mode: 'discovery', status: 'cancelling', items: []}
+                ]);
+            }""")
+            assert "Chưa đóng được browser: stop fixture" in page.locator("#sync-jobs-container").inner_text()
+            assert "Đang hủy" in page.locator("#sync-jobs-container").inner_text()
             assert not page_errors, f"Dashboard ném lỗi JavaScript: {page_errors[:5]}"
         except Exception:
             try:

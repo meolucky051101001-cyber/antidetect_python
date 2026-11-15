@@ -164,3 +164,18 @@ class BrowserRuntimeStore:
             if str(profile_id) in self._states:
                 self._states.pop(str(profile_id), None)
                 self._write()
+
+    def remove_if_matches(self, profile_id: str, expected: Dict[str, Any]) -> bool:
+        """Remove only the runtime identity whose process was checked by caller."""
+        with self._lock, self._ipc_lock:
+            self._load()
+            key = str(profile_id)
+            current = self._states.get(key)
+            if not current:
+                return True
+            identity_fields = ("launch_id", "owner_instance", "pid", "created", "user_data_dir")
+            if not expected or any(current.get(field) != expected.get(field) for field in identity_fields):
+                return False
+            self._states.pop(key)
+            self._write()
+            return True

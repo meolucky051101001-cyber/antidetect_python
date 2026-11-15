@@ -1529,6 +1529,14 @@ def merge_page_details(
             continue
 
         page_obs = _as_utc(info.get("observed_at")) or fallback_obs or now_dt
+        existing_observations = page.get("field_observations")
+        observations = {
+            group: dict(info) for group, info in existing_observations.items()
+            if group in ("followers", "likes", "creation", "activity") and isinstance(info, dict)
+        } if isinstance(existing_observations, dict) else {}
+        def observed(group):
+            observations[group] = {"observed_at": to_utc_iso(page_obs), "source": "facebook_detail",
+                                   "scan_id": str(info.get("scan_id") or data.get("scan_id") or "")}
         candidates = []
         for item in info.get("times") or []:
             cand = _candidate_from_detail(item, page_obs)
@@ -1541,6 +1549,7 @@ def merge_page_details(
         ]
 
         if candidates:
+            observed("activity")
             # Bài mới nhất = ứng viên có cận trên muộn nhất; không mặc định
             # bài đầu tiên trong DOM là bài mới nhất.
             best = max(candidates, key=lambda c: (c["max"], c["min"]))
@@ -1556,20 +1565,28 @@ def merge_page_details(
             page["last_post_quality"] = "approximate"
 
         if info.get("created_raw"):
+            observed("creation")
             page["created_raw"] = info.get("created_raw")
         elif "created_raw" not in page:
             page["created_raw"] = None
         created = parse_fb_created_date(page.get("created_raw"))
         if created:
             page["created_date"] = created.isoformat()
-        if info.get("followers_raw") or info.get("followers"):
-            flw_raw = info.get("followers_raw") or info.get("followers")
+        if info.get("followers_raw") not in (None, "") or info.get("followers") not in (None, ""):
+            observed("followers")
+            flw_raw = info.get("followers_raw") if info.get("followers_raw") not in (None, "") else info.get("followers")
             page["followers"] = flw_raw
             page["followers_raw"] = flw_raw
-        if info.get("likes_raw") or info.get("likes"):
-            lk_raw = info.get("likes_raw") or info.get("likes")
+            page.pop("followers_count", None)
+            page.pop("followers_precision", None)
+        if info.get("likes_raw") not in (None, "") or info.get("likes") not in (None, ""):
+            observed("likes")
+            lk_raw = info.get("likes_raw") if info.get("likes_raw") not in (None, "") else info.get("likes")
             page["likes"] = lk_raw
             page["likes_raw"] = lk_raw
+            page.pop("likes_count", None)
+            page.pop("likes_precision", None)
+        page["field_observations"] = observations
         if info.get("category"):
             page["category"] = str(info["category"])[:120]
         obs_page_id = str(info.get("observed_page_id") or "").strip()
@@ -1581,8 +1598,10 @@ def merge_page_details(
         synced = bool(
             candidates
             or info.get("created_raw")
-            or info.get("followers_raw")
-            or info.get("likes_raw")
+            or info.get("followers_raw") not in (None, "")
+            or info.get("followers") not in (None, "")
+            or info.get("likes_raw") not in (None, "")
+            or info.get("likes") not in (None, "")
             or info.get("title")
             or info.get("feed_ready")
         )

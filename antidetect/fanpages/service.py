@@ -325,7 +325,7 @@ class FanpageService:
         )
 
         # Compute delta between latest 2 observations in page_metric_history (ordered DESC)
-        pts = row.get("recent_metric_points") or row.get("metric_history") or []
+        pts = row.get("recent_metric_points") or []
         flw_pts = [p for p in pts if p.get("followers_count") is not None]
         likes_pts = [p for p in pts if p.get("likes_count") is not None]
         followers_delta: Optional[int] = None
@@ -408,7 +408,7 @@ class FanpageService:
             except Exception:
                 scan_meta_map[p.id] = {}
         stale_hours = self._stale_hours_fn()
-        rows = self.repo.list_all_pages_with_links()
+        rows = self.repo.list_all_pages_with_links(now=now_dt)
         return [
             self._enrich_page_row(
                 r,
@@ -1064,6 +1064,7 @@ class FanpageService:
         force_new: bool = False,
         triggered_by: str = "user",
         run_async: bool = True,
+        idempotency_key: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], bool]:
         return self.jobs.enqueue_job(
             mode=mode,
@@ -1074,6 +1075,7 @@ class FanpageService:
             force_new=force_new,
             triggered_by=triggered_by,
             run_async=run_async,
+            idempotency_key=idempotency_key,
         )
 
     def get_sync_job(self, job_id: str) -> Optional[Dict[str, Any]]:
@@ -1108,7 +1110,7 @@ class FanpageService:
         now_dt = now or datetime.datetime.now(datetime.timezone.utc)
         if sync:
             self.sync_from_profiles(now=now_dt)
-        detail = self.repo.get_page_detail(page_id)
+        detail = self.repo.get_page_detail(page_id, now=now_dt)
         if not detail:
             return None
         profiles = self.profile_manager.list_profiles()
@@ -1224,6 +1226,14 @@ class FanpageService:
                 "Nguồn Dữ Liệu",
                 "Ghi Chú",
                 "Đã Lưu Trữ",
+                "Follower Quan Sát (UTC)",
+                "Nguồn Follower",
+                "Like Quan Sát (UTC)",
+                "Nguồn Like",
+                "Ngày Tạo Quan Sát (UTC)",
+                "Nguồn Ngày Tạo",
+                "Hoạt Động Quan Sát (UTC)",
+                "Nguồn Hoạt Động",
             ]
         )
         for r in sorted_rows:
@@ -1250,6 +1260,11 @@ class FanpageService:
                     sanitize_csv_cell(r.get("data_source") or ""),
                     sanitize_csv_cell(r.get("note") or ""),
                     "Có" if r.get("is_archived") else "Không",
+                    *[
+                        sanitize_csv_cell(((r.get("field_observations") or {}).get(group) or {}).get(field) or "")
+                        for group in ("followers", "likes", "creation", "activity")
+                        for field in ("observed_at", "source")
+                    ],
                 ]
             )
         return buf.getvalue()

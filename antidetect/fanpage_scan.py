@@ -107,6 +107,7 @@ MERGE_FIELDS = frozenset(
         "detail_synced_at",
         "ready",
         "age_days",
+        "field_observations",
         "followers",
         "followers_raw",
         "likes",
@@ -687,9 +688,22 @@ def merge_discovery_pages(
         if current_seen and seen_dt and current_seen > seen_dt:
             # Lượt cũ hoàn tất sau lượt mới: không ghi đè field đã mới hơn.
             continue
+        for group in ("followers", "likes"):
+            if raw.get(group) not in (None, "") or raw.get(f"{group}_raw") not in (None, ""):
+                # Deep collectors publish raw observations. A retained parsed
+                # count/precision belongs to the previous observation.
+                current.pop(f"{group}_count", None)
+                current.pop(f"{group}_precision", None)
         for key in MERGE_FIELDS:
             if key in raw and raw[key] is not None and raw[key] != "":
-                current[key] = raw[key]
+                if key == "field_observations":
+                    old_meta = current.get(key)
+                    old_meta = old_meta if isinstance(old_meta, dict) else {}
+                    new_meta = raw[key] if isinstance(raw[key], dict) else {}
+                    current[key] = {group: dict(info) for group, info in {**old_meta, **new_meta}.items()
+                                    if group in ("followers", "likes", "creation", "activity") and isinstance(info, dict)}
+                else:
+                    current[key] = raw[key]
         if entry.get("id"):
             current["id"] = entry["id"]
             current["id_status"] = "verified"

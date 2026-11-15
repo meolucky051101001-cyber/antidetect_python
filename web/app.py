@@ -10,6 +10,7 @@ import secrets
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any, Set
 from fastapi import FastAPI, Request, HTTPException, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -24,6 +25,7 @@ from antidetect.storage import (
     ProfileManager,
     ProfileBusyError,
     ProfileDeletionError,
+    ProfileRevisionConflict,
     DATA_DIR,
     PROFILES_DATA_DIR,
 )
@@ -32,6 +34,7 @@ from antidetect.profile_copy import (
     new_operation_id,
     validate_idempotency_key,
 )
+from antidetect.profile_import import prepare_import_profile
 from antidetect.fingerprint import (
     generate_fingerprint,
     get_host_device_memory,
@@ -204,24 +207,39 @@ async def lifespan(_app: FastAPI):
                 "sync_fanpages_deep": _scheduler_sync_fanpages_deep,
             },
             history_path=os.path.join(DATA_DIR, "schedule_runs.json"),
+            profile_ids_resolver=lambda: [p.id for p in profile_manager.list_profiles()],
         )
         _scheduler.start()
     except Exception as e:
         log.warning("Không khởi động được scheduler: %s", e)
     yield
+    launcher.begin_shutdown()
+    with _start_all_lock:
+        if _start_all_cancel_event is not None:
+            _start_all_cancel_event.set()
     try:
         if _scheduler is not None:
             _scheduler.stop()
+            await asyncio.to_thread(_scheduler.join, 30.0)
     except Exception:
         pass
-    # Đóng toàn bộ trình duyệt đang chạy khi tắt server.
-    launcher.stop_all()
+    with _fanpage_service_lock:
+        services = list(_fanpage_service_cache.values())
+    for service in services:
+        try:
+            await asyncio.to_thread(service.jobs.shutdown, 30.0)
+        except Exception as exc:
+            log.warning("Fanpage cleanup failed: %s", type(exc).__name__)
+    # Cleanup is limited to generations created by this server instance.
     try:
-        from antidetect.runtime_auth import delete_runtime
+        await asyncio.to_thread(launcher.stop_owned)
+    finally:
+        try:
+            from antidetect.runtime_auth import delete_runtime
 
-        delete_runtime()
-    except Exception:
-        pass
+            delete_runtime(expected_instance_id=app.state.instance_id)
+        except Exception:
+            pass
 
 
 _scheduler = None
@@ -236,6 +254,16 @@ app = FastAPI(
 app.state.access_key = secrets.token_urlsafe(32)
 app.state.session_key = secrets.token_urlsafe(32)
 app.state.instance_id = secrets.token_hex(16)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(request: Request, exc: RequestValidationError):
+    # Validation's input/context can embed the complete proxy credential object.
+    return JSONResponse(status_code=422, content={
+        "detail": [{"loc": list(error["loc"]), "type": error["type"],
+                    "msg": "Dữ liệu không hợp lệ."}
+                   for error in exc.errors()]
+    })
 
 # P0-06: Kho lưu trữ mã mở khóa một lần (One-Time Unlock Codes) với TTL 60 giây
 _one_time_codes: Dict[str, float] = {}
@@ -460,7 +488,7 @@ async def system_metrics():
         "last_tick": (
             _scheduler.last_run_info.get("last_tick") if _scheduler else None
         ),
-        "recent_runs": _scheduler.run_history.recent(10) if _scheduler else [],
+        "recent_runs": await asyncio.to_thread(_schedule_history_with_jobs, 10),
     }
     return data
 
@@ -1061,7 +1089,7 @@ async def update_profile_endpoint(profile_id: str, req: UpdateProfileRequest):
 
     try:
         updated = profile_manager.update_profile(
-            p, expected_revision=req.expected_revision
+            p, expected_revision=req.expected_revision if req.expected_revision is not None else p.revision
         )
     except RuntimeError as e:
         # expected_revision không khớp: profile đã bị client khác sửa.
@@ -1104,7 +1132,10 @@ async def reset_fingerprint_endpoint(profile_id: str, target_os: Optional[str] =
         browser_brand=detect_browser_brand(getattr(launcher, "browser_path", None)),
     )
     p.fingerprint = new_fp
-    updated = profile_manager.update_profile(p)
+    try:
+        updated = profile_manager.update_fingerprint_only(p.id, p.fingerprint, p.revision)
+    except ProfileRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc)}) from exc
     if not updated:
         # Profile bị xóa bởi phiên khác giữa get và update.
         raise HTTPException(status_code=404, detail="Profile không tồn tại")
@@ -1180,7 +1211,13 @@ async def set_profile_location(profile_id: str, req: SwitchLocationRequest):
     p.fingerprint.latitude = lat
     p.fingerprint.longitude = lon
     p.fingerprint.timezone = tz
-    updated = profile_manager.update_profile(p)
+    try:
+        updated = profile_manager.patch_fingerprint(
+            p.id, {"latitude": lat, "longitude": lon, "timezone": tz},
+            expected_revision=p.revision,
+        )
+    except ProfileRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc)}) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Profile không tồn tại")
     return updated
@@ -1353,31 +1390,58 @@ def _scheduler_start_all(profile_ids=None):
         _bulk_launch_lock.release()
 
 
+def _commit_geo_result(profile, geo):
+    """Apply only observed geo fields after rechecking the lookup snapshot."""
+    candidate = profile.model_copy(deep=True)
+    changes = _apply_geo_to_profile(candidate, geo, lambda _: None)
+    patch = {
+        field: getattr(candidate.fingerprint, field)
+        for field in ("latitude", "longitude", "timezone", "locale", "languages")
+        if getattr(candidate.fingerprint, field) != getattr(profile.fingerprint, field)
+    }
+    updated = profile_manager.patch_fingerprint(
+        profile.id, patch, expected_revision=profile.revision,
+        expected_proxy=(profile.proxy.enabled, profile.proxy.identity_key()),
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Profile không tồn tại")
+    return changes
+
+
 def _scheduler_sync_all_locations(profile_ids=None):
     """Callback scheduler (sync, chạy trong thread scheduler)."""
     profiles = profile_manager.list_profiles()
-    if profile_ids:
+    if profile_ids is not None:
         wanted = set(profile_ids)
         profiles = [p for p in profiles if p.id in wanted]
     done, skipped = 0, 0
+    results = {}
     for p in profiles:
         if not (p.proxy and p.proxy.enabled and p.proxy.host):
             skipped += 1
+            results[p.id] = {"status": "skipped", "code": "PROXY_DISABLED"}
             continue
         try:
             geo = check_proxy(p.proxy, 12)
             if geo.get("success"):
-                if _apply_geo_to_profile(p, geo, profile_manager.update_profile):
-                    done += 1
+                _commit_geo_result(p, geo)
+                done += 1
+                results[p.id] = {"status": "succeeded", "success": True}
             else:
-                skipped += 1
+                results[p.id] = {"status": "failed", "success": False, "code": "GEO_LOOKUP_FAILED", "retryable": True}
+        except ProfileRevisionConflict as exc:
+            results[p.id] = {"status": "failed", "success": False, "code": exc.code, "retryable": False}
         except Exception:
-            skipped += 1
-    return {"synced": done, "skipped": skipped, "total": len(profiles)}
+            results[p.id] = {"status": "failed", "success": False, "code": "GEO_SYNC_FAILED", "retryable": False}
+    failed = [pid for pid, result in results.items() if result["status"] == "failed"]
+    return {"success": not failed, "synced": done, "skipped": skipped,
+            "total": len(profiles), "failed_profile_ids": failed, "results": results}
 
 
 def _scheduler_sync_fanpages(profile_ids=None):
     """Callback scheduler: đưa job đồng bộ danh sách fanpage (discovery) vào hàng đợi."""
+    from antidetect.scheduler import current_occurrence_key
+
     svc = get_fanpage_service()
     job, deduplicated = svc.enqueue_sync_job(
         mode="discovery",
@@ -1385,12 +1449,15 @@ def _scheduler_sync_fanpages(profile_ids=None):
         auto_start=True,
         triggered_by="scheduler",
         run_async=True,
+        idempotency_key=current_occurrence_key(),
     )
     return {"job_id": job.get("id"), "deduplicated": deduplicated}
 
 
 def _scheduler_sync_fanpages_deep(profile_ids=None):
     """Callback scheduler: đưa job đồng bộ chi tiết fanpage (basic) vào hàng đợi."""
+    from antidetect.scheduler import current_occurrence_key
+
     svc = get_fanpage_service()
     job, deduplicated = svc.enqueue_sync_job(
         mode="basic",
@@ -1398,6 +1465,7 @@ def _scheduler_sync_fanpages_deep(profile_ids=None):
         auto_start=True,
         triggered_by="scheduler",
         run_async=True,
+        idempotency_key=current_occurrence_key(),
     )
     return {"job_id": job.get("id"), "deduplicated": deduplicated}
 
@@ -1421,9 +1489,12 @@ async def sync_location_from_proxy(profile_id: str):
     if not geo.get("success"):
         raise HTTPException(status_code=502, detail=f"Không truy vấn được GeoIP qua proxy: {geo.get('error') or 'lỗi không xác định'}")
 
-    changes = await asyncio.to_thread(
-        _apply_geo_to_profile, p, geo, profile_manager.update_profile
-    )
+    try:
+        changes = await asyncio.to_thread(_commit_geo_result, p, geo)
+    except ProfileRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": exc.code, "message": str(exc), "current_revision": exc.current_revision,
+        }) from exc
     if not profile_manager.get_profile(profile_id):
         raise HTTPException(status_code=404, detail="Profile không tồn tại")
     return {
@@ -1474,7 +1545,11 @@ async def switch_all_profiles_location(req: SwitchLocationRequest):
             updates.append((p, lat, lon, tz))
 
         updated_ids = set(
-            profile_manager.update_profiles_batch([p for p, _, _, _ in updates])
+            profile_manager.patch_fingerprints_batch(
+                {p.id: {"latitude": lat, "longitude": lon, "timezone": tz}
+                 for p, lat, lon, tz in updates},
+                {p.id: p.revision for p, _, _, _ in updates},
+            )
         )
         results = []
         for p, lat, lon, tz in updates:
@@ -1577,6 +1652,34 @@ SCHEDULES_CORRUPT_DETAIL = (
 )
 
 
+def _schedule_history_with_jobs(limit=20):
+    """Enrich accepted runs without starting a worker or modifying its database."""
+    import sqlite3
+    from pathlib import Path
+    import antidetect.storage as storage_module
+
+    events = _scheduler.run_history.recent(limit) if _scheduler else []
+    events = [dict(event) for event in events]
+    pending = [event for event in events if event.get("status") == "accepted" and event.get("job_id")]
+    if not pending:
+        return events
+    data_dir = getattr(profile_manager, "data_dir", None) or storage_module.DATA_DIR
+    db = Path(data_dir) / "fanpages.sqlite"
+    if not db.is_file():
+        for event in pending:
+            event["job_status"] = "unavailable"
+        return events
+    try:
+        with sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=2) as conn:
+            for event in pending:
+                row = conn.execute("SELECT status FROM sync_jobs WHERE job_id=?", (event["job_id"],)).fetchone()
+                event["job_status"] = row[0] if row else "unavailable"
+    except sqlite3.Error:
+        for event in pending:
+            event["job_status"] = "unavailable"
+    return events
+
+
 @app.get("/api/schedules")
 async def list_schedules():
     if _schedule_store is None:
@@ -1585,7 +1688,7 @@ async def list_schedules():
         rules = _schedule_store.list()
     except ScheduleStoreCorruption as e:
         raise HTTPException(status_code=503, detail=SCHEDULES_CORRUPT_DETAIL) from e
-    recent_runs = _scheduler.run_history.recent(20) if _scheduler else []
+    recent_runs = await asyncio.to_thread(_schedule_history_with_jobs, 20)
     return {"success": True, "rules": rules,
             "last_tick": (_scheduler.last_run_info.get("last_tick") if _scheduler else None),
             "recent_runs": recent_runs}
@@ -1652,7 +1755,20 @@ async def shutdown_system():
     server = getattr(app.state, 'server', None)
     if server is None:
         raise HTTPException(status_code=409, detail='Hãy dừng máy chủ qua terminal đã khởi chạy nó.')
-    result = await asyncio.to_thread(launcher.stop_all)
+    launcher.begin_shutdown()
+    if _scheduler is not None:
+        _scheduler.stop()
+    with _start_all_lock:
+        if _start_all_cancel_event is not None:
+            _start_all_cancel_event.set()
+    with _fanpage_service_lock:
+        services = list(_fanpage_service_cache.values())
+    for service in services:
+        try:
+            await asyncio.to_thread(service.jobs.shutdown, 30.0)
+        except Exception as exc:
+            log.warning("Fanpage cleanup failed: %s", type(exc).__name__)
+    result = await asyncio.to_thread(launcher.stop_owned)
     if not result['success']:
         raise HTTPException(status_code=409, detail='Còn profile chưa đóng. Máy chủ được giữ lại để bạn thử lại.')
     asyncio.get_running_loop().call_later(0.5, setattr, server, 'should_exit', True)
@@ -1661,22 +1777,17 @@ async def shutdown_system():
 
 @app.delete("/api/profiles/{profile_id}")
 async def delete_profile(profile_id: str):
-    stopped = await asyncio.to_thread(launcher.stop, profile_id)
-    if not stopped.get('success'):
-        error = stopped.get('error', 'Chưa đóng được profile')
-        # "Profile không tồn tại" là lỗi không tìm thấy (404), không phải xung đột.
-        if 'không tồn tại' in error.lower():
-            raise HTTPException(status_code=404, detail=error)
-        raise HTTPException(status_code=409, detail=error)
+    from antidetect.profile_lifecycle import stop_and_delete
+
     try:
-        success = await asyncio.to_thread(profile_manager.delete_profile, profile_id)
-    except ProfileDeletionError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+        result = await asyncio.to_thread(stop_and_delete, profile_manager, launcher, profile_id)
     except ValueError as e:
-        # ID không hợp lệ (chống path traversal) phải là 400, không phải 500.
         raise HTTPException(status_code=400, detail=str(e)) from e
-    if not success:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=404 if result.get("code") == "PROFILE_NOT_FOUND" else 409,
+            detail=result.get("error") or result.get("message"),
+        )
     return {"success": True, "message": "Đã xóa profile thành công"}
 
 
@@ -2066,34 +2177,19 @@ async def import_profiles(req: ImportProfilesRequest):
 
     imported, failed = [], []
     for i, entry in enumerate(entries):
-        name = str(entry.get("name") or f"Imported {i + 1}") if isinstance(entry, dict) else f"#{i + 1}"
+        raw_name = entry.get("name") if isinstance(entry, dict) else None
+        name = raw_name if isinstance(raw_name, str) else f"Imported {i + 1}"
         try:
-            if not isinstance(entry, dict):
-                raise ValueError("entry không phải object")
-            entry = dict(entry)
-            for k in ("id", "status", "port", "pid", "revision"):
-                entry.pop(k, None)
-            proxy_data = entry.get("proxy") or {}
-            if isinstance(proxy_data, dict):
-                proxy_data = dict(proxy_data)
-                proxy_data["password"] = None  # không bao giờ import password
-            fp = FingerprintConfig.model_validate(entry.get("fingerprint") or {})
-            proxy = ProxyConfig.model_validate(proxy_data)
-            new_p = profile_manager.create_profile(
-                name=name,
-                target_os=fp.os,
-                proxy=proxy,
-                fingerprint=fp,
-                notes=str(entry.get("notes") or ""),
-                tags=list(entry.get("tags") or []),
+            candidate = prepare_import_profile(entry, i, _sanitize_facebook_pages)
+            new_p = await asyncio.to_thread(
+                profile_manager.commit_staged_profile, candidate,
             )
-            new_p.browser_path = entry.get("browser_path") or None
-            new_p.facebook_pages = _sanitize_facebook_pages(entry.get("facebook_pages"))
-            new_p.facebook_pages_synced_at = int(entry.get("facebook_pages_synced_at") or 0)
-            profile_manager.update_profile(new_p)
             imported.append({"id": new_p.id, "name": new_p.name})
+        except ValueError as exc:
+            failed.append({"index": i, "name": name, "code": "INVALID_PROFILE_IMPORT", "reason": str(exc)})
         except Exception as exc:  # noqa: BLE001 - per-item import
-            failed.append({"index": i, "name": name, "reason": f"{type(exc).__name__}: {exc}"})
+            failed.append({"index": i, "name": name, "code": "PROFILE_IMPORT_FAILED",
+                           "reason": f"Không lưu được profile ({type(exc).__name__})."})
     return {
         "success": len(failed) == 0,
         "imported_count": len(imported),
@@ -2152,7 +2248,8 @@ async def bulk_create_profiles(req: BulkCreateRequest):
                 try:
                     proxy = parse_proxy_line(req.proxies[i])
                 except ValueError as exc:
-                    warnings.append(f"{name}: proxy dòng {i + 1} lỗi ({exc}) → tạo direct")
+                    warnings.append(f"{name}: proxy dòng {i + 1} không hợp lệ; không tạo profile")
+                    continue
             else:
                 warnings.append(f"{name}: không có proxy (direct)")
             p = profile_manager.create_profile(
@@ -2232,6 +2329,16 @@ async def stop_profile(profile_id: str):
     res = await asyncio.to_thread(launcher.stop, profile_id)
     if not res.get("success"):
         raise HTTPException(status_code=409, detail=res.get("error", "Không thể dừng profile"))
+    return res
+
+
+@app.post("/api/profiles/{profile_id}/stop/owned")
+async def stop_owned_profile(profile_id: str, expected_launch_id: str):
+    if not expected_launch_id.strip():
+        raise HTTPException(status_code=400, detail="Thiếu định danh phiên profile.")
+    res = await asyncio.to_thread(launcher.stop, profile_id, expected_launch_id=expected_launch_id)
+    if not res.get("success"):
+        raise HTTPException(status_code=409, detail=res.get("error", "Không thể dừng phiên profile."))
     return res
 
 
@@ -2676,6 +2783,10 @@ async def create_fanpage_sync_job_endpoint(req: FanpageSyncJobCreateRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if "FANPAGE_JOB_BUSY" in str(exc) or "đang dừng" in str(exc):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
     return JSONResponse(
         status_code=202,
         content={
