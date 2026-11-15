@@ -13,6 +13,11 @@ import os
 import re
 import sqlite3
 import threading
+import time
+from contextlib import contextmanager
+
+import psutil
+from antidetect.profile_locks import ProfileLocks
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from antidetect.fanpage_scan import (
@@ -20,8 +25,12 @@ from antidetect.fanpage_scan import (
     normalize_page_url,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 _PAGE_ID_RE = re.compile(r"^\d{5,}$")
+
+
+class JobLeaseLost(RuntimeError):
+    """The worker may no longer mutate or publish this job."""
 
 
 class FanpageRevisionConflictError(RuntimeError):
@@ -160,6 +169,102 @@ def parse_Compact_metric(raw: Any) -> Tuple[Optional[int], Optional[str], Option
 parse_compact_metric = parse_Compact_metric
 
 
+def _metric_values(entry: Dict[str, Any], group: str) -> Tuple[Optional[int], Optional[str], Optional[str]]:
+    """Keep the displayed label, parsed value and precision from one observation."""
+    raw = entry.get(f"{group}_raw")
+    if raw not in (None, ""):
+        parsed = parse_Compact_metric(raw)
+        if parsed[0] is not None:
+            return parsed
+    value = entry.get(f"{group}_count")
+    if value is None:
+        value = entry.get(group)
+    count, label, precision = parse_Compact_metric(value)
+    declared = entry.get(f"{group}_precision")
+    if count is not None and declared in ("exact", "rounded"):
+        precision = declared
+    return count, label, precision
+
+
+def _observation_metadata(value: Any) -> Dict[str, Dict[str, Any]]:
+    """Imported/legacy observation metadata is untrusted JSON, not a model."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for group in ("followers", "likes", "creation", "activity"):
+        info = value.get(group)
+        if not isinstance(info, dict):
+            continue
+        try:
+            legacy_synced_at = max(0, int(info.get("legacy_synced_at") or 0))
+        except (TypeError, ValueError, OverflowError):
+            legacy_synced_at = 0
+        result[group] = {
+            "observed_at": _normalize_observed_iso(info.get("observed_at")),
+            "source": str(info.get("source") or "legacy_cache"),
+            "profile_id": str(info.get("profile_id") or ""),
+            "scan_id": str(info.get("scan_id") or ""),
+            "legacy_synced_at": legacy_synced_at,
+        }
+    return result
+
+
+def _observation_rank(meta: Dict[str, Any], values: Dict[str, Any], group: str) -> tuple:
+    """Shared catalog/chart tie-break: never use insertion order or max count."""
+    return (
+        bool(meta.get("observed_at")), str(meta.get("observed_at") or ""),
+        int(meta.get("legacy_synced_at") or 0), values.get(group + "_precision") == "exact",
+        str(meta.get("source") or ""), str(meta.get("profile_id") or ""),
+        str(meta.get("scan_id") or ""),
+        hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest(),
+    )
+
+
+def _verified_metric_points(rows: Iterable[Dict[str, Any]], *, now_iso: str,
+                            cutoff_iso: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Project raw observations into one deterministic point per timestamp.
+
+    Followers and likes are chosen independently so a missing metric in one
+    profile does not discard the observation of that metric in another.
+    """
+    points: Dict[str, Dict[str, Any]] = {}
+    ranks: Dict[Tuple[str, str], tuple] = {}
+    for row in rows:
+        observed_at = _normalize_observed_iso(row.get("observed_at"))
+        if (row.get("source") != "field_observation" or observed_at is None
+                or observed_at > now_iso or (cutoff_iso and observed_at < cutoff_iso)):
+            continue
+        metadata = _observation_metadata(row.get("observation_meta_json"))
+        for group in ("followers", "likes"):
+            if row.get(group + "_count") is None:
+                continue
+            values = {group + suffix: row.get(group + suffix) for suffix in ("_count", "_raw", "_precision")}
+            meta = metadata.get(group) or {
+                "observed_at": observed_at, "source": "field_observation",
+                "profile_id": str(row.get("profile_id") or ""),
+                "scan_id": str(row.get("scan_id") or ""), "legacy_synced_at": 0,
+            }
+            rank = _observation_rank(meta, values, group)
+            key = observed_at, group
+            if key in ranks and rank <= ranks[key]:
+                continue
+            point = points.setdefault(observed_at, {
+                "observed_at": observed_at, "observed_at_raw": observed_at,
+                "source": "field_observation", "field_observations": {},
+                "followers_count": None, "followers_raw": None, "followers_precision": None,
+                "likes_count": None, "likes_raw": None, "likes_precision": None,
+            })
+            point.update(values)
+            point["field_observations"][group] = meta
+            ranks[key] = rank
+    return [points[observed_at] for observed_at in sorted(points)]
+
+
 
 class FanpageRepository:
     """Thread-safe SQLite repository for Fanpage Manager."""
@@ -168,6 +273,7 @@ class FanpageRepository:
         self.db_path = os.path.abspath(db_path)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._lock = threading.RLock()
+        self._job_locks = ProfileLocks(os.path.dirname(self.db_path), suffix=".fanpage-job")
         self.init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -187,6 +293,7 @@ class FanpageRepository:
             conn = self._connect()
             try:
                 cur = conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -365,6 +472,14 @@ class FanpageRepository:
                     ("sync_jobs", "options_json", "TEXT NOT NULL DEFAULT '{}'"),
                     ("sync_jobs", "owner_instance", "TEXT DEFAULT NULL"),
                     ("sync_jobs", "heartbeat_at", "TEXT DEFAULT NULL"),
+                    ("sync_jobs", "execution_token", "TEXT DEFAULT NULL"),
+                    ("sync_jobs", "owner_pid", "INTEGER DEFAULT NULL"),
+                    ("sync_jobs", "owner_created", "REAL DEFAULT NULL"),
+                    ("sync_jobs", "lease_expires_at", "REAL DEFAULT NULL"),
+                    ("sync_jobs", "cancel_requested_at", "TEXT DEFAULT NULL"),
+                    ("sync_jobs", "idempotency_key", "TEXT DEFAULT NULL"),
+                    ("pages", "observation_meta_json", "TEXT NOT NULL DEFAULT '{}'"),
+                    ("page_metric_history", "observation_meta_json", "TEXT NOT NULL DEFAULT '{}'"),
                     ("sync_job_items", "profile_name", "TEXT NOT NULL DEFAULT ''"),
                     ("sync_job_items", "error_code", "TEXT DEFAULT NULL"),
                     ("sync_job_items", "detail_json", "TEXT NOT NULL DEFAULT '{}'"),
@@ -440,6 +555,7 @@ class FanpageRepository:
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_fanpage_alerts_dedup ON fanpage_alerts(dedup_key, is_resolved)"
                 )
+                cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_job_occurrence ON sync_jobs(idempotency_key) WHERE idempotency_key IS NOT NULL")
                 cur.execute(
                     "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                     (SCHEMA_VERSION, _utc_now_iso()),
@@ -628,16 +744,8 @@ class FanpageRepository:
                                 target_id = _url_internal_id(canonical_url)
                                 id_status = "url_only"
 
-                        followers_count, followers_raw, followers_prec = parse_Compact_metric(
-                            entry.get("followers_count")
-                            if entry.get("followers_count") is not None
-                            else entry.get("followers")
-                        )
-                        likes_count, likes_raw, likes_prec = parse_Compact_metric(
-                            entry.get("likes_count")
-                            if entry.get("likes_count") is not None
-                            else entry.get("likes")
-                        )
+                        followers_count, followers_raw, followers_prec = _metric_values(entry, "followers")
+                        likes_count, likes_raw, likes_prec = _metric_values(entry, "likes")
 
                         first_seen = str(entry.get("first_seen_at") or now_str)
                         last_seen = str(entry.get("last_seen_at") or (
@@ -821,6 +929,49 @@ class FanpageRepository:
                                     target_id,
                                 ),
                             )
+                        # Treat each observation as an indivisible group. The legacy
+                        # merge above is overridden here before the transaction commits.
+                        incoming_groups = {
+                            "followers": {"followers_count": followers_count, "followers_raw": followers_raw, "followers_precision": followers_prec},
+                            "likes": {"likes_count": likes_count, "likes_raw": likes_raw, "likes_precision": likes_prec},
+                            "creation": {k: entry.get(k) for k in ("created_date", "created_raw")},
+                            "activity": {k: entry.get(k) for k in ("last_post_raw", "last_post_at", "last_post_at_min", "last_post_at_max", "last_post_observed_at", "last_post_precision", "last_post_source", "last_post_url", "last_post_legacy", "last_post_days", "activity_checked_at", "activity_scan_complete", "activity_quality")},
+                        }
+                        observation_meta = _observation_metadata(existing["observation_meta_json"]) if existing else {}
+                        supplied_meta = _observation_metadata(entry.get("field_observations"))
+                        incoming_meta = {}
+                        for group, values in incoming_groups.items():
+                            present_key = {"followers": "followers_count", "likes": "likes_count", "creation": "created_date", "activity": "last_post_observed_at"}[group]
+                            present = values.get(present_key) is not None
+                            if group == "activity":
+                                present = any(values.get(k) is not None for k in ("last_post_at", "last_post_at_min", "last_post_at_max", "last_post_raw"))
+                            info = supplied_meta.get(group)
+                            info = info if isinstance(info, dict) else {}
+                            observed = _normalize_observed_iso(info.get("observed_at"))
+                            if group == "activity" and not observed:
+                                observed = _normalize_observed_iso(entry.get("last_post_observed_at"))
+                            if observed and observed > (_normalize_observed_iso(now_str) or now_str):
+                                observed = None
+                            meta = {"observed_at": observed, "source": str(info.get("source") or "legacy_cache"), "profile_id": profile_id, "scan_id": str(info.get("scan_id") or ""), "legacy_synced_at": synced_at if not observed else 0}
+                            if present:
+                                incoming_meta[group] = meta
+                            previous = observation_meta.get(group) or {}
+                            # Snapshot time only orders legacy caches; it is never
+                            # promoted to an actual observation timestamp.
+                            previous_values = {k: existing[k] for k in values} if existing else {}
+                            had_value = previous_values.get(present_key) is not None
+                            if group == "activity":
+                                had_value = any(previous_values.get(k) is not None for k in ("last_post_at", "last_post_at_min", "last_post_at_max", "last_post_raw"))
+                            if existing and not previous:
+                                previous = {"legacy_synced_at": int(existing["last_synced_at"] or 0)}
+                            take = present and (not had_value or _observation_rank(meta, values, group) > _observation_rank(previous, previous_values, group))
+                            chosen = values if take else previous_values
+                            if take:
+                                observation_meta[group] = meta
+                            if chosen:
+                                cols = list(chosen)
+                                cur.execute("UPDATE pages SET " + ", ".join(k + "=?" for k in cols) + " WHERE internal_id=?", [chosen[k] if chosen[k] is not None or k not in ("last_post_legacy", "activity_quality") else (0 if k == "last_post_legacy" else "unknown") for k in cols] + [target_id])
+                        cur.execute("UPDATE pages SET observation_meta_json=? WHERE internal_id=?", (json.dumps(observation_meta, ensure_ascii=False), target_id))
                         if entry.get("category"):
                             cur.execute(
                                 "UPDATE pages SET category = COALESCE(?, category) WHERE internal_id = ?",
@@ -901,39 +1052,40 @@ class FanpageRepository:
                         )
                         stats["links_upserted"] += 1
 
-                        # Insert deduplicated snapshot into page_metric_history
-                        obs_key = str(
-                            entry.get("last_post_observed_at")
-                            or entry.get("detail_synced_at")
-                            or (synced_at if synced_at else "initial")
-                        )
-                        scan_key = seen_in_scan or (f"sync_{synced_at}" if synced_at else "legacy_initial")
-                        cur.execute(
-                            """
-                            INSERT OR IGNORE INTO page_metric_history (
-                                page_id, profile_id, scan_id, observed_at, source,
-                                followers_count, followers_raw, followers_precision,
-                                likes_count, likes_raw, likes_precision,
-                                last_post_at_min, last_post_at_max, created_date
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                target_id,
-                                profile_id,
-                                scan_key,
-                                obs_key,
-                                data_source,
-                                followers_count,
-                                followers_raw,
-                                followers_prec,
-                                likes_count,
-                                likes_raw,
-                                likes_prec,
-                                entry.get("last_post_at_min"),
-                                entry.get("last_post_at_max"),
-                                entry.get("created_date"),
-                            ),
-                        )
+                        # Only actual field observations create metric history.
+                        # Ingesting retained cache again uses the original key.
+                        history_groups = {}
+                        for group in ("followers", "likes"):
+                            meta = incoming_meta.get(group) or {}
+                            if meta.get("observed_at"):
+                                # Use the original source identity, never the latest
+                                # discovery scan. Two profiles observing a page in
+                                # the same second must not collide with each other.
+                                identity = [profile_id, meta.get("source"), meta.get("scan_id") or "observation"]
+                                scan_key = "obs_" + hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+                                key = (meta["observed_at"], scan_key)
+                                history = history_groups.setdefault(key, {"values": {}, "metadata": {}})
+                                history["values"].update(incoming_groups[group])
+                                history["metadata"][group] = meta
+                        for (observed_at, scan_key), history in history_groups.items():
+                            values = history["values"]
+                            metadata = history["metadata"]
+                            # Preserve conflicting evidence even without a scan ID.
+                            # Re-ingesting exactly the same observation is idempotent;
+                            # derived views resolve equal-time conflicts with rank.
+                            value_key = hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()
+                            scan_key += "_" + value_key
+                            cur.execute(
+                                """INSERT OR IGNORE INTO page_metric_history
+                                (page_id, profile_id, scan_id, observed_at, source,
+                                 followers_count, followers_raw, followers_precision,
+                                 likes_count, likes_raw, likes_precision, observation_meta_json)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (target_id, profile_id, scan_key, observed_at, "field_observation",
+                                 values.get("followers_count"), values.get("followers_raw"), values.get("followers_precision"),
+                                 values.get("likes_count"), values.get("likes_raw"), values.get("likes_precision"),
+                                 json.dumps(metadata, ensure_ascii=False)),
+                            )
 
                     # Any previously linked page for this profile not present in raw_pages
                     # (e.g. if cache was explicitly cleared) is marked missing_in_latest_scan, NOT deleted
@@ -1016,8 +1168,9 @@ class FanpageRepository:
             finally:
                 conn.close()
 
-    def list_all_pages_with_links(self) -> List[Dict[str, Any]]:
+    def list_all_pages_with_links(self, *, now: Optional[datetime.datetime] = None) -> List[Dict[str, Any]]:
         """Return all pages joined with their profile links for fast in-memory F3 enrichment."""
+        now_iso = _normalize_observed_iso((now or datetime.datetime.now(datetime.timezone.utc)).isoformat())
         with self._lock:
             conn = self._connect()
             try:
@@ -1036,22 +1189,23 @@ class FanpageRepository:
 
                 recent_metrics_by_page: Dict[str, List[Dict[str, Any]]] = {}
                 for mr in conn.execute(
-                    "SELECT page_id, observed_at, source, followers_count, followers_precision, likes_count, likes_precision FROM page_metric_history ORDER BY observed_at DESC, id DESC"
+                    "SELECT * FROM page_metric_history WHERE source = 'field_observation' ORDER BY observed_at DESC, id DESC"
                 ).fetchall():
                     pid = mr["page_id"]
                     bucket = recent_metrics_by_page.setdefault(pid, [])
-                    if len(bucket) < 5:
-                        bucket.append(dict(mr))
+                    bucket.append(dict(mr))
 
                 for p in pages:
+                    p["field_observations"] = _observation_metadata(p.get("observation_meta_json"))
                     p["tags"] = json.loads(p.get("tags_json") or "[]")
                     p["profile_links"] = links_by_page.get(p["internal_id"], [])
-                    p["recent_metric_points"] = recent_metrics_by_page.get(p["internal_id"], [])
+                    projected = _verified_metric_points(recent_metrics_by_page.get(p["internal_id"], []), now_iso=now_iso)
+                    p["recent_metric_points"] = list(reversed(projected[-5:]))
                 return pages
             finally:
                 conn.close()
 
-    def get_page_detail(self, page_id: str) -> Optional[Dict[str, Any]]:
+    def get_page_detail(self, page_id: str, *, now: Optional[datetime.datetime] = None) -> Optional[Dict[str, Any]]:
         """Find a page by internal_id or fb_page_id, including links, aliases, history, alerts."""
         k_internal, k_fb = _lookup_keys(page_id)
         if not k_internal:
@@ -1067,6 +1221,7 @@ class FanpageRepository:
                     return None
                 page = dict(row)
                 internal_id = page["internal_id"]
+                page["field_observations"] = _observation_metadata(page.get("observation_meta_json"))
                 page["tags"] = json.loads(page.get("tags_json") or "[]")
                 page["profile_links"] = [
                     dict(r)
@@ -1089,6 +1244,12 @@ class FanpageRepository:
                         (internal_id,),
                     ).fetchall()
                 ]
+                verified_history = [dict(r) for r in conn.execute(
+                    "SELECT * FROM page_metric_history WHERE page_id=? AND source='field_observation'",
+                    (internal_id,),
+                ).fetchall()]
+                now_iso = _normalize_observed_iso((now or datetime.datetime.now(datetime.timezone.utc)).isoformat())
+                page["recent_metric_points"] = list(reversed(_verified_metric_points(verified_history, now_iso=now_iso)[-5:]))
                 page["alerts"] = [
                     dict(r)
                     for r in conn.execute(
@@ -1335,6 +1496,10 @@ class FanpageRepository:
         *,
         options: Optional[Dict[str, Any]] = None,
         owner_instance: Optional[str] = None,
+        execution_token: Optional[str] = None,
+        lease_seconds: float = 90.0,
+        force_new: bool = True,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         now_str = _utc_now_iso()
         opts_json = json.dumps(options or {}, ensure_ascii=False)
@@ -1343,6 +1508,14 @@ class FanpageRepository:
             try:
                 cur = conn.cursor()
                 cur.execute("BEGIN IMMEDIATE")
+                existing = None
+                if idempotency_key:
+                    existing = cur.execute("SELECT * FROM sync_jobs WHERE idempotency_key = ?", (idempotency_key,)).fetchone()
+                if existing is None and not force_new:
+                    existing = cur.execute("SELECT * FROM sync_jobs WHERE status IN ('queued', 'running', 'cancelling') ORDER BY created_at DESC LIMIT 1").fetchone()
+                if existing is not None:
+                    conn.commit()
+                    return self._serialize_job_row(conn, existing)
                 cur.execute(
                     """
                     INSERT INTO sync_jobs (
@@ -1361,6 +1534,13 @@ class FanpageRepository:
                         now_str,
                     ),
                 )
+                if execution_token:
+                    cur.execute(
+                        "UPDATE sync_jobs SET execution_token=?, owner_pid=?, owner_created=?, lease_expires_at=?, idempotency_key=? WHERE job_id=?",
+                        (execution_token, os.getpid(), psutil.Process().create_time(), time.time() + lease_seconds, idempotency_key, job_id),
+                    )
+                elif idempotency_key:
+                    cur.execute("UPDATE sync_jobs SET idempotency_key=? WHERE job_id=?", (idempotency_key, job_id))
                 for p_item in profile_items:
                     cur.execute(
                         """
@@ -1395,13 +1575,24 @@ class FanpageRepository:
                 row = conn.execute(
                     """
                     SELECT * FROM sync_jobs
-                    WHERE status IN ('queued', 'running')
+                    WHERE status IN ('queued', 'running', 'cancelling')
                     ORDER BY created_at DESC LIMIT 1
                     """
                 ).fetchone()
                 if not row:
                     return None
                 return self._serialize_job_row(conn, row, include_items=True)
+            finally:
+                conn.close()
+
+    def get_sync_job_by_idempotency_key(self, key: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM sync_jobs WHERE idempotency_key = ?", (key,)
+                ).fetchone()
+                return self._serialize_job_row(conn, row, include_items=True) if row else None
             finally:
                 conn.close()
 
@@ -1442,9 +1633,10 @@ class FanpageRepository:
         error: Optional[str] = None,
         started_at: Optional[str] = None,
         finished_at: Optional[str] = None,
+        execution_token: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         now_str = _utc_now_iso()
-        with self._lock:
+        with self.job_guard(job_id, execution_token, allow_cancel=True), self._lock:
             conn = self._connect()
             try:
                 cur = conn.cursor()
@@ -1485,10 +1677,11 @@ class FanpageRepository:
         detail: Optional[Dict[str, Any]] = None,
         started_at: Optional[str] = None,
         finished_at: Optional[str] = None,
+        execution_token: Optional[str] = None,
     ) -> None:
         now_str = _utc_now_iso()
         detail_str = json.dumps(detail, ensure_ascii=False) if detail is not None else None
-        with self._lock:
+        with self.job_guard(job_id, execution_token, allow_cancel=True), self._lock:
             conn = self._connect()
             try:
                 cur = conn.cursor()
@@ -1527,74 +1720,153 @@ class FanpageRepository:
             finally:
                 conn.close()
 
-    # --- Stage 3: Time-Series Metrics, Deduplicated Alerts, Crash Recovery & Backup ---
-
-    def recover_interrupted_jobs(
-        self,
-        *,
-        current_owner_instance: Optional[str] = None,
-        now_iso: Optional[str] = None,
-    ) -> int:
-        """Mark stale queued/running jobs from previous process instances as interrupted.
-
-        Preserves already completed items so ``retry_job`` only re-runs the
-        unfinished items after a restart.
-        """
-        now_str = now_iso or _utc_now_iso()
-        recovered = 0
-        with self._lock:
+    def merge_sync_job_item_detail(
+        self, item_id: int, *, job_id: str, detail: Dict[str, Any],
+        execution_token: Optional[str] = None,
+    ) -> None:
+        """Attach cleanup evidence without replacing the scan outcome."""
+        with self.job_guard(job_id, execution_token, allow_cancel=True), self._lock:
             conn = self._connect()
             try:
-                cur = conn.cursor()
-                cur.execute("BEGIN IMMEDIATE")
-                if current_owner_instance:
-                    rows = cur.execute(
-                        """
-                        SELECT job_id FROM sync_jobs
-                        WHERE status IN ('queued', 'running')
-                          AND (owner_instance IS NULL OR owner_instance != ?)
-                        """,
-                        (current_owner_instance,),
-                    ).fetchall()
-                else:
-                    rows = cur.execute(
-                        "SELECT job_id FROM sync_jobs WHERE status IN ('queued', 'running')"
-                    ).fetchall()
-
-                for r in rows:
-                    jid = r["job_id"]
-                    cur.execute(
-                        """
-                        UPDATE sync_job_items
-                        SET status = 'skipped',
-                            error_code = 'INTERRUPTED_BY_RESTART',
-                            error = 'Job bị gián đoạn do ứng dụng khởi động lại; có thể bấm Thử lại.',
-                            finished_at = ?,
-                            updated_at = ?
-                        WHERE job_id = ? AND status IN ('pending', 'running')
-                        """,
-                        (now_str, now_str, jid),
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT detail_json FROM sync_job_items WHERE id=? AND job_id=?",
+                    (int(item_id), job_id),
+                ).fetchone()
+                if row:
+                    try:
+                        previous = json.loads(row["detail_json"] or "{}")
+                    except (ValueError, TypeError):
+                        previous = {}
+                    merged = previous if isinstance(previous, dict) else {}
+                    merged.update(detail)
+                    conn.execute(
+                        "UPDATE sync_job_items SET detail_json=?, updated_at=? WHERE id=? AND job_id=?",
+                        (json.dumps(merged, ensure_ascii=False), _utc_now_iso(), int(item_id), job_id),
                     )
-                    self._refresh_job_counters(cur, jid, now_str)
-                    cur.execute(
-                        """
-                        UPDATE sync_jobs
-                        SET status = 'interrupted',
-                            error = 'Gián đoạn khi khởi động lại ứng dụng.',
-                            finished_at = ?,
-                            heartbeat_at = ?
-                        WHERE job_id = ?
-                        """,
-                        (now_str, now_str, jid),
-                    )
-                    recovered += 1
                 conn.commit()
-                return recovered
             except Exception:
                 conn.rollback()
                 raise
             finally:
                 conn.close()
+
+    # --- Stage 3: Time-Series Metrics, Deduplicated Alerts, Crash Recovery & Backup ---
+
+    @staticmethod
+    def _owner_dead(record: Dict[str, Any]) -> bool:
+        if not record.get("owner_pid") or record.get("owner_created") is None:
+            return False
+        try:
+            proc = psutil.Process(int(record["owner_pid"]))
+            return abs(proc.create_time() - float(record["owner_created"])) > 0.01
+        except psutil.NoSuchProcess:
+            return True
+        except (psutil.Error, ValueError, TypeError):
+            return False
+
+    @contextmanager
+    def job_guard(self, job_id: str, execution_token: Optional[str], *, allow_cancel: bool = False):
+        """Serialize ownership changes with publication into JSON and SQLite.
+
+        Do not acquire this while holding a SQLite transaction. Recovery and
+        cancellation take this same IPC lock and re-read after acquiring it.
+        """
+        with self._job_locks.acquire(job_id, timeout=15.0):
+            job = self.get_sync_job(job_id)
+            if job and job.get("execution_token"):
+                valid = (
+                    execution_token == job["execution_token"]
+                    and job["status"] in ("queued", "running", "cancelling")
+                    and float(job.get("lease_expires_at") or 0) > time.time()
+                    and (allow_cancel or not job.get("cancel_requested_at"))
+                )
+                if not valid:
+                    raise JobLeaseLost("JOB_LEASE_LOST: job không còn quyền ghi.")
+            elif execution_token:
+                raise JobLeaseLost("JOB_LEASE_LOST: job không tồn tại hoặc token đã đổi.")
+            yield job
+
+    def renew_job_lease(self, job_id: str, execution_token: str, lease_seconds: float = 90.0) -> Dict[str, Any]:
+        with self.job_guard(job_id, execution_token, allow_cancel=True), self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("UPDATE sync_jobs SET heartbeat_at=?, lease_expires_at=? WHERE job_id=? AND execution_token=?",
+                             (_utc_now_iso(), time.time() + lease_seconds, job_id, execution_token))
+                conn.commit()
+            finally:
+                conn.close()
+            return self.get_sync_job(job_id) or {}
+
+    def revoke_job(self, job_id: str, execution_token: str) -> None:
+        """Fence a worker after shutdown drain has reached its deadline."""
+        with self._job_locks.acquire(job_id, timeout=15.0), self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT execution_token, status FROM sync_jobs WHERE job_id=?", (job_id,)).fetchone()
+                if row and row["execution_token"] == execution_token and row["status"] in ("queued", "running", "cancelling"):
+                    now = _utc_now_iso()
+                    conn.execute("UPDATE sync_job_items SET status='skipped', error_code='SHUTDOWN_TIMEOUT', finished_at=?, updated_at=? WHERE job_id=? AND status IN ('pending', 'running')", (now, now, job_id))
+                    self._refresh_job_counters(conn.cursor(), job_id, now)
+                    conn.execute("UPDATE sync_jobs SET status='interrupted', lease_expires_at=0, finished_at=?, error='Shutdown drain hết hạn; worker đã mất quyền ghi.' WHERE job_id=?", (now, job_id))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def request_job_cancel(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._job_locks.acquire(job_id, timeout=15.0), self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("UPDATE sync_jobs SET cancel_requested_at=?, status='cancelling' WHERE job_id=? AND status IN ('queued', 'running', 'cancelling')", (_utc_now_iso(), job_id))
+                conn.commit()
+            finally:
+                conn.close()
+            return self.get_sync_job(job_id)
+
+    def recover_interrupted_jobs(
+        self, *, current_owner_instance: Optional[str] = None, now_iso: Optional[str] = None,
+    ) -> int:
+        """Recover dead/expired owners; a different owner alone proves nothing."""
+        now_str = now_iso or _utc_now_iso()
+        now_dt = datetime.datetime.fromisoformat(now_str.replace("Z", "+00:00"))
+        now_epoch = now_dt.timestamp()
+        with self._lock:
+            conn = self._connect()
+            try:
+                ids = [r[0] for r in conn.execute("SELECT job_id FROM sync_jobs WHERE status IN ('queued', 'running', 'cancelling')")]
+            finally:
+                conn.close()
+        recovered = 0
+        for jid in ids:
+            with self._job_locks.acquire(jid, timeout=15.0), self._lock:
+                conn = self._connect()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute("SELECT * FROM sync_jobs WHERE job_id=?", (jid,)).fetchone()
+                    if not row or row["status"] not in ("queued", "running", "cancelling"):
+                        continue
+                    record = dict(row)
+                    lease = record.get("lease_expires_at")
+                    if lease is None:
+                        heartbeat = _normalize_observed_iso(record.get("heartbeat_at"))
+                        # Legacy records get a full grace period, never recovery
+                        # merely because another instance starts.
+                        lease = (datetime.datetime.fromisoformat(heartbeat.replace("Z", "+00:00")).timestamp() + 90.0) if heartbeat else now_epoch + 90.0
+                    if float(lease) > now_epoch and not self._owner_dead(record):
+                        continue
+                    cur = conn.cursor()
+                    cur.execute("UPDATE sync_job_items SET status='skipped', error_code='INTERRUPTED_BY_RESTART', error='Job mất owner hoặc lease hết hạn; có thể thử lại.', finished_at=?, updated_at=? WHERE job_id=? AND status IN ('pending', 'running')", (now_str, now_str, jid))
+                    self._refresh_job_counters(cur, jid, now_str)
+                    cur.execute("UPDATE sync_jobs SET status='interrupted', error='Owner đã dừng hoặc lease hết hạn.', finished_at=?, lease_expires_at=0 WHERE job_id=?", (now_str, jid))
+                    conn.commit()
+                    recovered += 1
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.close()
+        return recovered
 
     def get_page_metrics_series(
         self,
@@ -1638,12 +1910,12 @@ class FanpageRepository:
                     dict(r)
                     for r in conn.execute(
                         """
-                        SELECT id, observed_at, source, scan_id,
+                        SELECT id, profile_id, observed_at, source, scan_id, observation_meta_json,
                                followers_count, followers_raw, followers_precision,
                                likes_count, likes_raw, likes_precision,
                                last_post_at_min, last_post_at_max, created_date
                         FROM page_metric_history
-                        WHERE page_id = ?
+                        WHERE page_id = ? AND source = 'field_observation'
                         ORDER BY observed_at ASC, id ASC
                         """,
                         (internal_id,),
@@ -1653,17 +1925,9 @@ class FanpageRepository:
                 conn.close()
 
         # Keep only real observations whose timestamp falls inside the window.
-        # Legacy rows may store epoch seconds or placeholders ("initial"); epoch is
-        # normalized, unparseable timestamps are excluded instead of guessed.
-        window_points: List[Dict[str, Any]] = []
-        for pt in rows:
-            obs_norm = _normalize_observed_iso(pt.get("observed_at"))
-            if obs_norm is None or obs_norm < cutoff_iso:
-                continue
-            pt["observed_at_raw"] = pt.get("observed_at")
-            pt["observed_at"] = obs_norm
-            window_points.append(pt)
-        window_points.sort(key=lambda p: (p["observed_at"], p.get("id") or 0))
+        # Pre-v3 rows used page sync or last-post timestamps as metric fallback.
+        # They remain in raw history but cannot establish verified growth.
+        window_points = _verified_metric_points(rows, now_iso=_normalize_observed_iso(now_dt.isoformat()), cutoff_iso=cutoff_iso)
 
         flw_pts = [p for p in window_points if p.get("followers_count") is not None]
         likes_pts = [p for p in window_points if p.get("likes_count") is not None]
@@ -2297,7 +2561,7 @@ class FanpageRepository:
                 )
                 metrics_deleted = cur.rowcount
                 cur.execute(
-                    "DELETE FROM sync_jobs WHERE status NOT IN ('queued', 'running') AND created_at < ?",
+                    "DELETE FROM sync_jobs WHERE status NOT IN ('queued', 'running', 'cancelling') AND created_at < ?",
                     (job_cutoff,),
                 )
                 jobs_deleted = cur.rowcount

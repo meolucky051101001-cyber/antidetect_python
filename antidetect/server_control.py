@@ -204,20 +204,31 @@ def write_server_info(pid: int, port: int, instance_id: str):
         "cmdline_digest": _cmdline_digest(command_line) if command_line else "",
     }
     os.makedirs(DATA_DIR, exist_ok=True)
-    tmp_path = f"{PID_FILE}.tmp.{os.getpid()}"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(info, f, indent=2, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, PID_FILE)
+    from .profile_locks import ProfileLocks
+
+    with ProfileLocks(os.path.dirname(PID_FILE), suffix=".server").acquire("server-info"):
+        tmp_path = f"{PID_FILE}.tmp.{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(info, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, PID_FILE)
 
 
-def remove_server_info():
-    try:
-        if os.path.exists(PID_FILE):
+def remove_server_info(*, expected_instance_id=None, expected_info=None):
+    from .profile_locks import ProfileLocks
+
+    with ProfileLocks(os.path.dirname(PID_FILE), suffix=".server").acquire("server-info"):
+        current = read_server_info()
+        if expected_info is not None and current != expected_info:
+            return False
+        if expected_instance_id is not None and (current or {}).get("instance_id") != expected_instance_id:
+            return False
+        try:
             os.remove(PID_FILE)
-    except OSError:
-        pass
+        except FileNotFoundError:
+            pass
+        return True
 
 
 def verify_server_identity(info: Dict[str, Any]) -> bool:
@@ -325,7 +336,7 @@ def stop_server(timeout: float = 8.0) -> Dict[str, Any]:
         _safe_log(
             f"[ServerControl] PID {pid} không còn tồn tại. Đã dọn server.pid cũ."
         )
-        remove_server_info()
+        remove_server_info(expected_info=info)
         return {
             "success": True,
             "message": "Đã dọn server.pid cũ; tiến trình không còn tồn tại.",
@@ -359,7 +370,7 @@ def stop_server(timeout: float = 8.0) -> Dict[str, Any]:
                 if resp.status in (200, 202):
                     _safe_log(f"[ServerControl] Đã gửi lệnh tắt máy chủ qua API cổng {port}.")
                     if _wait_for_process_exit(pid, timeout):
-                        remove_server_info()
+                        remove_server_info(expected_info=info)
                         return {"success": True, "message": "Máy chủ đã tắt an toàn qua API."}
                     # Shutdown was accepted but process is hung. Verified kill
                     # is allowed below.
@@ -409,7 +420,7 @@ def stop_server(timeout: float = 8.0) -> Dict[str, Any]:
             _safe_log(f"[ServerControl] Lỗi khi dừng PID {pid}: {type(e).__name__}: {e}")
 
     if _wait_for_process_exit(pid, timeout):
-        remove_server_info()
+        remove_server_info(expected_info=info)
         return {"success": True, "message": f"Đã dừng máy chủ PID {pid} thành công."}
 
     return {

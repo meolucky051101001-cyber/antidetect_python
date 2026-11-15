@@ -1,7 +1,11 @@
-# HANDOFF — Antidetect Python (cập nhật 2026-11-08; đã commit Fanpages 1-3, Tab Persistence, Soak Hardening)
+# HANDOFF — Antidetect Python (cập nhật 2026-11-15)
 
 Điểm bắt đầu cho model/người tiếp nhận. Mô tả **trạng thái thật hiện tại**.
 Đọc hết mục "Quy tắc an toàn" trước khi sửa code.
+
+**Trạng thái hiện tại 15/11/2026:** các sửa R01–R11 đã được triển khai trên nhánh `codex/review-fixes-2026-11-15`, base HEAD `260f3cc`, giữ các thay đổi đã có trước review. Xem [báo cáo triển khai và kiểm chứng](docs/VERIFICATION_REVIEW_FIXES_2026-11-15.md) cho số test mới, migration và phạm vi còn chưa nghiệm thu. Các thay đổi ngoài phạm vi review có sẵn được giữ riêng trong workspace; các khẳng định “sạch/production-ready” và HEAD bên dưới chỉ mô tả baseline lịch sử 08/11, không phải trạng thái hiện tại.
+
+Quy tắc mới cần giữ: không xóa khi stop/liveness chưa xác minh; cleanup phải đúng owner/generation; proxy enabled sai không được fallback direct; patch dữ liệu chậm phải kiểm tra revision; scan worker mất token không được publish; cache giữ lại không tạo observation/history mới; scheduler accepted không có nghĩa scan completed. SQLite schema version 3 nâng cấp từ v1 trong một transaction; không chạy writer cũ và mới cùng data. Không tự migrate production trong test.
 
 ---
 

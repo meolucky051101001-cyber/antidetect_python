@@ -177,6 +177,7 @@ class BrowserLauncher:
         self._launch_locks = collections.defaultdict(threading.RLock)
         # QĐ-6: lifecycle lock dùng chung với copy/delete ở process khác.
         self._lifecycle_locks = ProfileLocks(DATA_DIR)
+        self._shutdown_requested = False
         # H5: Event để CDP thread báo hiệu đã inject stealth thành công
         self._cdp_ready_events: Dict[str, threading.Event] = {}
         # R4: page configuration is split into two phases. The CDP thread
@@ -215,11 +216,10 @@ class BrowserLauncher:
         qua _recover_runtime ở lần stop kế tiếp. Quét runtime store ở đây
         từng khiến `cli.py list` đóng toàn bộ browser của server.
         """
-        for profile_id in list(self.active_processes):
-            try:
-                self.stop(profile_id)
-            except Exception:
-                pass
+        try:
+            self.stop_owned()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # CDP health plumbing
@@ -531,8 +531,49 @@ class BrowserLauncher:
             state = self._identity_for(pid, user_data_dir)["state"]
         return state
 
-    def _clear_process(self, profile_id):
-        record = self._runtime_store.get(profile_id) or {}
+    def _runtime_matches_local(self, profile_id, record):
+        if not record:
+            return True
+        proc = self.active_processes.get(profile_id)
+        local_launch = self.cdp_health.current_launch_id(profile_id)
+        if proc and record.get("pid") and proc.pid != record.get("pid"):
+            return False
+        if local_launch and record.get("launch_id") and local_launch != record["launch_id"]:
+            return False
+        return True
+
+    def _forget_stale_local_process(self, profile_id):
+        """Forget local handles without touching a replacement's persistent record."""
+        with self._launch_locks[profile_id]:
+            self._forget_stale_local_process_locked(profile_id)
+
+    def _forget_stale_local_process_locked(self, profile_id):
+        old_launch = self.cdp_health.current_launch_id(profile_id)
+        if not self.cdp_health.forget_if_launch(profile_id, old_launch):
+            return
+        self.active_processes.pop(profile_id, None)
+        release_port(self._requested_ports.pop(profile_id, None))
+        release_port(self.active_ports.pop(profile_id, None))
+        self._recovery_required.discard(profile_id)
+        self._proxy_credentials.pop(profile_id, None)
+        self._cdp_ready_events.pop(profile_id, None)
+        self._core_verified_events.pop(profile_id, None)
+        self._navigation_events.pop(profile_id, None)
+
+    def _clear_process(self, profile_id, *, expected_record=None):
+        with self._launch_locks[profile_id]:
+            return self._clear_process_locked(profile_id, expected_record=expected_record)
+
+    def _clear_process_locked(self, profile_id, *, expected_record=None):
+        record = expected_record if expected_record is not None else (self._runtime_store.get(profile_id) or {})
+        if expected_record is None and not self._runtime_matches_local(profile_id, record):
+            return False
+        try:
+            if not self._runtime_store.remove_if_matches(profile_id, record):
+                return False
+        except Exception:
+            # Losing recovery metadata is not a successful stop/cleanup.
+            return False
         requested = self._requested_ports.pop(profile_id, None) or record.get("requested_port")
         active = self.active_ports.pop(profile_id, None) or record.get("port")
         self.active_processes.pop(profile_id, None)
@@ -545,10 +586,6 @@ class BrowserLauncher:
         release_port(requested)
         if active and active != requested:
             release_port(active)
-        try:
-            self._runtime_store.remove(profile_id)
-        except Exception:
-            pass
         # P0-02: Dọn dẹp thư mục tiện ích mở rộng proxy auth tạm thời nếu có
         try:
             profile_dir = self.manager.get_profile_dir(profile_id)
@@ -557,6 +594,7 @@ class BrowserLauncher:
                 shutil.rmtree(ext_dir, ignore_errors=True)
         except Exception:
             pass
+        return True
 
     def _identity(self, profile):
         from .storage import PROFILES_DATA_DIR
@@ -624,8 +662,11 @@ class BrowserLauncher:
             )
             return record
         if identity.get("state") in ("absent", "mismatch"):
-            self._clear_process(profile_id)
-            return None
+            if self._clear_process(profile_id, expected_record=record):
+                return None
+            # Another instance replaced the runtime while process identity was
+            # being queried. Never turn that new record into a stopped result.
+            return self._runtime_store.get(profile_id) or record
         # Preserve persisted state on query failure; stop() will refuse to kill.
         self._recovery_required.add(profile_id)
         self.cdp_health.mark_recovery_required(
@@ -639,12 +680,19 @@ class BrowserLauncher:
 
     def is_running(self, profile_id: str) -> bool:
         """Process liveness only. Never clears or sets CDP health."""
+        # Observe and discard a process under the same lock used by launch.
+        # Otherwise a status reader can poll old A, then clear newly launched B.
+        with self._launch_locks[profile_id]:
+            return self._is_running_locked(profile_id)
+
+    def _is_running_locked(self, profile_id: str) -> bool:
         proc = self.active_processes.get(profile_id)
         if proc:
             if proc.poll() is None:
                 return True
-            self._clear_process(profile_id)
-            return False
+            if self._clear_process(profile_id):
+                return False
+            self._forget_stale_local_process(profile_id)
         record = self._recover_runtime(profile_id)
         if record is not None:
             return True
@@ -665,8 +713,8 @@ class BrowserLauncher:
                 self.active_ports[profile_id] = identity["port"]
             return True
         if identity["state"] in ("absent", "mismatch"):
-            self._clear_process(profile_id)
-            return False
+            # A runtime may have appeared while checking legacy metadata.
+            return not self._clear_process(profile_id, expected_record={})
         # Preserve persisted state on query failure; stop() will refuse to kill.
         self._recovery_required.add(profile_id)
         self.cdp_health.mark_recovery_required(
@@ -2021,6 +2069,10 @@ class BrowserLauncher:
                 )
         return self.browser_path
 
+    def begin_shutdown(self) -> None:
+        """Refuse new launches; in-flight launches clean their exact generation."""
+        self._shutdown_requested = True
+
     def launch(
         self, profile_id: str, open_url: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -2029,7 +2081,14 @@ class BrowserLauncher:
         started = time.monotonic()
         try:
             with self._lifecycle_locks.acquire(profile_id, timeout=2.0):
-                result = self._launch_impl(profile_id, open_url=open_url)
+                if getattr(self, "_shutdown_requested", False):
+                    result = {"success": False, "code": "SERVER_SHUTTING_DOWN", "error": "Server đang tắt; không mở thêm profile."}
+                else:
+                    result = self._launch_impl(profile_id, open_url=open_url)
+                    if getattr(self, "_shutdown_requested", False) and result.get("launched_now"):
+                        launch_id = result.get("launch_id") or (result.get("cdp_health") or {}).get("launch_id")
+                        cleanup = self.stop(profile_id, expected_launch_id=launch_id, expected_owner_instance=self.instance_id) if launch_id else {"success": False, "code": "SESSION_ID_UNKNOWN"}
+                        result = {"success": False, "code": "SERVER_SHUTTING_DOWN", "error": "Server đã bắt đầu tắt trong lúc mở profile.", "cleanup": cleanup}
         except ProfileLockTimeout:
             result = {
                 "success": False,
@@ -2079,6 +2138,12 @@ class BrowserLauncher:
 
             if self.is_running(profile_id):
                 return self._running_launch_result(profile_id, open_url)
+
+            # This is a configuration invariant, independent of the optional
+            # fingerprint gate/force policy in API and background callers.
+            proxy_error = profile.proxy.configuration_error() if profile.proxy else None
+            if proxy_error:
+                return {"success": False, "code": "INVALID_PROXY_CONFIG", "error": proxy_error}
 
             profile_dir = self.manager.get_profile_dir(profile_id)
             user_data_dir = os.path.join(profile_dir, "user_data")
@@ -2424,12 +2489,19 @@ class BrowserLauncher:
                     "error": "Lỗi khởi chạy trình duyệt. Vui lòng thử lại.",
                 }
 
-    def stop(self, profile_id: str) -> Dict[str, Any]:
+    def stop(self, profile_id: str, *, expected_launch_id: Optional[str] = None, expected_owner_instance: Optional[str] = None) -> Dict[str, Any]:
         """Instrumented entrypoint; see ``_stop_impl`` for the real flow."""
         metrics.inc("stop_attempts")
         try:
             with self._lifecycle_locks.acquire(profile_id, timeout=4.0):
-                result = self._stop_impl(profile_id)
+                with self._launch_locks[profile_id]:
+                    record = self._runtime_store.get(profile_id) or {}
+                    current = record.get("launch_id") or self.cdp_health.current_launch_id(profile_id)
+                    owner = record.get("owner_instance") or self.cdp_health.snapshot(profile_id).get("owner_instance")
+                    if (expected_launch_id is not None and current != expected_launch_id) or (expected_owner_instance is not None and owner != expected_owner_instance):
+                        result = {"success": False, "code": "SESSION_CHANGED", "error": "Phiên profile đã thay đổi."}
+                    else:
+                        result = self._stop_impl(profile_id)
         except ProfileLockTimeout:
             result = {
                 "success": False,
@@ -2454,16 +2526,22 @@ class BrowserLauncher:
                 if not stale_record.get("pid"):
                     return {"success": False, "error": "Profile không tồn tại"}
             proc = self.active_processes.get(profile_id)
+            record = self._runtime_store.get(profile_id) or {}
+            if proc and not self._runtime_matches_local(profile_id, record):
+                if proc.poll() is not None:
+                    self._forget_stale_local_process(profile_id)
+                return {"success": False, "code": "SESSION_CHANGED", "error": "Phiên profile đã thay đổi; hãy kiểm tra lại trước khi dừng."}
             if proc and proc.poll() is not None:
-                self._clear_process(profile_id)
+                if not self._clear_process(profile_id, expected_record=record):
+                    return {"success": False, "code": "SESSION_CHANGED", "error": "Runtime profile đã thay đổi; dữ liệu được giữ nguyên."}
                 return {"success": True, "message": "Trình duyệt đã đóng"}
 
-            record = self._runtime_store.get(profile_id) or {}
             pid = proc.pid if proc else (
                 record.get("pid") or (profile.pid if profile else None)
             )
             if not pid:
-                self._clear_process(profile_id)
+                if not self._clear_process(profile_id, expected_record=record):
+                    return {"success": False, "code": "SESSION_CHANGED", "error": "Runtime profile đã thay đổi; dữ liệu được giữ nguyên."}
                 return {"success": True, "message": "Profile đã dừng"}
             user_data_dir = record.get("user_data_dir") or os.path.join(
                 PROFILES_DATA_DIR, profile_id, "user_data"
@@ -2472,9 +2550,7 @@ class BrowserLauncher:
                 live_port = self.active_ports.get(profile_id)
                 if live_port:
                     self._snapshot_tabs_via_http(live_port, user_data_dir)
-            launch_id = self.cdp_health.current_launch_id(profile_id) or record.get(
-                "launch_id"
-            )
+            launch_id = record.get("launch_id") or self.cdp_health.current_launch_id(profile_id)
             if self.cdp_health.mark_stopping(profile_id):
                 stopping_snapshot = self.cdp_health.snapshot(profile_id)
                 if launch_id:
@@ -2503,7 +2579,8 @@ class BrowserLauncher:
             if not proc:
                 identity = self._identity_for_stop(pid, user_data_dir)
                 if identity["state"] in ("absent", "mismatch"):
-                    self._clear_process(profile_id)
+                    if not self._clear_process(profile_id, expected_record=record):
+                        return {"success": False, "code": "SESSION_CHANGED", "error": "Runtime profile đã thay đổi; dữ liệu được giữ nguyên."}
                     return {"success": True, "message": "Phiên cũ đã kết thúc"}
                 if identity["state"] != "owned":
                     return _stop_failed("Chưa xác minh được tiến trình của profile; không gửi lệnh tắt.")
@@ -2598,8 +2675,26 @@ class BrowserLauncher:
                     return _stop_failed("Trình duyệt vẫn đang chạy; chưa thể báo đã dừng.")
             except (OSError, subprocess.SubprocessError):
                 return _stop_failed("Không thể dừng trình duyệt; trạng thái được giữ nguyên.")
-            self._clear_process(profile_id)
+            if not self._clear_process(profile_id, expected_record=record):
+                return {"success": False, "code": "SESSION_CHANGED", "error": "Runtime profile đã thay đổi; dữ liệu được giữ nguyên."}
             return {"success": True, "message": "Đã xác nhận trình duyệt dừng"}
+
+    def stop_owned(self):
+        """Automatic cleanup only closes generations owned by this instance."""
+        candidates = {}
+        for profile_id, record in self._runtime_store.all().items():
+            if record.get("owner_instance") == self.instance_id and record.get("launch_id"):
+                candidates[profile_id] = record["launch_id"]
+        for profile_id in list(self.active_processes):
+            snapshot = self.cdp_health.snapshot(profile_id)
+            if snapshot.get("owner_instance") == self.instance_id and snapshot.get("launch_id"):
+                candidates.setdefault(profile_id, snapshot["launch_id"])
+        results = {
+            profile_id: self.stop(profile_id, expected_launch_id=launch_id, expected_owner_instance=self.instance_id)
+            for profile_id, launch_id in candidates.items()
+        }
+        failed = [pid for pid, result in results.items() if not result.get("success") and result.get("code") != "SESSION_CHANGED"]
+        return {"success": not failed, "failed_profile_ids": failed, "results": results}
 
     def stop_all(self, profile_ids: Optional[List[str]] = None):
         """Dừng profile đang chạy. ``None`` = toàn bộ; ``[]`` = không dừng ai.

@@ -13,6 +13,8 @@ import json
 import os
 import threading
 import uuid
+from dataclasses import dataclass, field
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -30,6 +32,81 @@ VALID_ACTIONS = (
 MAX_RULES = 20
 
 log = get_logger("scheduler")
+
+
+_occurrence_context: ContextVar[Optional[str]] = ContextVar("scheduler_occurrence", default=None)
+
+
+def current_occurrence_key() -> Optional[str]:
+    """Callbacks enqueueing jobs pass this durable key to their repository."""
+    return _occurrence_context.get()
+
+
+@dataclass
+class ActionResult:
+    status: str
+    error: Optional[str] = None
+    retryable: bool = False
+    retryable_profile_ids: List[str] = field(default_factory=list)
+    job_id: Optional[str] = None
+    details: Dict[str, Any] = field(default_factory=dict)
+
+
+def normalize_action_result(value: Any) -> ActionResult:
+    if isinstance(value, ActionResult):
+        if value.status not in ("succeeded", "partial", "failed", "skipped", "accepted"):
+            return ActionResult("failed", "INVALID_ACTION_RESULT")
+        if value.status == "accepted" and not value.job_id:
+            return ActionResult("failed", "INVALID_ACTION_RESULT")
+        return value
+    if not isinstance(value, dict):
+        return ActionResult("failed", "INVALID_ACTION_RESULT")
+    reason = str(value.get("code") or value.get("reason") or "ACTION_FAILED")
+    if value.get("skipped") is True:
+        retryable = value.get("retryable", reason in ("bulk_busy", "remote_bulk_job", "PROFILE_BUSY")) is True
+        return ActionResult("skipped", reason, retryable=retryable)
+    # A synchronous bulk launch also has job_id. Only enqueue-only responses
+    # can mean accepted; outcome fields always take precedence.
+    explicit_status = value.get("status")
+    if value.get("job_id") and explicit_status in (None, "accepted") and not any(k in value for k in ("success", "results", "failures", "failed_count")):
+        return ActionResult("accepted", job_id=str(value["job_id"]))
+    results = value.get("results") or {}
+    if isinstance(results, list):
+        results = {str(item.get("profile_id") or i): item.get("result", item) for i, item in enumerate(results) if isinstance(item, dict)}
+    failed = list(value.get("failed_profile_ids") or [])
+    blocked = [str(item.get("profile_id")) for item in value.get("blocked", []) if isinstance(item, dict) and item.get("profile_id")]
+    failed.extend(pid for pid in blocked if pid not in failed)
+    retry_ids, succeeded_ids = [], []
+    if isinstance(results, dict):
+        for pid, result in results.items():
+            if not isinstance(result, dict):
+                continue
+            unhealthy = result.get("cdp_ready") is False or (result.get("cdp_health") or {}).get("state") not in (None, "healthy")
+            if result.get("success") is False or result.get("status") in ("failed", "conflict") or unhealthy:
+                if pid not in failed:
+                    failed.append(pid)
+                default_retry = result.get("code") in ("PROFILE_BUSY", "PROXY_TIMEOUT", "NETWORK_ERROR", "PROFILE_REVISION_CONFLICT")
+                if result.get("retryable", default_retry) is True:
+                    retry_ids.append(pid)
+            elif result.get("success") is True or result.get("status") in ("succeeded", "synced"):
+                succeeded_ids.append(pid)
+    details = {"failed_profile_ids": failed, "succeeded_profile_ids": succeeded_ids}
+    if failed or value.get("success") is False or explicit_status in ("failed", "partial", "cancelled"):
+        successes = len(succeeded_ids) or int(value.get("synced") or value.get("started") or 0)
+        return ActionResult("partial" if successes > 0 or explicit_status == "partial" else "failed", reason,
+                            retryable=bool(retry_ids) or value.get("retryable") is True,
+                            retryable_profile_ids=retry_ids, details=details)
+    if value.get("success") is True:
+        if explicit_status == "accepted" and value.get("job_id"):
+            return ActionResult("accepted", job_id=str(value["job_id"]), details=details)
+        if "synced" in value and "total" in value:
+            done, total = int(value.get("synced") or 0), int(value.get("total") or 0)
+            return ActionResult("succeeded" if done and done == total else ("partial" if done else "skipped"), details=details)
+        return ActionResult("succeeded", details=details)
+    if "synced" in value and "total" in value:
+        done, total = int(value.get("synced") or 0), int(value.get("total") or 0)
+        return ActionResult("succeeded" if done == total else ("partial" if done else "skipped"))
+    return ActionResult("failed", "INVALID_ACTION_RESULT")
 
 
 class ScheduleStoreCorruption(RuntimeError):
@@ -107,6 +184,12 @@ def _due_reason(rule: Dict[str, Any], now: datetime,
     today = now.strftime("%Y-%m-%d")
     if rule.get("last_run_date") == today:
         return None
+    occurrence = rule.get("_occurrence") or {}
+    if occurrence.get("date") == today:
+        if occurrence.get("terminal") or int(occurrence.get("attempts") or 0) >= 3:
+            return None
+        if float(occurrence.get("next_retry_at") or 0) > now.timestamp():
+            return None
     try:
         hh, mm = (int(x) for x in str(rule.get("time", "")).split(":"))
         rule_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
@@ -235,6 +318,14 @@ class ScheduleStore:
                     # Lịch/hành động mới chưa chạy hôm nay; giữ last_run_date
                     # của lịch cũ sẽ khiến nó bị bỏ qua tới ngày mai.
                     updated["last_run_date"] = None
+                    updated.pop("_occurrence", None)
+                    updated.pop("_run_claim", None)
+                    updated["configuration_revision"] = int(rule.get("configuration_revision") or 1) + 1
+                if "profile_ids" in fields and updated.get("profile_ids") != rule.get("profile_ids"):
+                    updated["last_run_date"] = None
+                    updated.pop("_occurrence", None)
+                    updated.pop("_run_claim", None)
+                    updated["configuration_revision"] = int(rule.get("configuration_revision") or 1) + 1
                 self._rules[index] = updated
                 self._save_locked()
                 return self._public_rule(updated)
@@ -254,6 +345,7 @@ class ScheduleStore:
         self, rule_id: str, now: datetime, catchup_minutes: int,
         token: str, lease_seconds: float = 600.0,
         run_id: Optional[str] = None,
+        resolved_profile_ids: Optional[List[str]] = None,
     ) -> Optional[Tuple[Dict[str, Any], str]]:
         with self._lock, self._ipc_lock:
             self._rules = self._read_rules()
@@ -271,11 +363,29 @@ class ScheduleStore:
                             return None
                     except (TypeError, ValueError):
                         pass
+                today = now.strftime("%Y-%m-%d")
+                occurrence = rule.get("_occurrence") or {}
+                if occurrence.get("date") != today:
+                    requested_ids = rule.get("profile_ids") or []
+                    resolved = bool(requested_ids) or resolved_profile_ids is not None
+                    targets = requested_ids if requested_ids else resolved_profile_ids
+                    occurrence = {"date": today, "attempts": 0, "terminal": False,
+                                  "key": f"{rule['id']}:{rule.get('configuration_revision', 1)}:{today}:{rule.get('action')}",
+                                  "profile_ids": list(targets or []), "targets_resolved": resolved}
+                elif not occurrence.get("targets_resolved") and resolved_profile_ids is not None:
+                    # Legacy unfinished occurrences can resolve their remaining
+                    # all-target selection once when first read by this version.
+                    occurrence["profile_ids"] = list(occurrence.get("profile_ids") or resolved_profile_ids)
+                    occurrence["targets_resolved"] = True
+                occurrence["attempts"] = int(occurrence.get("attempts") or 0) + 1
+                occurrence["status"] = "running"
+                rule["_occurrence"] = occurrence
                 rule["_run_claim"] = {
                     "token": token,
                     "at": now.timestamp(),
                     "date": now.strftime("%Y-%m-%d"),
                     "run_id": run_id or token,
+                    "lease_seconds": lease_seconds,
                     # Khoá logic để audit/retry biết đây cùng một lượt chạy
                     # (rule + ngày + action), không phải một lần bấm khác.
                     "idempotency_key": (
@@ -286,6 +396,48 @@ class ScheduleStore:
                 self._save_locked()
                 return self._public_rule(rule), reason
             return None
+
+    def expire_occurrences(self, now: datetime, catchup_minutes: int = 60, lease_seconds: float = 600.0) -> List[Dict[str, Any]]:
+        """Persist terminal outcomes for abandoned claims/retries on idle ticks."""
+        events = []
+        with self._lock, self._ipc_lock:
+            self._rules = self._read_rules()
+            for rule in self._rules:
+                occurrence = rule.get("_occurrence") or {}
+                if not occurrence or occurrence.get("terminal"):
+                    continue
+                claim = rule.get("_run_claim") or {}
+                if claim and now.timestamp() < float(claim.get("at") or 0) + float(claim.get("lease_seconds") or lease_seconds):
+                    # A healthy long-running callback may finish after catch-up.
+                    continue
+                hh, mm = map(int, rule["time"].split(":"))
+                scheduled = datetime.strptime(occurrence["date"], "%Y-%m-%d").replace(hour=hh, minute=mm, tzinfo=now.tzinfo)
+                deadline = scheduled.timestamp() + catchup_minutes * 60
+                exhausted = int(occurrence.get("attempts") or 0) >= 3
+                if not exhausted and now.timestamp() <= deadline:
+                    continue
+                error = "RETRY_BUDGET_EXHAUSTED" if exhausted else "CATCHUP_WINDOW_EXPIRED"
+                if claim and occurrence.get("status") == "running":
+                    # The process may have completed side effects before dying.
+                    # Do not pretend that an unacknowledged result was success.
+                    occurrence["outcome_unknown"] = True
+                    occurrence["unresolved_profile_ids"] = list(occurrence.get("profile_ids") or [])
+                failed = set(occurrence.get("terminal_failed_profile_ids") or [])
+                failed.update(occurrence.get("failed_profile_ids") or [])
+                status = "partial" if occurrence.get("succeeded_profile_ids") else "failed"
+                occurrence.update({"terminal": True, "status": status, "error": error,
+                                   "next_retry_at": None, "terminal_failed_profile_ids": sorted(failed)})
+                rule.pop("_run_claim", None)
+                events.append({"rule": rule.get("name"), "action": rule.get("action"),
+                               "at": now.isoformat(timespec="seconds"), "status": status,
+                               "error": error, "attempt": occurrence.get("attempts"),
+                               "idempotency_key": occurrence.get("key"),
+                               "outcome_unknown": occurrence.get("outcome_unknown", False),
+                               "succeeded_profile_ids": occurrence.get("succeeded_profile_ids", []),
+                               "failed_profile_ids": sorted(failed)})
+            if events:
+                self._save_locked()
+        return events
 
     def renew_claim(self, rule_id: str, token: str, now: datetime) -> bool:
         """Extend a live claim so a long callback is not taken over mid-run."""
@@ -302,6 +454,57 @@ class ScheduleStore:
                 self._save_locked()
                 return True
             return False
+
+    def finish_result(self, rule_id: str, token: str, result: ActionResult, now: datetime, catchup_minutes: int = 60) -> Optional[Dict[str, Any]]:
+        with self._lock, self._ipc_lock:
+            self._rules = self._read_rules()
+            for rule in self._rules:
+                claim = rule.get("_run_claim") or {}
+                if rule.get("id") != rule_id or claim.get("token") != token:
+                    continue
+                occurrence = rule.get("_occurrence") or {}
+                attempts = int(occurrence.get("attempts") or 1)
+                delay = 30 if attempts == 1 else 120
+                hh, mm = map(int, rule["time"].split(":"))
+                scheduled = datetime.strptime(occurrence.get("date") or now.strftime("%Y-%m-%d"), "%Y-%m-%d").replace(hour=hh, minute=mm, tzinfo=now.tzinfo)
+                deadline = scheduled.timestamp() + catchup_minutes * 60
+                retry = result.status in ("failed", "partial", "skipped") and result.retryable and attempts < 3 and now.timestamp() + delay <= deadline
+                succeeded_ids = set(occurrence.get("succeeded_profile_ids") or [])
+                succeeded_ids.update(result.details.get("succeeded_profile_ids") or [])
+                terminal_failed = set(occurrence.get("terminal_failed_profile_ids") or [])
+                current_failed = set(result.details.get("failed_profile_ids") or [])
+                if result.status == "skipped":
+                    # A busy retry did not execute its pending IDs. Preserve
+                    # their last known failures instead of erasing the outcome
+                    # of earlier attempts when this attempt has no item results.
+                    current_failed.update(set(occurrence.get("failed_profile_ids") or []) - succeeded_ids)
+                    if retry:
+                        result.retryable_profile_ids = sorted(set(occurrence.get("profile_ids") or []) - terminal_failed - succeeded_ids)
+                terminal_failed.update(current_failed - (set(result.retryable_profile_ids) if retry else set()))
+                occurrence["succeeded_profile_ids"] = sorted(succeeded_ids)
+                occurrence["terminal_failed_profile_ids"] = sorted(terminal_failed)
+                if terminal_failed and result.status == "succeeded":
+                    result.status = "partial" if succeeded_ids else "failed"
+                    result.error = "ACTION_PARTIALLY_FAILED"
+                elif succeeded_ids and result.status in ("failed", "partial"):
+                    result.status = "partial"
+                elif result.status == "skipped" and (succeeded_ids or current_failed or terminal_failed):
+                    result.status = "partial" if succeeded_ids else "failed"
+                result.details["failed_profile_ids"] = sorted(terminal_failed | current_failed)
+                result.details["succeeded_profile_ids"] = sorted(succeeded_ids)
+                occurrence["failed_profile_ids"] = result.details["failed_profile_ids"]
+                occurrence.update({"status": result.status, "terminal": not retry,
+                                   "next_retry_at": now.timestamp() + delay if retry else None,
+                                   "error": result.error, "job_id": result.job_id})
+                if result.retryable_profile_ids:
+                    occurrence["profile_ids"] = result.retryable_profile_ids
+                if result.status in ("succeeded", "accepted"):
+                    rule["last_run_date"] = occurrence.get("date") or now.strftime("%Y-%m-%d")
+                rule["_occurrence"] = occurrence
+                rule.pop("_run_claim", None)
+                self._save_locked()
+                return copy.deepcopy(occurrence)
+            return None
 
     def complete_claim(self, rule_id: str, token: str, today: str) -> bool:
         with self._lock, self._ipc_lock:
@@ -349,6 +552,7 @@ class Scheduler(threading.Thread):
         check_interval: float = 30.0, catchup_minutes: int = 60,
         claim_lease_seconds: float = 600.0,
         history_path: Optional[str] = None,
+        profile_ids_resolver: Optional[Callable[[], List[str]]] = None,
     ):
         super().__init__(daemon=True, name="antidetect-scheduler")
         self.store = store
@@ -356,6 +560,7 @@ class Scheduler(threading.Thread):
         self.check_interval = check_interval
         self.catchup_minutes = catchup_minutes
         self.claim_lease_seconds = claim_lease_seconds
+        self.profile_ids_resolver = profile_ids_resolver
         self.run_history = ScheduleRunHistory(history_path)
         self._stop_event = threading.Event()
         self.last_run_info: Dict[str, Any] = {"last_tick": None, "ran": []}
@@ -403,6 +608,8 @@ class Scheduler(threading.Thread):
             tick_at = now.isoformat(timespec="seconds")
             self.last_run_info["last_tick"] = tick_at
             try:
+                for expired_event in self.store.expire_occurrences(now, self.catchup_minutes, self.claim_lease_seconds):
+                    self._record(expired_event)
                 rules = self.store.list()
             except Exception as exc:  # noqa: BLE001 - runner không được chết
                 self._record({"rule": None, "action": None, "at": tick_at,
@@ -418,10 +625,15 @@ class Scheduler(threading.Thread):
                 today = now.strftime("%Y-%m-%d")
                 idempotency_key = f"{rule['id']}:{today}:{rule.get('action')}"
                 try:
+                    occurrence = rule.get("_occurrence") or {}
+                    resolved_ids = None
+                    if not rule.get("profile_ids") and (occurrence.get("date") != today or not occurrence.get("targets_resolved")) and self.profile_ids_resolver is not None:
+                        resolved_ids = list(self.profile_ids_resolver())
                     claimed = self.store.claim_due(
                         rule["id"], now, self.catchup_minutes, token,
                         lease_seconds=self.claim_lease_seconds,
                         run_id=run_id,
+                        resolved_profile_ids=resolved_ids,
                     )
                 except Exception as exc:  # noqa: BLE001 - runner không được chết
                     self._record({
@@ -445,32 +657,24 @@ class Scheduler(threading.Thread):
                             "run_id": run_id, "idempotency_key": idempotency_key,
                         })
                     continue
-                ids = claimed_rule.get("profile_ids") or None
+                occurrence = claimed_rule.get("_occurrence") or {}
+                target_ids = occurrence.get("profile_ids", claimed_rule.get("profile_ids"))
+                ids = list(target_ids or []) if occurrence.get("targets_resolved") else (target_ids or None)
+                idempotency_key = occurrence.get("key") or idempotency_key
                 heartbeat_stop, heartbeat = self._start_claim_heartbeat(
                     rule["id"], token
                 )
-                callback_error = None
+                context_token = _occurrence_context.set(idempotency_key)
                 try:
-                    cb(ids)
-                except Exception as exc:  # noqa: BLE001 - callback được retry
-                    callback_error = exc
+                    result = normalize_action_result(cb(ids))
+                except Exception as exc:
+                    result = ActionResult("failed", type(exc).__name__, retryable=isinstance(exc, (TimeoutError, ConnectionError, OSError)) or "FANPAGE_JOB_BUSY" in str(exc))
                 finally:
+                    _occurrence_context.reset(context_token)
                     heartbeat_stop.set()
                     heartbeat.join(timeout=2.0)
-                if callback_error is not None:
-                    error = str(callback_error)[:200]
-                    try:
-                        self.store.release_claim(rule["id"], token)
-                    except Exception as release_exc:  # noqa: BLE001
-                        error = f"{error}; release: {str(release_exc)[:100]}"
-                    self._record({
-                        "rule": claimed_rule.get("name"), "action": action,
-                        "at": tick_at, "error": error,
-                        "run_id": run_id, "idempotency_key": idempotency_key,
-                    })
-                    continue
                 try:
-                    completed = self.store.complete_claim(rule["id"], token, today)
+                    completed = self.store.finish_result(rule["id"], token, result, datetime.now(), self.catchup_minutes)
                 except Exception as exc:  # noqa: BLE001 - lease cho phép retry
                     self._record({
                         "rule": claimed_rule.get("name"), "action": action,
@@ -489,4 +693,7 @@ class Scheduler(threading.Thread):
                     "rule": claimed_rule.get("name"), "action": action,
                     "at": tick_at, "reason": reason,
                     "run_id": run_id, "idempotency_key": idempotency_key,
+                    "status": result.status, "error": result.error,
+                    "attempt": completed.get("attempts"), "next_retry_at": completed.get("next_retry_at"),
+                    "job_id": result.job_id, **result.details,
                 })

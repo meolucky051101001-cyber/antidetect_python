@@ -259,6 +259,8 @@ def test_missing_in_scan_and_profile_deletion_preserve_page_and_history(tmp_path
                 "name": "Page Giữ Lịch Sử",
                 "url": "https://www.facebook.com/profile.php?id=1000777888999",
                 "seen_in_scan_id": "scan_old",
+                "followers": 100,
+                "field_observations": {"followers": {"observed_at": "2026-11-05T10:00:00Z", "source": "test"}},
                 "last_seen_at": "2026-11-05T10:00:00+00:00",
             }
         ],
@@ -509,9 +511,10 @@ def test_stage2_job_browser_ownership_never_stops_user_opened_browser(tmp_path, 
 
     def _fake_launch(pid, open_url=None):
         running_state[pid] = True
-        return {"success": True, "port": 9222}
+        return {"success": True, "port": 9222, "launched_now": True, "launch_id": "owned-test"}
 
-    def _fake_stop(pid):
+    def _fake_stop(pid, *, expected_launch_id):
+        assert expected_launch_id == "owned-test"
         running_state[pid] = False
         return {"success": True}
 
@@ -573,7 +576,7 @@ def test_stage2_job_browser_ownership_never_stops_user_opened_browser(tmp_path, 
     assert item_closed["status"] == "completed"
     assert item_closed["detail"]["opened_by_job"] is True
     mock_launcher.launch.assert_called_once_with(p_closed.id)
-    mock_launcher.stop.assert_called_once_with(p_closed.id)
+    mock_launcher.stop.assert_called_once_with(p_closed.id, expected_launch_id="owned-test")
     # p_open vẫn đang mở, tuyệt đối không bị stop
     assert running_state[p_open.id] is True
     assert running_state[p_closed.id] is False
@@ -712,7 +715,7 @@ def test_stage2_sync_job_api_endpoints_and_scheduler_actions(tmp_path, monkeypat
     assert any(j["id"] == job_id for j in r_list.json()["jobs"])
 
     # 3. Chuẩn bị mock launch + fetch để retry job thành công
-    mock_launcher.launch.return_value = {"success": True, "port": 9333}
+    mock_launcher.launch.return_value = {"success": True, "port": 9333, "launched_now": True, "launch_id": "owned-api"}
     mock_launcher.stop.return_value = {"success": True}
     mock_launcher.fetch_facebook_pages.return_value = {
         "logged_in": True,
@@ -753,7 +756,7 @@ def test_stage2_sync_job_api_endpoints_and_scheduler_actions(tmp_path, monkeypat
     assert retry_final is not None
     assert retry_final["status"] == "completed"
     mock_launcher.launch.assert_called_once_with(p1.id)
-    mock_launcher.stop.assert_called_once_with(p1.id)
+    mock_launcher.stop.assert_called_once_with(p1.id, expected_launch_id="owned-api")
 
     # Kiểm tra page đã được đồng bộ vào catalog SQLite sau khi job hoàn tất
     r_pages = client.get("/api/fanpages")
@@ -791,6 +794,7 @@ def test_stage2_job_deduplication_and_cancellation(tmp_path, monkeypatch):
     queued_job = svc.repo.create_sync_job(
         job_id="fjob_active_test01",
         mode="discovery",
+        options={"mode": "discovery", "auto_start": False, "only_running": False, "profile_ids": [p1.id, p2.id], "page_ids": []},
         profile_items=[
             {"profile_id": p1.id, "profile_name": p1.name},
             {"profile_id": p2.id, "profile_name": p2.name},
@@ -818,8 +822,10 @@ def test_stage2_job_deduplication_and_cancellation(tmp_path, monkeypatch):
     r_cancel = client.post("/api/fanpage-sync/jobs/fjob_active_test01/cancel")
     assert r_cancel.status_code == 200
     canceled_job = r_cancel.json()["job"]
-    assert canceled_job["status"] == "cancelled"
-    assert all(it["status"] == "cancelled" for it in canceled_job["items"])
+    assert canceled_job["status"] == "cancelling"
+    assert canceled_job["cancel_requested_at"]
+    # This fixture has no owner worker to acknowledge yet.
+    assert all(it["status"] == "pending" for it in canceled_job["items"])
 
 
 # ==============================================================================
@@ -855,6 +861,7 @@ def test_stage3_timeseries_metrics_and_delta_rules(tmp_path):
                         "likes": "500",
                         "detail_synced": True,
                         "detail_synced_at": t_minus_10d,
+                        "field_observations": {g: {"observed_at": t_minus_10d, "source": "test"} for g in ("followers", "likes")},
                         "seen_in_scan_id": "scan_ts_1",
                     }
                 ],
@@ -879,6 +886,7 @@ def test_stage3_timeseries_metrics_and_delta_rules(tmp_path):
                         "likes": "550",
                         "detail_synced": True,
                         "detail_synced_at": t_minus_5d,
+                        "field_observations": {g: {"observed_at": t_minus_5d, "source": "test"} for g in ("followers", "likes")},
                         "seen_in_scan_id": "scan_ts_2",
                     }
                 ],
@@ -903,6 +911,7 @@ def test_stage3_timeseries_metrics_and_delta_rules(tmp_path):
                         "likes": "600",
                         "detail_synced": True,
                         "detail_synced_at": t_now,
+                        "field_observations": {g: {"observed_at": t_now, "source": "test"} for g in ("followers", "likes")},
                         "seen_in_scan_id": "scan_ts_3",
                     }
                 ],
@@ -930,7 +939,7 @@ def test_stage3_timeseries_metrics_and_delta_rules(tmp_path):
     assert series_7d["counter_decreased"] is True
 
     # Kiểm tra list_all_pages_with_links đính kèm recent_metric_points để service tính delta 2 điểm gần nhất (-50)
-    rows = repo.list_all_pages_with_links()
+    rows = repo.list_all_pages_with_links(now=now)
     assert len(rows) == 1
     assert len(rows[0]["recent_metric_points"]) == 3
 
@@ -1122,6 +1131,9 @@ def test_stage3_crash_recovery_interrupted_jobs(tmp_path, monkeypatch):
     mock_launcher.is_running.return_value = False
     mock_launcher.active_ports = {}
 
+    with repo._connect() as conn:
+        conn.execute("UPDATE sync_jobs SET lease_expires_at=0 WHERE job_id='fjob_crashed01'")
+
     # Khi khởi tạo FanpageService (hoặc FanpageSyncJobManager) ở tiến trình mới -> tự động recover
     svc = FanpageService(
         profile_manager=pm,
@@ -1150,7 +1162,7 @@ def test_stage3_backup_prune_and_manual_merge_api(tmp_path, monkeypatch):
     import web.app as app_mod
 
     pm = _make_isolated_pm(tmp_path, monkeypatch)
-    now = datetime.datetime(2026, 11, 20, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)
     p1 = pm.create_profile(name="Admin Profile 1", target_os="windows")
     p2 = pm.create_profile(name="Admin Profile 2", target_os="windows")
 
@@ -1166,6 +1178,7 @@ def test_stage3_backup_prune_and_manual_merge_api(tmp_path, monkeypatch):
                 "followers": "5.000",
                 "detail_synced": True,
                 "detail_synced_at": now.isoformat(),
+                    "field_observations": {"followers": {"observed_at": now.isoformat(), "source": "test"}},
             },
             {
                 "id": "1000999000111",
@@ -1174,6 +1187,7 @@ def test_stage3_backup_prune_and_manual_merge_api(tmp_path, monkeypatch):
                 "followers": "2.000",
                 "detail_synced": True,
                 "detail_synced_at": now.isoformat(),
+                    "field_observations": {"followers": {"observed_at": now.isoformat(), "source": "test"}},
             },
         ],
         synced_at=int(now.timestamp()),

@@ -84,6 +84,19 @@ function formatIsoVi(iso) {
     return d.toLocaleString('vi-VN');
 }
 
+function formatMetricObservation(item, group, nowMs = Date.now()) {
+    const observation = item.field_observations && item.field_observations[group];
+    const iso = observation && observation.observed_at;
+    const observedMs = iso ? Date.parse(iso) : NaN;
+    if (!Number.isFinite(observedMs) || observedMs > nowMs) return 'Chưa rõ thời điểm quan sát';
+    const minutes = Math.floor((nowMs - observedMs) / 60000);
+    const age = minutes < 1 ? 'vừa ghi nhận'
+        : minutes < 60 ? `${minutes} phút trước`
+        : minutes < 1440 ? `${Math.floor(minutes / 60)} giờ trước`
+        : `${Math.floor(minutes / 1440)} ngày trước`;
+    return `Quan sát: ${formatIsoVi(iso)} · ${age}`;
+}
+
 function formatAgeText(item) {
     const days = item.age_days;
     if (days === null || days === undefined) {
@@ -456,7 +469,9 @@ function renderFanpageTable() {
         const metricsHtml = `
             <div class="space-y-0.5">
                 <div class="text-slate-200 font-medium flex flex-wrap items-center gap-1">${followersText ? escapeHtml(followersText) + ' flw' : '<span class="text-slate-500">Chưa có dữ liệu</span>'}${flwDeltaBadge}</div>
+                ${followersText !== null ? `<div class="text-[10px] text-slate-500">${escapeHtml(formatMetricObservation(item, 'followers'))}</div>` : ''}
                 <div class="text-[11px] text-slate-400 flex flex-wrap items-center gap-1">${likesText ? escapeHtml(likesText) + ' like' : 'Like: —'}${likeDeltaBadge}</div>
+                ${likesText !== null ? `<div class="text-[10px] text-slate-500">${escapeHtml(formatMetricObservation(item, 'likes'))}</div>` : ''}
             </div>`;
 
         // Bài gần nhất
@@ -732,9 +747,13 @@ function renderPageDetailModal(page) {
     const metricsBox = document.getElementById('detail-metrics-box');
     metricsBox.innerHTML = `
         <div><span class="text-slate-500">Follower:</span> <span class="font-semibold text-blue-400">${escapeHtml(followersStr)}</span> ${page.followers_raw ? `<span class="text-slate-500">(${escapeHtml(page.followers_raw)})</span>` : ''}</div>
+        <div class="text-xs text-slate-500">${escapeHtml(formatMetricObservation(page, 'followers'))}</div>
         <div><span class="text-slate-500">Lượt thích (Like):</span> <span class="font-semibold text-slate-200">${escapeHtml(likesStr)}</span> ${page.likes_raw ? `<span class="text-slate-500">(${escapeHtml(page.likes_raw)})</span>` : ''}</div>
+        <div class="text-xs text-slate-500">${escapeHtml(formatMetricObservation(page, 'likes'))}</div>
         <div><span class="text-slate-500">Tuổi page:</span> <span>${escapeHtml(formatAgeText(page))}</span> · ${renderAgeThresholdBadge(page)}</div>
+        <div class="text-xs text-slate-500">Ngày tạo — ${escapeHtml(formatMetricObservation(page, 'creation'))}</div>
         <div><span class="text-slate-500">Bài gần nhất:</span> <span>${escapeHtml(formatLastPostInterval(page))}</span> · ${renderActivityBadge(page)}</div>
+        <div class="text-xs text-slate-500">${escapeHtml(formatMetricObservation(page, 'activity'))}</div>
         <div><span class="text-slate-500">Chất lượng dữ liệu:</span> ${renderQualityBadge(page)}</div>
     `;
 
@@ -856,7 +875,7 @@ function updateActiveSyncBanner(job) {
     const subEl = document.getElementById('active-sync-subtitle');
     if (!banner || !titleEl || !subEl) return;
 
-    if (!job || (job.status !== 'queued' && job.status !== 'running')) {
+    if (!job || !['queued', 'running', 'cancelling'].includes(job.status)) {
         banner.classList.add('hidden');
         stopSyncJobPolling();
         return;
@@ -891,7 +910,7 @@ async function pollActiveSyncJob() {
         const res = await fetch('/api/fanpage-sync/jobs?limit=10', { cache: 'no-store' });
         if (!res.ok) return;
         const data = await res.json().catch(() => ({}));
-        const wasRunning = !!(activeSyncJob && (activeSyncJob.status === 'queued' || activeSyncJob.status === 'running'));
+        const wasRunning = !!(activeSyncJob && ['queued', 'running', 'cancelling'].includes(activeSyncJob.status));
         updateActiveSyncBanner(data.active_job || null);
 
         const modal = document.getElementById('syncJobModal');
@@ -941,6 +960,9 @@ async function loadSyncJobs() {
 }
 
 function renderJobStatusBadge(status) {
+    if (status === 'cancelling') {
+        return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30">Đang hủy</span>';
+    }
     if (status === 'completed') {
         return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">Hoàn tất</span>';
     }
@@ -948,7 +970,7 @@ function renderJobStatusBadge(status) {
         return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30">Đang chạy</span>';
     }
     if (status === 'completed_with_warnings' || status === 'partial') {
-        return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/30">Hoàn tất (có bỏ qua/một phần)</span>';
+        return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-500/15 text-sky-300 border border-sky-500/30">Hoàn tất (có cảnh báo)</span>';
     }
     if (status === 'completed_with_errors') {
         return '<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30">Hoàn tất (có lỗi)</span>';
@@ -971,7 +993,7 @@ function renderSyncJobsList(jobs) {
     }
 
     container.innerHTML = jobs.map(job => {
-        const isActive = job.status === 'queued' || job.status === 'running';
+        const isActive = ['queued', 'running', 'cancelling'].includes(job.status);
         const items = job.items || [];
         const hasRetryable = !isActive && items.some(it =>
             it.status === 'failed' || it.status === 'partial' || it.status === 'skipped' || it.status === 'cancelled'
@@ -981,7 +1003,9 @@ function renderSyncJobsList(jobs) {
 
         const itemsHtml = items.map(it => {
             const detail = it.detail || {};
-            const summaryText = detail.summary || it.error || '';
+            const cleanupWarning = detail.cleanup?.status === 'failed'
+                ? `Chưa đóng được browser: ${detail.cleanup.error || 'hãy thử dừng profile lại.'}` : '';
+            const summaryText = [detail.summary || it.error || '', cleanupWarning].filter(Boolean).join(' · ');
             return `
                 <div class="flex flex-wrap items-center justify-between gap-2 py-1.5 border-t border-borderBg/50 text-[11px]">
                     <div class="flex items-center space-x-2 min-w-0">

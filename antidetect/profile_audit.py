@@ -807,14 +807,15 @@ def audit_profiles(
 
         # --- Proxy / WebRTC ---
         proxy = profile.proxy
-        proxy_ready = bool(proxy and proxy.enabled and proxy.host and int(proxy.port or 0) > 0)
+        proxy_error = proxy.configuration_error() if proxy else None
+        proxy_ready = bool(proxy and proxy.enabled and not proxy_error)
         if proxy and proxy.enabled and not proxy_ready:
             add(
                 profile,
                 "proxy_incomplete",
-                "warning",
-                "Proxy bật nhưng thiếu host/port",
-                "Profile sẽ không dùng được proxy; cần nhập đủ host và port.",
+                "critical",
+                "Cấu hình proxy không hợp lệ",
+                proxy_error or "Proxy đã bật cần host và port hợp lệ.",
                 category="network",
             )
         elif not proxy or not proxy.enabled:

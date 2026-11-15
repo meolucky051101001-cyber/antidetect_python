@@ -17,10 +17,9 @@ class ProxyConfig(BaseModel):
     @field_validator("protocol")
     @classmethod
     def validate_protocol(cls, v: str) -> str:
-        v = (v or "http").strip().lower()
-        if v not in ["http", "https", "socks5", "socks4"]:
-            return "http"
-        return v
+        # Keep legacy values readable, but do not silently turn a typo into a
+        # different transport. New input and launches validate below.
+        return (v or "http").strip().lower()
 
     @field_validator("port")
     @classmethod
@@ -28,6 +27,68 @@ class ProxyConfig(BaseModel):
         if v < 0 or v > 65535:
             raise ValueError("Cổng proxy phải nằm trong khoảng 0 đến 65535")
         return v
+
+    def configuration_error(self) -> Optional[str]:
+        """Return a credential-free launch error without rejecting legacy reads."""
+        if not self.enabled:
+            return None
+        if self.protocol not in ("http", "https", "socks5", "socks4"):
+            return "Protocol proxy không hỗ trợ."
+        host = self.host
+        if not isinstance(host, str) or not host or host != host.strip():
+            return "Proxy đã bật cần host hợp lệ."
+        if any(c.isspace() or ord(c) < 32 or ord(c) == 127 or c in '/\\@?#;,=%' for c in host):
+            return "Host proxy không được chứa URL, credential hoặc khoảng trắng."
+        if ':' in host or '[' in host or ']' in host:
+            import ipaddress
+
+            try:
+                ipaddress.IPv6Address(host.removeprefix('[').removesuffix(']'))
+            except ValueError:
+                return "Host proxy không hợp lệ; nhập port ở trường riêng."
+        else:
+            import re
+
+            try:
+                ascii_host = host.encode("idna").decode("ascii").rstrip('.')
+            except UnicodeError:
+                return "Host proxy không hợp lệ."
+            if len(ascii_host) > 253 or not all(
+                re.fullmatch(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?", label)
+                for label in ascii_host.split('.')
+            ):
+                return "Host proxy không hợp lệ."
+        if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535:
+            return "Proxy đã bật cần port nguyên từ 1 đến 65535."
+        return None
+
+    def validate_for_launch(self) -> None:
+        error = self.configuration_error()
+        if error:
+            raise ValueError(error)
+
+    @classmethod
+    def from_input(cls, data: Any) -> "ProxyConfig":
+        """Validate user input separately from compatible persisted models."""
+        if isinstance(data, cls):
+            data = data.model_dump(context={"include_secrets": True})
+        if not isinstance(data, dict):
+            raise ValueError("Cấu hình proxy phải là object.")
+        try:
+            if isinstance(data.get("port"), bool):
+                raise ValueError("port")
+            result = cls.model_validate(data)
+        except (ValueError, TypeError):
+            # Pydantic errors can embed the full input, including credentials.
+            raise ValueError("Cấu hình proxy có trường sai kiểu hoặc port không hợp lệ.") from None
+        if result.protocol not in ("http", "https", "socks5", "socks4"):
+            raise ValueError("Protocol proxy không hỗ trợ.")
+        result.validate_for_launch()
+        return result
+
+    def _url_host(self) -> str:
+        host = self.host.strip('[]')
+        return f"[{host}]" if ':' in host else host
 
     def identity_key(self) -> str:
         """Stable identity for binding a stored password to one proxy endpoint.
@@ -51,22 +112,24 @@ class ProxyConfig(BaseModel):
         return REDACTED_SECRET if value else None
 
     def _format_url(self, password: Optional[str]) -> str:
-        if not self.enabled or not self.host or not self.port:
+        if not self.enabled:
             return ""
+        self.validate_for_launch()
         # Sử dụng socks5h / socks4a để phân giải DNS qua proxy (tránh rò rỉ DNS)
         protocol = self.protocol
         if protocol == "socks5":
             protocol = "socks5h"
         elif protocol == "socks4":
             protocol = "socks4a"
-        if self.username:
+        host = self._url_host()
+        if self.username is not None:
             from urllib.parse import quote
             safe_user = quote(self.username, safe="")
-            if password:
+            if password is not None:
                 safe_pass = quote(password, safe="*" if password == REDACTED_SECRET else "")
-                return f"{protocol}://{safe_user}:{safe_pass}@{self.host}:{self.port}"
-            return f"{protocol}://{safe_user}@{self.host}:{self.port}"
-        return f"{protocol}://{self.host}:{self.port}"
+                return f"{protocol}://{safe_user}:{safe_pass}@{host}:{self.port}"
+            return f"{protocol}://{safe_user}@{host}:{self.port}"
+        return f"{protocol}://{host}:{self.port}"
 
     def to_url(self) -> str:
         """Full URL for internal proxy clients (contains credentials)."""
@@ -78,14 +141,15 @@ class ProxyConfig(BaseModel):
 
     def to_server_arg(self) -> str:
         """Returns format for --proxy-server flag (without auth, auth handled by extension)."""
-        if not self.enabled or not self.host or not self.port:
+        if not self.enabled:
             return ""
+        self.validate_for_launch()
         # C8: SOCKS5 phải dùng scheme 'socks://' để Chrome phân giải DNS qua proxy (remote DNS)
         # 'socks5://' khiến Chrome phân giải DNS cục bộ → rò rỉ DNS nghiêm trọng
         scheme = self.protocol
         if scheme == "socks5":
             scheme = "socks"
-        return f"{scheme}://{self.host}:{self.port}"
+        return f"{scheme}://{self._url_host()}:{self.port}"
 
 
 class FingerprintConfig(BaseModel):

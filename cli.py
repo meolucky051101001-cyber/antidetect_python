@@ -10,7 +10,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from antidetect.models import ProxyConfig
-from antidetect.storage import ProfileManager
+from antidetect.storage import ProfileManager, ProfileRevisionConflict
 from antidetect.launcher import BrowserLauncher
 from antidetect.fingerprint import generate_fingerprint
 from antidetect.applog import setup_logging
@@ -26,6 +26,18 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
+
+
+def _save_profile_revision(manager, profile):
+    try:
+        updated = manager.update_profile(profile, expected_revision=profile.revision)
+    except ProfileRevisionConflict as exc:
+        print(f"Không cập nhật: {exc}")
+        sys.exit(1)
+    if updated is None:
+        print("Profile không còn tồn tại.")
+        sys.exit(1)
+    return updated
 
 
 def _resolve_gate_browser_paths(launcher, profiles):
@@ -179,18 +191,11 @@ def main():
         if args.proxy:
             # Parse proxy — tự thêm http:// nếu thiếu scheme
             try:
-                from urllib.parse import urlparse
-
                 proxy_str = args.proxy
                 if "://" not in proxy_str:
                     proxy_str = f"http://{proxy_str}"
-                parsed = urlparse(proxy_str)
-                proxy_cfg.enabled = True
-                proxy_cfg.protocol = parsed.scheme or "http"
-                proxy_cfg.host = parsed.hostname or ""
-                proxy_cfg.port = parsed.port or 8080
-                proxy_cfg.username = parsed.username
-                proxy_cfg.password = parsed.password
+                from antidetect.proxy import parse_proxy_line
+                proxy_cfg = parse_proxy_line(proxy_str)
             except Exception as e:
                 print(f"Lỗi phân tích cú pháp proxy: {e}")
                 sys.exit(1)
@@ -364,22 +369,11 @@ def main():
             sys.exit(1)
 
     elif args.command == "delete":
-        from antidetect.storage import ProfileDeletionError
-        # Giống API web: dừng browser trước khi xóa — nếu không Chrome giữ
-        # khóa user_data và delete fail với ProfileDeletionError.
-        stopped = launcher.stop(args.id)
-        if not stopped.get("success"):
-            print(stopped.get("error", "Chưa dừng được profile."))
-            sys.exit(1)
-        try:
-            deleted = manager.delete_profile(args.id)
-        except ProfileDeletionError as e:
-            print(str(e))
-            sys.exit(1)
-        if deleted:
-            print(f"Đã xóa profile {args.id} thành công.")
-        else:
-            print(f"Không tìm thấy profile {args.id}.")
+        from antidetect.profile_lifecycle import stop_and_delete
+
+        result = stop_and_delete(manager, launcher, args.id)
+        print(result.get("error") or result.get("message"))
+        if not result.get("success"):
             sys.exit(1)
 
     elif args.command == "reset-fp":
@@ -396,7 +390,14 @@ def main():
             longitude=p.fingerprint.longitude if p.fingerprint.longitude is not None else 105.8542
         )
         p.fingerprint = new_fp
-        manager.update_profile(p)
+        try:
+            updated = manager.update_fingerprint_only(p.id, p.fingerprint, p.revision)
+        except ProfileRevisionConflict as exc:
+            print(f"Không cập nhật: {exc}")
+            sys.exit(1)
+        if updated is None:
+            print("Profile không còn tồn tại.")
+            sys.exit(1)
         print(f"Đã đổi dấu vân tay mới cho profile '{p.name}'!")
         print(f"- OS: {new_fp.os}")
         print(f"- Màn hình: {new_fp.screen_width}x{new_fp.screen_height}")
@@ -410,25 +411,22 @@ def main():
             sys.exit(1)
         if args.disable:
             p.proxy.enabled = False
-            manager.update_profile(p)
+            _save_profile_revision(manager, p)
             print(f"Đã tắt proxy cho profile '{p.name}'.")
         elif args.proxy:
-            from urllib.parse import urlparse
-            proxy_str = args.proxy
-            if "://" not in proxy_str:
-                proxy_str = f"http://{proxy_str}"
-            parsed = urlparse(proxy_str)
-            p.proxy.enabled = True
-            p.proxy.protocol = parsed.scheme or "http"
-            p.proxy.host = parsed.hostname or ""
-            p.proxy.port = parsed.port or 8080
-            p.proxy.username = parsed.username
+            from antidetect.proxy import parse_proxy_line
+            new_proxy = parse_proxy_line(args.proxy)
+            p.proxy.enabled = new_proxy.enabled
+            p.proxy.protocol = new_proxy.protocol
+            p.proxy.host = new_proxy.host
+            p.proxy.port = new_proxy.port
+            p.proxy.username = new_proxy.username
             # Secret cũ có thể đã được get_profile nạp sẵn; xóa trước để helper
             # không nhầm nó là mật khẩu vừa nhập trong URL. Nếu URL có mật khẩu
             # thì giữ lại để helper từ chối (argv đã lộ).
-            p.proxy.password = parsed.password or None
+            p.proxy.password = new_proxy.password or None
             _apply_secure_proxy_password(p.proxy)
-            manager.update_profile(p)
+            _save_profile_revision(manager, p)
             print(f"Đã cập nhật proxy cho profile '{p.name}': {p.proxy.to_display_url()}")
         else:
             print("Vui lòng cung cấp --proxy <url> hoặc --disable.")

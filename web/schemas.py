@@ -5,7 +5,7 @@ load toàn bộ ứng dụng; app.py re-export để tương thích với test h
 """
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from antidetect.models import Profile, FingerprintConfig, ProxyConfig
 
@@ -40,6 +40,11 @@ class CreateProfileRequest(BaseModel):
     # Tuỳ chọn tự sinh fingerprint hoặc dùng cấu hình tuỳ biến
     fingerprint: Optional[FingerprintConfig] = None
 
+    @field_validator("proxy", mode="before")
+    @classmethod
+    def validate_proxy_input(cls, value):
+        return None if value is None else ProxyConfig.from_input(value)
+
 
 class SwitchLocationRequest(BaseModel):
     city: str = "hanoi"
@@ -60,6 +65,11 @@ class UpdateProfileRequest(BaseModel):
     # Opt-in strict concurrency: truyền revision mình đã đọc; nếu profile bị
     # sửa bởi client khác từ đó, update bị từ chối 409 thay vì ghi đè.
     expected_revision: Optional[int] = None
+
+    @field_validator("proxy", mode="before")
+    @classmethod
+    def validate_proxy_input(cls, value):
+        return None if value is None else ProxyConfig.from_input(value)
 
 
 class CheckProxyRequest(BaseModel):
@@ -84,7 +94,7 @@ class StopAllBody(BaseModel):
 
 
 class ImportProfilesRequest(BaseModel):
-    profiles: List[Dict[str, Any]] = []
+    profiles: List[Any] = []
 
 
 class ScheduleCreateRequest(BaseModel):

@@ -61,7 +61,10 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
 
 
 def write_runtime(record):
-    _atomic_write_bytes(RUNTIME_FILE, _crypt(json.dumps(record).encode(), True))
+    from .profile_locks import ProfileLocks
+
+    with ProfileLocks(RUNTIME_FILE.parent, suffix=".server").acquire("runtime-auth"):
+        _atomic_write_bytes(RUNTIME_FILE, _crypt(json.dumps(record).encode(), True))
 
 
 def read_runtime():
@@ -71,11 +74,19 @@ def read_runtime():
         return None
 
 
-def delete_runtime():
-    try:
-        RUNTIME_FILE.unlink()
-    except OSError:
-        pass
+def delete_runtime(*, expected_instance_id=None):
+    from .profile_locks import ProfileLocks
+
+    with ProfileLocks(RUNTIME_FILE.parent, suffix=".server").acquire("runtime-auth"):
+        if expected_instance_id is not None:
+            record = read_runtime() or {}
+            if record.get("instance_id") != expected_instance_id:
+                return False
+        try:
+            RUNTIME_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        return True
 
 
 API_TOKEN_FILE = _DATA_DIR / 'api_token.dpapi'

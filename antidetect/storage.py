@@ -73,6 +73,23 @@ class ProfileBusyError(ProfileDeletionError):
     code = "PROFILE_BUSY"
 
 
+class ProfileRevisionConflict(RuntimeError):
+    code = "PROFILE_REVISION_CONFLICT"
+
+    def __init__(self, profile_id, current_revision, expected_revision):
+        self.profile_id = profile_id
+        self.current_revision = current_revision
+        self.expected_revision = expected_revision
+        super().__init__(
+            f"Conflict: Profile đã bị sửa đổi bởi phiên khác "
+            f"(revision hiện tại {current_revision} != {expected_revision})"
+        )
+
+
+class ProfileProxyChanged(ProfileRevisionConflict):
+    code = "PROXY_CHANGED"
+
+
 def _safe_log(message: str) -> None:
     """Log without crashing on legacy cp1252 consoles (Vietnamese text)."""
     log.warning(message)
@@ -321,6 +338,10 @@ class ProfileManager:
         # B1: lock reentrant — các method mutate đã giữ cùng lock này quanh
         # read-modify-write; gọi save_profiles trực tiếp vẫn khoá đúng.
         with self._lock, self._ipc_lock:
+            # Revalidate dictionaries, not model instances: assignment validation
+            # is intentionally disabled for legacy readers. Do this before secrets.
+            for profile in profiles:
+                Profile.model_validate(profile.model_dump(context={"include_secrets": True}, warnings=False))
             # Re-read the current file even when callers invoke save directly.
             self.list_profiles()
             # Chống ghi đè khi file đang bị hỏng
@@ -442,6 +463,7 @@ class ProfileManager:
 
     def update_profile(self, updated: Profile, expected_revision: Optional[int] = None) -> Optional[Profile]:
         from .models import REDACTED_SECRET
+        Profile.model_validate(updated.model_dump(context={"include_secrets": True}, warnings=False))
         # B1: read-modify-write trong file lock; list_profiles() bên trong đọc
         # lại từ đĩa (mtime đổi khi process khác vừa ghi).
         with self._lock, self._ipc_lock:
@@ -452,9 +474,7 @@ class ProfileManager:
                     # P0-01: Kiểm tra xung đột phiên bản nếu caller yêu cầu
                     current_rev = getattr(p, "revision", 1) or 1
                     if expected_revision is not None and current_rev != expected_revision:
-                        raise RuntimeError(
-                            f"Conflict: Profile đã bị sửa đổi bởi phiên khác (revision hiện tại {current_rev} != {expected_revision})"
-                        )
+                        raise ProfileRevisionConflict(updated.id, current_rev, expected_revision)
                     updated.revision = current_rev + 1
                     updated.updated_at = int(time.time())
 
@@ -698,6 +718,10 @@ class ProfileManager:
         self,
         updates: Dict[str, FingerprintConfig],
         expected_revisions: Optional[Dict[str, int]] = None,
+        *,
+        patches: Optional[Dict[str, Dict[str, Any]]] = None,
+        expected_proxies: Optional[Dict[str, Tuple[bool, str]]] = None,
+        skip_conflicts: bool = False,
     ) -> List[str]:
         """Ghi riêng fingerprint, không đi qua save_profiles.
 
@@ -706,9 +730,10 @@ class ProfileManager:
         (audit) không được có tác dụng phụ đó, nên đọc/ghi raw JSON dưới cùng
         IPC lock và giữ nguyên mọi field proxy/secret khác.
         """
-        if not updates:
+        target_ids = set(updates) | set(patches or {})
+        if not target_ids:
             return []
-        for profile_id in updates:
+        for profile_id in target_ids:
             self._validate_profile_id(profile_id)
         with self._lock, self._ipc_lock:
             self._cache = None
@@ -737,20 +762,23 @@ class ProfileManager:
             }
             conflicts = []
             for profile_id, item in by_id.items():
-                if profile_id not in updates:
+                if profile_id not in target_ids:
                     continue
                 current_rev = int(item.get("revision") or 1)
                 expected = (expected_revisions or {}).get(profile_id)
+                expected_proxy = (expected_proxies or {}).get(profile_id)
+                if expected_proxy is not None:
+                    proxy = ProxyConfig.model_validate(item.get("proxy") or {})
+                    if (proxy.enabled, proxy.identity_key()) != expected_proxy:
+                        if not skip_conflicts:
+                            raise ProfileProxyChanged(profile_id, current_rev, expected)
+                        conflicts.append((profile_id, current_rev, expected))
+                        continue
                 if expected is not None and current_rev != expected:
                     conflicts.append((profile_id, current_rev, expected))
-            if conflicts:
-                detail = ", ".join(
-                    f"{pid[:8]} (hiện tại {current}, yêu cầu {expected})"
-                    for pid, current, expected in conflicts
-                )
-                raise RuntimeError(
-                    f"Conflict: Profile đã bị sửa đổi bởi phiên khác: {detail}"
-                )
+            if conflicts and not skip_conflicts:
+                raise ProfileRevisionConflict(*conflicts[0])
+            conflicted_ids = {conflict[0] for conflict in conflicts}
 
             now = int(time.time())
             changed: List[str] = []
@@ -758,9 +786,18 @@ class ProfileManager:
                 if not isinstance(item, dict):
                     continue
                 profile_id = item.get("id")
-                new_fp = updates.get(profile_id)
-                if new_fp is None:
+                if profile_id not in target_ids or profile_id in conflicted_ids:
                     continue
+                new_fp = updates.get(profile_id)
+                if patches is not None and profile_id in patches:
+                    fp_data = dict(item.get("fingerprint") or {})
+                    patch = patches[profile_id]
+                    if set(patch) - set(FingerprintConfig.model_fields):
+                        raise ValueError("Trường fingerprint không hợp lệ")
+                    fp_data.update(patch)
+                    new_fp = FingerprintConfig.model_validate(fp_data)
+                    if not patch:
+                        continue
                 current_rev = int(item.get("revision") or 1)
                 merged = dict(item)
                 merged["fingerprint"] = new_fp.model_dump()
@@ -802,7 +839,33 @@ class ProfileManager:
         )
         if not changed:
             return None
-        return self.get_profile(profile_id)
+        return self._profile_metadata_only(profile_id)
+
+    def _profile_metadata_only(self, profile_id: str) -> Optional[Profile]:
+        """Read a patch result without hydrating or repairing the secret store."""
+        with self._lock, self._ipc_lock:
+            with open(PROFILES_JSON, "r", encoding="utf-8") as stream:
+                records = json.load(stream)
+            return next((Profile.model_validate(item) for item in records
+                         if item.get("id") == profile_id), None)
+
+    def patch_fingerprint(
+        self, profile_id: str, patch: Dict[str, Any], *, expected_revision: int,
+        expected_proxy: Optional[Tuple[bool, str]] = None,
+    ) -> Optional[Profile]:
+        self._write_fingerprint_updates(
+            {}, {profile_id: expected_revision}, patches={profile_id: patch},
+            expected_proxies={profile_id: expected_proxy} if expected_proxy is not None else None,
+        )
+        return self._profile_metadata_only(profile_id)
+
+    def patch_fingerprints_batch(
+        self, patches: Dict[str, Dict[str, Any]], expected_revisions: Dict[str, int],
+    ) -> List[str]:
+        """Commit compatible patches once; conflicts/missing profiles stay untouched."""
+        return self._write_fingerprint_updates(
+            {}, expected_revisions, patches=patches, skip_conflicts=True,
+        )
 
     def update_fingerprints_batch(
         self,

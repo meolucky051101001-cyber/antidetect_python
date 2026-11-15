@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-15",
+  "branch": "codex/review-fixes-2026-11-15",
+  "base_head": "260f3cc",
+  "state": "committed_source_for_pr",
+  "scope": "R01-R11 staged source/tests; pre-existing unrelated working changes excluded",
+  "pytest": {
+    "passed": 650,
+    "skipped": 1,
+    "failed": 0,
+    "warnings": 2,
+    "duration_seconds": 58.12,
+    "skip_reason": "UI smoke is opt-in and was executed separately",
+    "coverage_percent": 77.03,
+    "coverage_gate_percent": 58,
+    "isolated_temp_data": true,
+    "execution": "outside Windows sandbox for multiprocessing named pipes"
+  },
+  "ui_smoke": {
+    "passed": 1,
+    "failed": 0,
+    "duration_seconds": 18.79,
+    "real_chrome": true,
+    "isolated_temp_server_and_profiles": true,
+    "additional_fixture_checks": [
+      "cleanup warning rendering",
+      "cancelling status rendering"
+    ]
+  },
+  "static_checks": {
+    "ruff": "passed",
+    "python_compileall": "passed",
+    "dashboard_js_syntax": "passed",
+    "fanpages_js_syntax": "passed"
+  },
+  "proxy_socket_fixture": "passed; loopback fake credentials only",
+  "short_soak": "passed; see soak-summary.json; 377.2 seconds before final job/history fixes",
+  "not_performed": [
+    "production data migration or deployment",
+    "24-72 hour soak of this revision",
+    "real Facebook account validation",
+    "external proxy IP/DNS/WebRTC validation",
+    "full metadata/DPAPI/schedule/SQLite backup and restore rehearsal",
+    "canary against copied real data",
+    "two live servers with real Chrome foreign-owner shutdown",
+    "end-to-end UI error import, revision conflict, and scheduler outcome checks"
+  ]
+}

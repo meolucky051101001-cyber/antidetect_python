@@ -82,6 +82,9 @@ def check_proxy(proxy: ProxyConfig, timeout: int = 8) -> Dict[str, Any]:
     """Check a proxy and return its public IP/geo information over HTTPS."""
     if not proxy.enabled or not proxy.host or not proxy.port:
         return {"success": False, "error": "Proxy chua duoc cau hinh"}
+    error = proxy.configuration_error()
+    if error:
+        return {"success": False, "code": "INVALID_PROXY_CONFIG", "error": error}
 
     proxy_url = proxy.to_url()
     proxies = {"http": proxy_url, "https": proxy_url}
@@ -114,26 +117,35 @@ def parse_proxy_line(line: str) -> ProxyConfig:
     Dùng chung cho bulk-create wizard và CLI set-proxy. Raises ValueError khi
     thiếu host/port.
     """
-    from urllib.parse import urlparse
+    from urllib.parse import unquote, urlparse
 
     text = (line or "").strip()
     if not text:
         raise ValueError("Proxy rỗng")
     if "://" not in text:
         text = f"http://{text}"
-    parsed = urlparse(text)
-    host = parsed.hostname or ""
-    port = parsed.port or 0
+    try:
+        parsed = urlparse(text)
+        host = parsed.hostname or ""
+        port = parsed.port or 0
+        if parsed.netloc.rsplit("@", 1)[-1].startswith("["):
+            import ipaddress
+            ipaddress.IPv6Address(host)
+    except ValueError:
+        raise ValueError("URL proxy có host hoặc port không hợp lệ.") from None
     if not host or not port:
-        raise ValueError(f"Proxy thiếu host/port: {line!r}")
+        raise ValueError("Proxy thiếu host/port.")
+    if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("URL proxy không được chứa path, query hoặc fragment.")
     protocol = (parsed.scheme or "http").lower()
+    protocol = {"socks5h": "socks5", "socks4a": "socks4"}.get(protocol, protocol)
     if protocol not in ("http", "https", "socks5", "socks4"):
-        raise ValueError(f"Protocol proxy không hỗ trợ: {protocol}")
-    return ProxyConfig(
-        enabled=True,
-        protocol=protocol,
-        host=host,
-        port=port,
-        username=parsed.username,
-        password=parsed.password,
-    )
+        raise ValueError("Protocol proxy không hỗ trợ.")
+    return ProxyConfig.from_input({
+        "enabled": True,
+        "protocol": protocol,
+        "host": host,
+        "port": port,
+        "username": unquote(parsed.username) if parsed.username is not None else None,
+        "password": unquote(parsed.password) if parsed.password is not None else None,
+    })

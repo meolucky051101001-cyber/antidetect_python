@@ -21,12 +21,17 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
+import stat
 import sys
+import threading
 import time
 import urllib.request
 import zipfile
 from urllib.parse import quote, urlparse
+from contextlib import contextmanager
+from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -36,6 +41,86 @@ if hasattr(sys.stderr, "reconfigure"):
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BROWSERS_DIR = os.path.join(BASE_DIR, "browsers")
 CFP_INDEX = "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json"
+_BROWSER_OPERATION_LOCK = threading.Lock()
+
+
+def _reject_reparse(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+        raise SystemExit("UNSAFE_BROWSER_PATH: từ chối symlink/junction/reparse point.")
+
+
+def _checked_browser_destination(version: str) -> Path:
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise SystemExit("INVALID_BROWSER_VERSION: cần version đầy đủ, ví dụ 155.0.8059.85.")
+    root = Path(os.path.abspath(BROWSERS_DIR))
+    # Validate the original chain before resolve, which would hide junctions.
+    for ancestor in (root, *root.parents):
+        _reject_reparse(ancestor)
+    dest = root / f"chrome-{version}"
+    _reject_reparse(dest)
+    resolved_root, resolved_dest = root.resolve(), dest.resolve()
+    if resolved_dest == resolved_root or resolved_dest.parent != resolved_root:
+        raise SystemExit("UNSAFE_BROWSER_PATH: đường dẫn nằm ngoài thư mục browsers.")
+    return dest
+
+
+@contextmanager
+def _browser_operation_lock(version: str):
+    """Serialize this tool's installs/removes; filesystem checks remain mandatory."""
+    dest = _checked_browser_destination(version)
+    with _BROWSER_OPERATION_LOCK:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = dest.parent / ".install.lock"
+        _reject_reparse(lock_path)
+        with open(lock_path, "a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if not handle.tell():
+                handle.write(b"0")
+                handle.flush()
+            deadline = time.monotonic() + 8.0
+            while True:
+                try:
+                    handle.seek(0)
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise SystemExit("BROWSER_BUSY: thao tác cài/xóa browser khác đang chạy.") from None
+                    time.sleep(0.05)
+            try:
+                yield _checked_browser_destination(version)
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _remove_checked_tree(version: str) -> None:
+    dest = _checked_browser_destination(version)
+    if not dest.is_dir():
+        raise SystemExit(f"Không tìm thấy browser version {version}.")
+    identity = dest.stat()
+    # Do not traverse a junction even when it points back into the tree.
+    for current, directories, files in os.walk(dest, followlinks=False):
+        _reject_reparse(Path(current))
+        for name in directories + files:
+            _reject_reparse(Path(current) / name)
+    checked = _checked_browser_destination(version)
+    final_identity = checked.stat()
+    if (identity.st_dev, identity.st_ino) != (final_identity.st_dev, final_identity.st_ino):
+        raise SystemExit("UNSAFE_BROWSER_PATH: thư mục browser đã thay đổi.")
+    shutil.rmtree(checked)
 
 
 def fetch_index() -> list:
@@ -94,7 +179,11 @@ def fetch_metadata(download_url: str) -> dict:
 
 
 def download_and_extract(entry: dict) -> str:
-    dest = os.path.join(BROWSERS_DIR, f"chrome-{entry['version']}")
+    with _browser_operation_lock(entry.get("version")) as dest:
+        return _download_and_extract_locked(entry, str(dest))
+
+
+def _download_and_extract_locked(entry: dict, dest: str) -> str:
     if os.path.exists(os.path.join(dest, "chrome-win64", "chrome.exe")):
         print(f"[=] Đã có sẵn: {dest}")
         return dest
@@ -142,7 +231,8 @@ def download_and_extract(entry: dict) -> str:
     os.remove(zip_path)
     exe = os.path.join(dest, "chrome-win64", "chrome.exe")
     if not os.path.exists(exe):
-        shutil.rmtree(dest, ignore_errors=True)
+        if os.path.isdir(dest):
+            _remove_checked_tree(entry["version"])
         raise SystemExit("Zip không chứa chrome.exe như kỳ vọng — đã dọn dẹp.")
     print(f"[OK] Đã cài: {exe}")
     return dest
@@ -166,11 +256,9 @@ def list_browsers() -> None:
 
 
 def remove_browser(version: str) -> None:
-    dest = os.path.join(BROWSERS_DIR, f"chrome-{version}")
-    if not os.path.isdir(dest):
-        raise SystemExit(f"Không tìm thấy {dest}")
-    shutil.rmtree(dest)
-    print(f"[OK] Đã xóa {dest}")
+    with _browser_operation_lock(version) as dest:
+        _remove_checked_tree(version)
+        print(f"[OK] Đã xóa {dest}")
 
 
 def main() -> None:

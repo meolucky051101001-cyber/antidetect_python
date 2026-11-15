@@ -396,6 +396,19 @@ class CdpHealthRegistry:
             record = self._records.get(str(profile_id))
             return bool(record and record.get("state") == STATE_STOPPING)
 
+    def forget_if_launch(self, profile_id: str, launch_id: Optional[str]) -> bool:
+        """Drop only a stale local generation before observing another owner."""
+        with self._lock:
+            key = str(profile_id)
+            record = self._records.get(key)
+            if record and record.get("launch_id") != launch_id:
+                return False
+            session = self._sessions.pop(key, None)
+            if session is not None:
+                session.mark_closed()
+            self._records.pop(key, None)
+            return True
+
     def snapshot(self, profile_id: str) -> Dict[str, Any]:
         """Public snapshot with an effective state (heartbeat freshness)."""
         with self._lock:

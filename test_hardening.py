@@ -281,7 +281,7 @@ def test_stop_server_unverified_alive_preserves_pid(monkeypatch):
     monkeypatch.setattr(server_control, "read_server_info", lambda: dict(info))
     monkeypatch.setattr(server_control, "verify_server_identity", lambda value: False)
     monkeypatch.setattr(server_control, "get_process_details", lambda pid: details)
-    monkeypatch.setattr(server_control, "remove_server_info", lambda: removed.append(True))
+    monkeypatch.setattr(server_control, "remove_server_info", lambda **kwargs: removed.append(True))
 
     result = server_control.stop_server()
     assert result["success"] is False

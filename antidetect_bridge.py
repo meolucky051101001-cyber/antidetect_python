@@ -10,7 +10,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from antidetect.models import Profile, ProxyConfig, FingerprintConfig, REDACTED_SECRET
-from antidetect.storage import ProfileManager
+from antidetect.storage import ProfileManager, ProfileRevisionConflict
 from antidetect.launcher import BrowserLauncher
 from antidetect.launch_gate import (
     evaluate_profile as evaluate_launch_gate,
@@ -169,18 +169,12 @@ def action_create(manager: ProfileManager, launcher: BrowserLauncher, data: Dict
     city = data.get("city", "hanoi")
 
     proxy_data = data.get("proxy", {})
-    proxy = ProxyConfig(
-        enabled=proxy_data.get("enabled", False),
-        protocol=proxy_data.get("protocol", "http"),
-        host=proxy_data.get("host", ""),
-        port=proxy_data.get("port", 0),
-        username=proxy_data.get("username"),
-        password=(
-            None
-            if proxy_data.get("password") in (None, "", REDACTED_SECRET)
-            else proxy_data.get("password")
-        ),
-    )
+    try:
+        proxy = ProxyConfig.from_input(proxy_data)
+    except ValueError as exc:
+        return {"success": False, "code": "INVALID_PROXY_CONFIG", "error": str(exc)}
+    if proxy.password == REDACTED_SECRET:
+        proxy.password = None
 
     lat, lon, tz = get_location_coordinates(city, randomize=True)
     fp = generate_fingerprint(
@@ -205,12 +199,9 @@ def action_create(manager: ProfileManager, launcher: BrowserLauncher, data: Dict
 
 
 def action_delete(manager: ProfileManager, launcher: BrowserLauncher, profile_id: str) -> Dict[str, Any]:
-    try:
-        launcher.stop(profile_id)
-    except Exception:
-        pass
-    success = manager.delete_profile(profile_id)
-    return {"success": success, "message": "Đã xóa profile" if success else "Không tìm thấy profile"}
+    from antidetect.profile_lifecycle import stop_and_delete
+
+    return stop_and_delete(manager, launcher, profile_id)
 
 
 def action_reset_fingerprint(manager: ProfileManager, launcher: BrowserLauncher, profile_id: str, target_os: Optional[str] = None) -> Dict[str, Any]:
@@ -227,7 +218,10 @@ def action_reset_fingerprint(manager: ProfileManager, launcher: BrowserLauncher,
         longitude=lon
     )
     p.fingerprint = new_fp
-    updated = manager.update_profile(p)
+    try:
+        updated = manager.update_fingerprint_only(p.id, p.fingerprint, p.revision)
+    except ProfileRevisionConflict as exc:
+        return {"success": False, "code": exc.code, "error": str(exc)}
     if not updated:
         return {"success": False, "error": "Cập nhật fingerprint thất bại"}
     p_dict = updated.model_dump() if hasattr(updated, "model_dump") else updated.dict()
@@ -246,14 +240,10 @@ def action_update(manager: ProfileManager, launcher: BrowserLauncher, profile_id
         p.tags = data["tags"]
     if "proxy" in data:
         pr = data["proxy"]
-        new_proxy = ProxyConfig(
-            enabled=pr.get("enabled", False),
-            protocol=pr.get("protocol", "http"),
-            host=pr.get("host", ""),
-            port=pr.get("port", 0),
-            username=pr.get("username"),
-            password=pr.get("password"),
-        )
+        try:
+            new_proxy = ProxyConfig.from_input(pr)
+        except ValueError as exc:
+            return {"success": False, "code": "INVALID_PROXY_CONFIG", "error": str(exc)}
         if new_proxy.password == REDACTED_SECRET:
             new_proxy.password = None
         # Cùng endpoint + password trống/che → giữ secret DPAPI hiện có.
@@ -266,7 +256,12 @@ def action_update(manager: ProfileManager, launcher: BrowserLauncher, profile_id
         ):
             new_proxy.password = p.proxy.password
         p.proxy = new_proxy
-    updated = manager.update_profile(p)
+    try:
+        updated = manager.update_profile(p, expected_revision=p.revision)
+    except ProfileRevisionConflict as exc:
+        return {"success": False, "code": exc.code, "error": str(exc)}
+    if updated is None:
+        return {"success": False, "code": "PROFILE_NOT_FOUND", "error": "Profile không tồn tại"}
     p_dict = updated.model_dump() if hasattr(updated, "model_dump") else updated.dict()
     return {"success": True, "profile": p_dict}
 
