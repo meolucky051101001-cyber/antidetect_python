@@ -20,7 +20,7 @@ SCOPES = {
     "dev": ("requirements-dev.txt", "requirements-dev-win-py310.lock.txt"),
     "audit": ("requirements-audit.txt", "requirements-audit-win-py310.lock.txt"),
 }
-LOCK_LINE = re.compile(r"([a-z0-9-]+)==([^ ]+) --hash=sha256:([0-9a-f]{64})")
+LOCK_LINE = re.compile(r"([a-z0-9-]+(?:\[[a-z0-9,-]+\])?)==([^ ]+) --hash=sha256:([0-9a-f]{64})")
 TARGET = {"python_version": "3.10", "python_full_version": "3.10.11", "sys_platform": "win32",
           "platform_system": "Windows", "platform_machine": "AMD64", "implementation_name": "cpython"}
 
@@ -56,19 +56,57 @@ def read_lock(scope):
         if not raw or raw.startswith("#"):
             continue
         match = LOCK_LINE.fullmatch(raw)
-        if not match or match[1] in result:
-            raise ValueError(f"{scope}: malformed or duplicated lock entry")
-        result[match[1]] = (match[2], match[3])
+        if not match:
+            raise ValueError(f"{scope}: malformed lock entry")
+        name = canonicalize_name(Requirement(match[1]).name)
+        if name in result:
+            raise ValueError(f"{scope}: duplicated lock package")
+        result[name] = (match[2], match[3])
     if not result:
         raise ValueError(f"{scope}: empty lock")
     check_inputs(scope, result)
     return result
 
 
+
+def active_extras(scope, packages, dependencies):
+    """Keep selected extras explicit, including transitive marker activation.
+
+    Older pip resolves an unpinned package[extra] separately from a base-name
+    hash pin; a newer index candidate can then make a previously valid lock fail.
+    Only extras requested by an active edge are enabled, never all wheel extras.
+    """
+    selected = {name: set() for name in packages}
+    for requirement in requirements(ROOT / SCOPES[scope][0]):
+        selected[canonicalize_name(requirement.name)].update(
+            canonicalize_name(extra) for extra in requirement.extras
+        )
+    changed = True
+    while changed:
+        changed = False
+        for parent, entries in dependencies.items():
+            contexts = {""} | selected[parent]
+            for requirement in entries:
+                if requirement.marker and not any(
+                    requirement.marker.evaluate({**TARGET, "extra": extra})
+                    for extra in contexts
+                ):
+                    continue
+                name = canonicalize_name(requirement.name)
+                if requirement.url or name not in packages or packages[name][0] not in requirement.specifier:
+                    raise ValueError(f"{scope}: missing/incompatible wheel for {requirement}")
+                extras = {canonicalize_name(extra) for extra in requirement.extras}
+                if not extras <= selected[name]:
+                    selected[name].update(extras)
+                    changed = True
+    return selected
+
+
 def generate(scope, wheel_dir):
     accepted = set(cpython_tags((3, 10), ["cp310"], ["win_amd64"]))
     accepted.update(compatible_tags((3, 10), "cp310", ["win_amd64"]))
     result = {}
+    dependencies = {}
     for wheel in sorted(wheel_dir.glob("*.whl")):
         name, version, _, tags = parse_wheel_filename(wheel.name)
         if not tags & accepted:
@@ -86,9 +124,11 @@ def generate(scope, wheel_dir):
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
         result[key] = (str(version), digest.hexdigest())
+        dependencies[key] = [Requirement(raw) for raw in metadata.get_all("Requires-Dist", [])]
     if not result:
         raise ValueError("No wheels found; use a fresh wheel directory for each scope")
     check_inputs(scope, result)
+    selected_extras = active_extras(scope, result, dependencies)
     source = SCOPES[scope][0] + (" + constraints.txt" if scope != "audit" else " (isolated tool environment)")
     lines = [
         "# Fully resolved wheel lock for CPython 3.10 / Windows x64 only.",
@@ -97,8 +137,10 @@ def generate(scope, wheel_dir):
         "# Install with --require-hashes --only-binary=:all:.",
         "# Refresh instructions: docs/DEPENDENCY_LOCKS.md", "",
     ]
-    lines += [f"{name}=={version} --hash=sha256:{digest}"
-              for name, (version, digest) in sorted(result.items())]
+    for name, (version, digest) in sorted(result.items()):
+        extras = selected_extras[name]
+        requirement_name = name + ("[" + ",".join(sorted(extras)) + "]" if extras else "")
+        lines.append(f"{requirement_name}=={version} --hash=sha256:{digest}")
     (ROOT / SCOPES[scope][1]).write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"{scope}: wrote {len(result)} hashed packages")
 

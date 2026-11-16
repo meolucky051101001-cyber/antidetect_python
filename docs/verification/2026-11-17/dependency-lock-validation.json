@@ -42,12 +42,26 @@
   },
   "locks": {
     "requirements-win-py310.lock.txt": "feddac628a0b95f28d14941d7d14690621b349d7a337739c59fb48d9f5762061",
-    "requirements-dev-win-py310.lock.txt": "0c57223d63a08f742d57781c32357cd2969181e3074e237f26ba12a89e81584d",
-    "requirements-audit-win-py310.lock.txt": "127c5302040020c1613807185a724ba3e9dcd6e65dd9b63ba821bc3c490392ff"
+    "requirements-dev-win-py310.lock.txt": "aff3547d08b1a5697ba24f5fe0ebe3ee6f819015295783e9cb3a4369701eac2d",
+    "requirements-audit-win-py310.lock.txt": "adea0c682d8a72d8e4fe6bb4800e23d7d2add9c52300f0c0d8a8a4485f2b3cc7"
   },
   "limitations": [
     "Hash checks prove reviewed wheel bytes, not upstream package trust or absence of future advisories.",
     "Only CPython 3.10 Windows x64 is locked.",
     "Final full regression is recorded in AUDIT_IMPLEMENTATION_STATUS_2026-11-17.md; remote GitHub CI is pending."
-  ]
+  ],
+  "extras_followup": {
+    "bootstrap_pip": "23.0.1",
+    "old_lock_online_dry_run": "failed on unpinned CacheControl[filecache]>=0.13.0",
+    "explicit_extras_online_dry_run": "passed for audit and dev",
+    "actual_clean_audit_install": "passed",
+    "pip_check": "passed",
+    "runtime_advisory": "No known vulnerabilities found",
+    "package_versions_and_wheel_hashes_changed": false,
+    "runtime_lock_changed": false,
+    "extras": [
+      "cachecontrol[filecache]",
+      "coverage[toml]"
+    ]
+  }
 }

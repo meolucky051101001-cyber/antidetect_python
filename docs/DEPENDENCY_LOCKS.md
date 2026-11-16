@@ -10,6 +10,10 @@ Ba file lock chứa toàn bộ dependency trực tiếp/gián tiếp, phiên b�
 
 Các pin trực tiếp trong constraints.txt không đổi. Lần resolve đầu có 11 phiên bản gián tiếp khác môi trường toàn cục trước đó; vì vậy final regression phải dùng bộ dev đã khóa. Runtime là tập con của dev với cùng version/hash cho mọi package chung. Công cụ `tools/lock_dependencies.py check` kiểm điều này, input ranges và constraints; pip check/cài sạch kiểm dependency graph thực tế.
 
+Các extras đang được dependency yêu cầu phải xuất hiện rõ trong pin, ví dụ `cachecontrol[filecache]==0.14.4` và `coverage[toml]==7.16.2`. Generator đọc Requires-Dist trong wheel, kích hoạt đúng extras theo marker và kiểm tra dependency graph, không bật mọi extra tùy chọn. Điều này tránh lỗi resolver pip23 tách một yêu cầu package[extra] chưa pin khỏi pin package gốc khi index có phiên bản mới. Bản sửa extras giữ nguyên version/SHA-256 của tất cả wheel; runtime lock không đổi.
+
+Checkpoint follow-up CI: pip23.0.1 + lock cũ tái hiện lỗi CacheControl[filecache] bằng online/no-cache dry-run. Lock explicit extras đạt dry-run, cài audit thực tế, pip check và advisory scan runtime (0 known vulnerabilities); lock dev cũng đạt online/no-cache dry-run với pip23.0.1. Không bỏ --require-hashes, không ignore advisory và không dùng nâng pip không pin để xử lý lỗi.
+
 Các lock chỉ dành cho CPython 3.10 Windows x64. Chúng không khóa binary Python, installer pip/setuptools đi kèm Python, Chrome, driver GPU, Node hoặc dữ liệu advisory. Hash xác nhận byte wheel đã duyệt; không chứng minh upstream package đáng tin hay không có lỗ hổng chưa công bố. Target Python/platform khác cần lock và nghiệm thu riêng.
 
 ## Cài đặt và kiểm tra
