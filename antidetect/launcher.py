@@ -571,9 +571,27 @@ class BrowserLauncher:
         with self._launch_locks[profile_id]:
             return self._clear_process_locked(profile_id, expected_record=expected_record)
 
+    @staticmethod
+    def _wait_directory_idle(user_data_dir, timeout=5.0):
+        """A parent exit alone does not prove Chromium children have stopped."""
+        if not user_data_dir:
+            return True
+        deadline = time.monotonic() + timeout
+        while True:
+            pids = browser_pids_using_dir(user_data_dir)
+            if pids is not None and not pids:
+                return True
+            if time.monotonic() >= deadline:
+                log.warning("[Launcher] Directory idle check failed: %s",
+                            "incomplete process scan" if pids is None else "browser processes remain")
+                return False
+            time.sleep(0.1)
+
     def _clear_process_locked(self, profile_id, *, expected_record=None):
         record = expected_record if expected_record is not None else (self._runtime_store.get(profile_id) or {})
         if expected_record is None and not self._runtime_matches_local(profile_id, record):
+            return False
+        if not self._wait_directory_idle(record.get("user_data_dir")):
             return False
         try:
             if not self._runtime_store.remove_if_matches(profile_id, record):
@@ -759,10 +777,16 @@ class BrowserLauncher:
             return False
         try:
             if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=5)
-            if proc.poll() is not None:
-                return self._clear_process(profile_id, expected_record=record)
+                if self.cdp_health.request_browser_close(profile_id, launch_id):
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        pass
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            if proc.poll() is not None and self._clear_process(profile_id, expected_record=record):
+                return True
         except (OSError, subprocess.SubprocessError):
             pass
         self.cdp_health.mark_degraded(profile_id, launch_id, REASON_STOP_FAILED, restart_required=True)
@@ -2091,6 +2115,29 @@ class BrowserLauncher:
 
                 reader_task = asyncio.create_task(reader_loop())
                 keepalive_task = asyncio.create_task(keepalive_loop())
+                if session is not None:
+                    event_loop = asyncio.get_running_loop()
+
+                    def request_browser_close():
+                        # Use this existing socket, which belongs to the launch;
+                        # opening a new connection by port could hit a new owner.
+                        async def close_current():
+                            if (session.is_open() and
+                                    self.cdp_health.current_launch_id(profile.id) == launch_id):
+                                await send("Browser.close")
+                        coroutine = close_current()
+                        try:
+                            future = asyncio.run_coroutine_threadsafe(coroutine, event_loop)
+                        except RuntimeError:
+                            coroutine.close()
+                            return False
+                        def consume_close(completed):
+                            if not completed.cancelled():
+                                completed.exception()  # socket closure may precede the reply
+                        future.add_done_callback(consume_close)
+                        return True
+
+                    session.bind_browser_close(request_browser_close)
                 try:
                     await send(
                         "Target.setAutoAttach",
@@ -2771,37 +2818,10 @@ class BrowserLauncher:
                     return {"success": False, "error": "Profile không tồn tại"}
             proc = self.active_processes.get(profile_id)
             record = self._runtime_store.get(profile_id) or {}
-            if proc and not self._runtime_matches_local(profile_id, record):
-                if proc.poll() is not None:
-                    self._forget_stale_local_process(profile_id)
-                return {"success": False, "code": "SESSION_CHANGED", "error": "Phiên profile đã thay đổi; hãy kiểm tra lại trước khi dừng."}
-            if proc and proc.poll() is not None:
-                if not self._clear_process(profile_id, expected_record=record):
-                    return {"success": False, "code": "SESSION_CHANGED", "error": "Runtime profile đã thay đổi; dữ liệu được giữ nguyên."}
-                return {"success": True, "message": "Trình duyệt đã đóng"}
-
-            pid = proc.pid if proc else (
-                record.get("pid") or (profile.pid if profile else None)
-            )
-            if not pid:
-                if not self._clear_process(profile_id, expected_record=record):
-                    return {"success": False, "code": "SESSION_CHANGED", "error": "Runtime profile đã thay đổi; dữ liệu được giữ nguyên."}
-                return {"success": True, "message": "Profile đã dừng"}
             user_data_dir = record.get("user_data_dir") or os.path.join(
                 PROFILES_DATA_DIR, profile_id, "user_data"
             )
-            if proc is not None and proc.poll() is None:
-                live_port = self.active_ports.get(profile_id)
-                if live_port:
-                    self._snapshot_tabs_via_http(live_port, user_data_dir)
             launch_id = record.get("launch_id") or self.cdp_health.current_launch_id(profile_id)
-            if self.cdp_health.mark_stopping(profile_id):
-                stopping_snapshot = self.cdp_health.snapshot(profile_id)
-                if launch_id:
-                    self._persist_health_now(
-                        profile_id, launch_id, stopping_snapshot
-                    )
-
             def _stop_failed(message: str) -> Dict[str, Any]:
                 self.cdp_health.mark_degraded(
                     profile_id,
@@ -2819,10 +2839,43 @@ class BrowserLauncher:
                     "cdp_health": snapshot,
                 }
 
+            if proc and not self._runtime_matches_local(profile_id, record):
+                if proc.poll() is not None:
+                    self._forget_stale_local_process(profile_id)
+                return {"success": False, "code": "SESSION_CHANGED", "error": "Phiên profile đã thay đổi; hãy kiểm tra lại trước khi dừng."}
+            if proc and proc.poll() is not None:
+                if not self._wait_directory_idle(user_data_dir):
+                    return _stop_failed("Chưa xác nhận các tiến trình con đã dừng; giữ trạng thái để kiểm tra lại.")
+                if not self._clear_process(profile_id, expected_record=record):
+                    return {"success": False, "code": "SESSION_CHANGED", "error": "Runtime profile đã thay đổi; dữ liệu được giữ nguyên."}
+                return {"success": True, "message": "Trình duyệt đã đóng"}
+
+            pid = proc.pid if proc else (
+                record.get("pid") or (profile.pid if profile else None)
+            )
+            if not pid:
+                if not self._wait_directory_idle(user_data_dir):
+                    return _stop_failed("Thư mục profile còn được sử dụng hoặc chưa xác minh được.")
+                if not self._clear_process(profile_id, expected_record=record):
+                    return {"success": False, "code": "SESSION_CHANGED", "error": "Runtime profile đã thay đổi; dữ liệu được giữ nguyên."}
+                return {"success": True, "message": "Profile đã dừng"}
+            if proc is not None and proc.poll() is None:
+                live_port = self.active_ports.get(profile_id)
+                if live_port:
+                    self._snapshot_tabs_via_http(live_port, user_data_dir)
+            if self.cdp_health.mark_stopping(profile_id):
+                stopping_snapshot = self.cdp_health.snapshot(profile_id)
+                if launch_id:
+                    self._persist_health_now(
+                        profile_id, launch_id, stopping_snapshot
+                    )
+
             identity = None
             if not proc:
                 identity = self._identity_for_stop(pid, user_data_dir)
                 if identity["state"] in ("absent", "mismatch"):
+                    if not self._wait_directory_idle(user_data_dir):
+                        return _stop_failed("Thư mục profile còn được sử dụng hoặc chưa xác minh được.")
                     if not self._clear_process(profile_id, expected_record=record):
                         return {"success": False, "code": "SESSION_CHANGED", "error": "Runtime profile đã thay đổi; dữ liệu được giữ nguyên."}
                     return {"success": True, "message": "Phiên cũ đã kết thúc"}
@@ -2834,12 +2887,18 @@ class BrowserLauncher:
                     if proc:
                         # Popen owns the native handle, so PID reuse cannot
                         # redirect termination to a different process.
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                            proc.wait(timeout=5)
+                        if self.cdp_health.request_browser_close(profile_id, launch_id):
+                            try:
+                                proc.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                pass
+                        if proc.poll() is None:
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                                proc.wait(timeout=5)
                         exited = proc.poll() is not None
                     else:
                         if record.get("created") and record["created"] != identity.get("created"):
@@ -2863,6 +2922,8 @@ class BrowserLauncher:
                     return _stop_failed("Không xác minh được quyền sở hữu tiến trình.")
                 if not exited:
                     return _stop_failed("Trình duyệt vẫn đang chạy; chưa thể báo đã dừng.")
+                if not self._wait_directory_idle(user_data_dir):
+                    return _stop_failed("Chưa xác nhận các tiến trình con đã dừng; giữ trạng thái để kiểm tra lại.")
             except (OSError, subprocess.SubprocessError):
                 return _stop_failed("Không thể dừng trình duyệt; trạng thái được giữ nguyên.")
             if not self._clear_process(profile_id, expected_record=record):

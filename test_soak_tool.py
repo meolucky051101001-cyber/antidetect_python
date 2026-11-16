@@ -346,3 +346,60 @@ def test_workload_http_requires_same_origin_and_accepts_compact_report(tmp_path)
         server.shutdown()
         server.server_close()
         thread.join(2)
+
+
+def test_failed_stop_keeps_active_state_unconfirmed(runner, monkeypatch):
+    monkeypatch.setattr(soak, "_http", lambda *a, **k: _response(
+        409, {"success": False, "code": "STOP_FAILED", "error": "synthetic unconfirmed exit"}))
+    monkeypatch.setattr(runner, "_wait_no_chrome", lambda *a, **k: pytest.fail("API failure is not confirmed"))
+    profile = runner.profiles[0]
+    assert not runner._stop_profile(profile, "cycle")
+    assert profile["active"] is True
+    assert profile["stop_unconfirmed"] is True
+    assert profile.get("stops", 0) == 0
+
+
+def test_successful_api_stop_with_remaining_children_preserves_state_and_evidence(runner, monkeypatch):
+    monkeypatch.setattr(soak, "_http", lambda *a, **k: _response(200, {"success": True}))
+    def remains(profile):
+        profile["last_observed_pids"] = [424242, 424243]
+        return False
+    monkeypatch.setattr(runner, "_wait_no_chrome", remains)
+    profile = runner.profiles[0]
+    assert not runner._stop_profile(profile, "cycle")
+    assert profile["active"] is True and profile["stop_unconfirmed"] is True
+    assert profile.get("stops", 0) == 0
+    assert runner.critical
+    assert runner.errors[-1]["scope"] == "orphan_after_stop"
+    assert "[424242, 424243]" in runner.errors[-1]["message"]
+
+
+def test_lifecycle_never_restarts_after_failed_quiescence(runner, monkeypatch):
+    def failed_stop(profile, reason):
+        # Even a legacy observer that incorrectly cleared active cannot
+        # authorize a new launch after the stop failed.
+        profile["active"] = False
+        runner.critical = True
+        return False
+    monkeypatch.setattr(runner, "_stop_profile", failed_stop)
+    monkeypatch.setattr(runner, "_start_profile", lambda *a: pytest.fail("must not restart unconfirmed stop"))
+    runner._lifecycle_cycle()
+    assert runner._lifecycle_cycles == 0
+
+
+def test_confirmed_stop_clears_unknown_state_and_counts_once(runner, monkeypatch):
+    monkeypatch.setattr(soak, "_http", lambda *a, **k: _response(200, {"success": True}))
+    monkeypatch.setattr(runner, "_wait_no_chrome", lambda *a: True)
+    profile = runner.profiles[0]
+    profile["stop_unconfirmed"] = True
+    assert runner._stop_profile(profile, "cycle")
+    assert profile["active"] is False
+    assert profile["stop_unconfirmed"] is False
+    assert profile["stops"] == 1
+
+
+def test_missing_process_observer_cannot_confirm_stop(runner, monkeypatch):
+    monkeypatch.setattr(soak, "psutil", None)
+    profile = runner.profiles[0]
+    assert not runner._wait_no_chrome(profile)
+    assert profile["last_observed_pids"] is None

@@ -537,6 +537,8 @@ class SoakRunner:
                 "cdp_port": item.get("port"),
                 "starts": item.get("starts", 0),
                 "stops": item.get("stops", 0),
+                "stop_unconfirmed": bool(item.get("stop_unconfirmed")),
+                "last_observed_pids": item.get("last_observed_pids"),
             }
             for item in self.profiles
         ]
@@ -704,11 +706,15 @@ class SoakRunner:
         return True
 
     def _wait_no_chrome(self, profile, timeout=30):
+        profile["last_observed_pids"] = None
+        if psutil is None:
+            return False
         deadline = time.time() + timeout
         while time.time() < deadline:
-            entry = _chrome_processes({profile["id"]: self._profile_dir(profile)})[
-                profile["id"]
-            ]
+            entry = _chrome_processes({profile["id"]: self._profile_dir(profile)}).get(profile["id"])
+            if not isinstance(entry, dict) or not isinstance(entry.get("pids"), list):
+                return False
+            profile["last_observed_pids"] = list(entry["pids"])
             if not entry["pids"]:
                 return True
             time.sleep(1)
@@ -730,23 +736,21 @@ class SoakRunner:
                 f"{profile['name']}: {msg}",
                 code=body.get("code") if isinstance(body, dict) else None,
             )
-            # Kiểm tra xem Chrome thực tế đã dừng hay chưa để tránh lệch trạng thái
-            time.sleep(1.0)
-            pids = _chrome_processes(self._chrome_map()).get(profile["id"], {}).get("pids", [])
-            if not pids:
-                profile["active"] = False
-                profile["stops"] = profile.get("stops", 0) + 1
-                self._event("profile_stopped", profile=profile["name"], reason=reason)
+            # An API failure cannot establish that this profile stopped.
+            profile["stop_unconfirmed"] = True
             return False
-        profile["active"] = False
-        profile["stops"] = profile.get("stops", 0) + 1
         if not self._wait_no_chrome(profile):
+            profile["stop_unconfirmed"] = True
+            remaining = profile.get("last_observed_pids")
             self._error(
                 "orphan_after_stop",
-                f"{profile['name']}: Chrome vẫn còn sau 30s",
+                f"{profile['name']}: stop unconfirmed after 30s; fixture-scoped remaining_pids={remaining}",
                 critical=True,
             )
             return False
+        profile["active"] = False
+        profile["stop_unconfirmed"] = False
+        profile["stops"] = profile.get("stops", 0) + 1
         self._event("profile_stopped", profile=profile["name"], reason=reason)
         return True
 
@@ -1067,7 +1071,7 @@ class SoakRunner:
         profile = active[self._cycle_index % len(active)]
         self._cycle_index += 1
         stopped = self._stop_profile(profile, "cycle")
-        restarted = self._start_profile(profile) if stopped or not profile["active"] else False
+        restarted = self._start_profile(profile) if stopped and not self.critical else False
         if not (stopped and restarted):
             self._save()
             return

@@ -171,7 +171,9 @@ class LiveServer:
 
 @pytest.fixture
 def live_environment():
-    data_dir = Path(tempfile.mkdtemp(prefix="antidetect-live-runtime-"))
+    # Windows CI may expose TEMP through an 8.3 alias (RUNNER~1). Compare
+    # canonical paths on both sides while retaining the direct-TEMP guard.
+    data_dir = Path(tempfile.mkdtemp(prefix="antidetect-live-runtime-")).resolve()
     assert data_dir.parent == Path(tempfile.gettempdir()).resolve()
     servers = []
     application_commit = subprocess.check_output(

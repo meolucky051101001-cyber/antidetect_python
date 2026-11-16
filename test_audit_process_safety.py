@@ -125,7 +125,23 @@ def test_process_scan_missing_command_line_is_unknown(monkeypatch, tmp_path):
     monkeypatch.setattr(process_identity.sys, "platform", "win32")
     monkeypatch.setattr(process_identity.subprocess, "run", lambda *a, **k: SimpleNamespace(
         returncode=0, stdout='[{"ProcessId":424242,"CommandLine":null}]'))
+    monkeypatch.setattr(process_identity, "read_browser_identity", lambda *a, **k: {"state": "unknown"})
     assert process_identity.browser_pids_using_dir(str(tmp_path)) is None
+
+
+def test_process_scan_missing_command_line_skips_only_confirmed_exited(monkeypatch, tmp_path):
+    monkeypatch.setattr(process_identity.sys, "platform", "win32")
+    monkeypatch.setattr(process_identity.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout='[{"ProcessId":424242,"CommandLine":null}]'))
+    for state in ("owned", "unknown", "mismatch", "absent"):
+        calls = []
+        def identity(pid, directory, *, fresh):
+            calls.append((pid, directory, fresh))
+            return {"state": state}
+        monkeypatch.setattr(process_identity, "read_browser_identity", identity)
+        result = process_identity.browser_pids_using_dir(str(tmp_path))
+        assert calls == [(424242, str(tmp_path), True)]
+        assert result == (set() if state == "absent" else None)
 
 
 def test_failed_launch_cleanup_retains_live_handle_and_runtime(tmp_path):

@@ -299,6 +299,7 @@ def test_conditional_stop_cannot_stop_replacement_session(monkeypatch):
 
 
 def test_stop_retries_transient_unknown_identity(monkeypatch):
+    monkeypatch.setattr(launcher_module, "browser_pids_using_dir", lambda *_a, **_k: set())
     m = ProfileManager()
     launcher = BrowserLauncher(m)
     p = m.create_profile("stop-retry-identity")
@@ -330,6 +331,7 @@ def test_stop_retries_transient_unknown_identity(monkeypatch):
 @pytest.mark.parametrize("outcome", ["refused", "unconfirmed", "confirmed"])
 def test_stop_retains_runtime_until_native_handle_exit_is_confirmed(monkeypatch, outcome):
     """TerminateProcess success alone is not proof of exit; never use taskkill."""
+    monkeypatch.setattr(launcher_module, "browser_pids_using_dir", lambda *_a, **_k: set())
     manager = ProfileManager()
     launcher = BrowserLauncher(manager)
     profile = manager.create_profile("native-handle-stop-" + outcome)
@@ -417,6 +419,7 @@ def test_wait_identity_gone_retries_unknown_without_failing(monkeypatch):
 
 @pytest.mark.parametrize("recovered_state", ["owned", "unknown"])
 def test_recovered_runtime_requires_stop_before_reuse(monkeypatch, recovered_state):
+    monkeypatch.setattr(launcher_module, "browser_pids_using_dir", lambda *_a, **_k: set())
     m = ProfileManager()
     launcher = BrowserLauncher(m)
     p = m.create_profile(f"recover-to-stop-{recovered_state}")

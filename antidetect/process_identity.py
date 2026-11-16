@@ -270,6 +270,11 @@ def browser_pids_using_dir(user_data_dir, exclude_pids=None):
                 continue
             command_line = record.get("CommandLine")
             if not command_line:
+                # CIM can retain an exiting process in this snapshot after its
+                # command line has disappeared. Skip it only with fresh native
+                # proof of exit; a live/denied/unknown entry still blocks idle.
+                if read_browser_identity(pid, user_data_dir, fresh=True).get("state") == "absent":
+                    continue
                 return None
             options = _options(windows_argv(command_line))
             actual = options.get("user-data-dir")
