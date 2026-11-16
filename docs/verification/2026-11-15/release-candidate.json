@@ -1,0 +1,28 @@
+{
+  "recorded_at": "2026-11-16T04:23:05.529504+00:00",
+  "base_commit": "793038de34a6fd5aa480b3dd1d1fc638338b795c",
+  "source_sha256": {
+    "antidetect/facebook.py": "db01955196450c9f34c6b7e5edc83cd0939f898e8141a3546f396da5231f6d94",
+    "antidetect/fanpage_scan.py": "2d001319bd76a92dae72f64c35dc97e93c4e84b4a005b134b927ad201f53f7ee",
+    "antidetect/launcher.py": "3fe04cc4292a42475d4a51f2ee0b1632a270bf403dd16a7a2c96a8cc0c0a4fe1",
+    "web/app.py": "073c313a3332da9d37f4c7a0a03d41544bc03c18f161ca07008c34a21ab6ddc5",
+    "tools/soak_test.py": "6ccb1ad6fca30f00c4a902423cfe8713282c384aa6a5a08f73953d746445eaa6"
+  },
+  "python": "3.10.11",
+  "regression": {
+    "passed": 728,
+    "skipped": 3,
+    "warnings": 2,
+    "duration_seconds": 50.63,
+    "coverage_percent": 77.32
+  },
+  "checks": {
+    "ruff": true,
+    "python_syntax": true,
+    "dashboard_javascript_syntax": true,
+    "fanpages_javascript_syntax": true,
+    "diff": true
+  },
+  "verification_scope": "offline fixtures and synthetic DOM; live Facebook verification paused at user request",
+  "long_soak": "pending"
+}

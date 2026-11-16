@@ -1,0 +1,48 @@
+{
+  "started_at": "2026-11-16T04:13:45.690411+00:00",
+  "profiles": [
+    {
+      "label": "Canary 1",
+      "healthy_launch": true,
+      "login_status": null,
+      "discovery_status": "failed",
+      "completion_reason": "NAVIGATION_ERROR",
+      "observed_count": 0,
+      "pages_count": 0,
+      "cleanup": true
+    },
+    {
+      "label": "Canary 2",
+      "healthy_launch": true,
+      "login_status": true,
+      "discovery_status": "partial",
+      "completion_reason": "NO_END_SIGNAL",
+      "observed_count": 7,
+      "pages_count": 7,
+      "cleanup": true
+    },
+    {
+      "label": "Canary 3",
+      "healthy_launch": true,
+      "login_status": true,
+      "discovery_status": "partial",
+      "completion_reason": "NO_END_SIGNAL",
+      "observed_count": 10,
+      "pages_count": 10,
+      "cleanup": true
+    }
+  ],
+  "status": "completed",
+  "source_hashes_unchanged": true,
+  "fixture_browsers_remaining": 0,
+  "finished_at": "2026-11-16T04:14:19.123962+00:00",
+  "scope": "fresh temporary copies; direct; discovery only",
+  "acceptance": "partial; further authenticated Facebook validation deferred at user's request",
+  "limitations": [
+    "This exploratory run preceded completion of offline parser fixes.",
+    "One copy displayed a login prompt on page details and failed discovery navigation.",
+    "Two copies returned partial/NO_END_SIGNAL inventories.",
+    "No 24-hour soak or production rollout is certified by this report."
+  ],
+  "new_canary_browser_data_removed": true
+}

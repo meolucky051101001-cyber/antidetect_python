@@ -15,7 +15,7 @@ import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-COLLECTOR_VERSION = "f4-2026-11-05.1"
+COLLECTOR_VERSION = "f4-2026-11-15.1"
 SCAN_META_FILENAME = "facebook_scan_meta.json"
 SCAN_META_VERSION = 1
 
@@ -364,7 +364,7 @@ def evaluate_discovery(
     end_marker: bool = False,
     empty_confirmed: bool = False,
     ui_recognized: bool = True,
-    logged_in: bool = True,
+    logged_in: Optional[bool] = True,
     login_lost: bool = False,
     identity_status: str = "unknown",
     account_id_observed: Optional[str] = None,
@@ -401,7 +401,7 @@ def evaluate_discovery(
     if total_value is not None and total_value < 0:
         total_value = None
 
-    if login_lost or not logged_in:
+    if login_lost or logged_in is False:
         status, reason = STATUS_FAILED, REASON_LOGIN_LOST
     elif (
         expected_account_id
@@ -411,6 +411,11 @@ def evaluate_discovery(
         status, reason = STATUS_FAILED, REASON_LOGIN_IDENTITY_MISMATCH
     elif nav_error:
         status, reason = STATUS_FAILED, REASON_NAVIGATION_ERROR
+    elif deadline_hit and not recognized:
+        # A document that never became readable is inconclusive, not empty or
+        # affirmative evidence that the account logged out. Keep it failed so
+        # legacy force-refresh callers cannot clear cache as a partial empty scan.
+        status, reason = STATUS_FAILED, REASON_DEADLINE
     elif not recognized:
         status, reason = STATUS_FAILED, REASON_UI_UNRECOGNIZED
     elif total_value is not None and len(observed) == total_value:
@@ -441,7 +446,7 @@ def evaluate_discovery(
         "total_pages_in_source": total_value,
         "started_at": to_utc_iso(started_at) or to_utc_iso(utc_now()),
         "finished_at": to_utc_iso(finished_at) or to_utc_iso(utc_now()),
-        "login_status": bool(logged_in) and not login_lost,
+        "login_status": None if logged_in is None and not login_lost else bool(logged_in) and not login_lost,
         "identity_status": identity,
         "account_id_observed": account_id,
         "collector_version": collector_version or COLLECTOR_VERSION,

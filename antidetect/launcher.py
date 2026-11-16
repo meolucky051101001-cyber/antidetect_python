@@ -63,6 +63,7 @@ from .browser_env import (
 )
 from .cookies import fetch_cookies_cdp, normalize_cookies, set_cookies_cdp
 from .facebook import (
+    DEEP_NAVIGATION_TIMEOUT_S,
     TRANSIENT_TARGET_IDS,
     ScanAborted,
     classify_facebook_page,
@@ -2831,7 +2832,7 @@ class BrowserLauncher:
             and data.get("pages")
             and status in (None, "complete", "partial")
         ):
-            per_page = 8.0
+            per_page = 2 * DEEP_NAVIGATION_TIMEOUT_S
             deep_timeout = min(300.0, 20.0 + per_page * len(data["pages"]))
             try:
                 details = _safe_run_async(

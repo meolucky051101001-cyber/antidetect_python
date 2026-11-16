@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -19,6 +20,11 @@ class _Args:
     port = 1
     data_dir = ""
     results_dir = ""
+    sample_interval = 30.0
+    tab_interval = 300.0
+    cycle_interval = 600.0
+    copy_interval = 21600.0
+    shed_free_mb = 650.0
 
 
 @pytest.fixture
@@ -130,3 +136,97 @@ def test_tab_cycle_records_error_code_after_retry_fails(runner, monkeypatch):
     assert record["scope"] == "open_tab"
     assert record["code"] == "CDP_UNHEALTHY"
     assert "CDP không khỏe" in record["message"]
+
+
+@pytest.fixture
+def finished_runner(runner, monkeypatch):
+    runner.hours = 24.0
+    runner._deadline_ts = time.time() - 1
+    runner.profiles[0].update(active=False, starts=2)
+    runner._sample_count = 10
+    runner._healthy_active_samples = 10
+    runner._tabs_opened = 2
+    runner._lifecycle_cycles = 1
+    runner._copy_cycles = 1
+    monkeypatch.setattr(soak, "_chrome_processes", lambda *_a: {})
+    return runner
+
+
+def test_elapsed_deadline_without_browser_workload_fails(finished_runner):
+    finished_runner.profiles = []
+    finished_runner._sample_count = 0
+    finished_runner._healthy_active_samples = 0
+    finished_runner._tabs_opened = 0
+    finished_runner._lifecycle_cycles = 0
+    finished_runner._copy_cycles = 0
+
+    assert finished_runner._finalize() == 1
+    summary = finished_runner.state["summary"]
+    assert summary["completed_duration"] is True
+    assert summary["passed"] is False
+    assert summary["workload_checks"]["profile_started"] is False
+    assert summary["workload_checks"]["healthy_active_sample"] is False
+
+
+@pytest.mark.parametrize("counter,check", [
+    ("_healthy_active_samples", "healthy_active_sample"),
+    ("_tabs_opened", "tab"),
+    ("_lifecycle_cycles", "lifecycle"),
+    ("_copy_cycles", "copy"),
+])
+def test_scheduled_workload_must_be_exercised(finished_runner, counter, check):
+    setattr(finished_runner, counter, 0)
+    assert finished_runner._finalize() == 1
+    assert finished_runner.state["summary"]["workload_checks"][check] is False
+
+
+def test_memory_adapted_workload_can_pass_with_observed_browser(finished_runner):
+    finished_runner.target_profiles = 2
+    finished_runner.min_active = 1
+    finished_runner.profiles.append({"id": "profile-2", "name": "Soak 2", "active": False})
+    finished_runner._shed_count = 1
+
+    assert finished_runner._finalize() == 0
+    summary = finished_runner.state["summary"]
+    assert summary["passed"] is True
+    assert summary["memory_shed"] == 1
+    assert all(summary["cleanup_checks"].values())
+
+
+def test_short_run_reports_exercises_outside_its_duration(finished_runner):
+    finished_runner.hours = 0.01
+    finished_runner._tabs_opened = 0
+    finished_runner._lifecycle_cycles = 0
+    finished_runner._copy_cycles = 0
+
+    assert finished_runner._finalize() == 0
+    summary = finished_runner.state["summary"]
+    assert summary["workload_required"] == {"tab": False, "lifecycle": False, "copy": False}
+    assert summary["workload_checks"]["tab"] is None
+    assert summary["workload_checks"]["lifecycle"] is None
+    assert summary["workload_checks"]["copy"] is None
+
+
+def test_unfinished_staging_prevents_soak_acceptance(finished_runner, monkeypatch):
+    monkeypatch.setattr(finished_runner, "_artifact_counts", lambda: {"staging_files": 1})
+    assert finished_runner._finalize() == 1
+    assert finished_runner.state["summary"]["cleanup_checks"]["staging_empty"] is False
+
+
+@pytest.mark.parametrize("health,expected", [("healthy", 1), ("degraded", 0), (None, 0)])
+def test_samples_require_verified_browser_health(runner, monkeypatch, health, expected):
+    def fake_http(_base, _method, path, **_kwargs):
+        if path == "/health":
+            return _response(200, {"application": "antidetect-python"})
+        return _response(200, [{"id": "profile-1", "status": "running", "cdp_health": {"state": health}}])
+
+    monkeypatch.setattr(soak, "_http", fake_http)
+    monkeypatch.setattr(soak, "_chrome_processes", lambda *_a: {
+        "profile-1": {"pids": [123], "rss_mb": 10.0},
+    })
+    monkeypatch.setattr(runner, "_available_mb", lambda: 2000)
+
+    runner._sample()
+
+    assert runner.state["counters"]["samples"] == 1
+    assert runner.state["counters"]["healthy_active_samples"] == expected

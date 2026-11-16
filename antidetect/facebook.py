@@ -10,6 +10,7 @@ import re
 import time
 import urllib.request
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, urlparse
 
 from .fanpage_scan import (
     COLLECTOR_VERSION,
@@ -26,6 +27,7 @@ from .fanpage_scan import (
 # Các targetId của tab tạm do trình quét fanpage tự mở và tự đóng.
 # Launcher dùng tập này để không ghi đè tab tạm vào danh sách tab phiên của người dùng.
 TRANSIENT_TARGET_IDS: set = set()
+DEEP_NAVIGATION_TIMEOUT_S = 14.0
 
 
 # Fanpage listing: mở tab facebook.com/bookmarks/pages TRONG phiên profile
@@ -34,10 +36,11 @@ TRANSIENT_TARGET_IDS: set = set()
 # Python giữ tập tích lũy ngoài DOM nên list ảo hóa không làm mất page.
 _FB_SCRAPE_JS = r"""
 (async () => {
-    const PARSER = 'f4-2026-11-05.1';
+    const PARSER = 'f4-2026-11-15.1';
     const out = {
         url: location.href,
         readyState: document.readyState,
+        bodyTextLength: document.body ? (document.body.innerText || '').trim().length : 0,
         title: (document.title || '').slice(0, 120),
         loggedOut: false,
         accountId: null,
@@ -268,7 +271,7 @@ _FB_SCRAPE_JS = r"""
 # thường xuyên — mọi giá trị vẫn giữ raw để hiển thị khi parse thất bại.
 _FB_PAGE_METRICS_JS = r"""
 (async () => {
-    const PARSER = 'f3-2026-11-05.1';
+    const PARSER = 'f3-2026-11-16.2';
     const RXS = [
         [/(\d+)\s+giây\s+trước/i, 's'], [/(\d+)\s+phút\s+trước/i, 'm'],
         [/(\d+)\s+giờ\s+trước/i, 'h'], [/(\d+)\s+ngày\s+trước/i, 'd'],
@@ -280,7 +283,8 @@ _FB_PAGE_METRICS_JS = r"""
         [/(\d+)\s+years?\s+ago/i, 'y'],
         [/^(vừa\s+xong|just\s+now)$/i, 'now'],
     ];
-    const CREATED_LABEL = /(ngày\s+tạo(?:\s+trang)?|page\s+created|created\s+on|date\s+created|được\s+tạo|phát\s+hành)/i;
+    const CREATED_LABEL = /(ngày\s+tạo(?:\s+trang)?|page\s+created|created\s+on|date\s+created|được\s+tạo|phát\s+hành)/i;
+    const CREATED_DATE = /(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[\/.-]\d{1,2}[\/.-]\d{4}|\d{1,2}\s+tháng\s+\d{1,2},?\s+\d{4}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December),?\s+\d{4})/i;
     const PINNED = /(^|\n)\s*(đã\s+ghim|pinned\s+post|pinned)\b/i;
     const PROMOTED = /(được\s+tài\s+trợ|sponsored|được\s+đề\s+xuất|suggested\s+for\s+you)/i;
 
@@ -289,6 +293,8 @@ _FB_PAGE_METRICS_JS = r"""
     let pageId = null;
     const pm = location.pathname.match(/^\/pages\/[^/]+\/(\d{5,})/i);
     if (pm) pageId = pm[1];
+    const numericPath = pagePath.match(/^\/(\d{5,})$/);
+    if (!pageId && numericPath) pageId = numericPath[1];
     if (!pageId) {
         const qid = new URLSearchParams(location.search).get('id');
         if (qid && /^\d{5,}$/.test(qid)) pageId = qid;
@@ -311,10 +317,9 @@ _FB_PAGE_METRICS_JS = r"""
     };
     const isPageLink = (li) => {
         if (!li) return false;
-        if (pageId && li.id === pageId) return true;
-        if (pageId && li.u.searchParams.get('id') === pageId) return true;
-        if (pagePath && li.path === pagePath) return true;
-        if (pagePath && li.path.indexOf(pagePath + '/') === 0) return true;
+        if (pageId && li.id) return li.id === pageId;
+        if (pagePath && pagePath !== '/profile.php' && li.path === pagePath) return true;
+        if (pagePath && pagePath !== '/profile.php' && li.path.indexOf(pagePath + '/') === 0) return true;
         if (pageId) {
             const segs = li.path.split('/').filter(Boolean);
             if (segs.indexOf(pageId) !== -1) return true;
@@ -332,6 +337,7 @@ _FB_PAGE_METRICS_JS = r"""
         const out = {
             url: location.href,
             readyState: document.readyState,
+            bodyTextLength: document.body ? (document.body.innerText || '').trim().length : 0,
             title: (document.title || '').slice(0, 120),
             times: [],
             createdRaw: null,
@@ -376,10 +382,16 @@ _FB_PAGE_METRICS_JS = r"""
                 for (const a of links) {
                     if (out.times.length >= 20) break;
                     const li = linkInfo(a.href);
-                    if (!li || li.isComment) continue;
-                    const label = (a.getAttribute('aria-label') || a.textContent || '')
-                        .trim().replace(/\s+/g, ' ');
-                    if (!label || label.length > 48) continue;
+                    if (!li || li.isComment || (pageId && li.id && li.id !== pageId)) continue;
+                    const descriptions = (a.getAttribute('aria-describedby') || '').split(/\s+/)
+                        .filter(Boolean).map(id => document.getElementById(id)?.textContent || '');
+                    const labels = [a.getAttribute('aria-label'), a.getAttribute('title'),
+                        ...descriptions, a.textContent].filter(Boolean)
+                        .map(value => value.normalize('NFC').trim().replace(/\s+/g, ' '));
+                    const absoluteLabel = labels.find(value => CREATED_DATE.test(value)
+                        && /(?:lúc|at)\s+\d{1,2}:\d{2}/i.test(value));
+                    const label = absoluteLabel || labels[0] || '';
+                    if (!label || label.length > 120) continue;
                     let n = null, unit = null;
                     for (const [rx, u] of RXS) {
                         const m = label.match(rx);
@@ -389,7 +401,7 @@ _FB_PAGE_METRICS_JS = r"""
                             break;
                         }
                     }
-                    if (unit === null || n === null || isNaN(n)) continue;
+                    if (!absoluteLabel && (unit === null || n === null || isNaN(n))) continue;
                     if (!isPermalink(li) && !isPageLink(li)) continue;
                     const key = n + '|' + unit + '|' + label;
                     if (seen.has(key)) continue;
@@ -403,9 +415,18 @@ _FB_PAGE_METRICS_JS = r"""
             }
         } catch (e) {}
         try {
-            const txt = document.body ? (document.body.innerText || '') : '';
+            const txt = (document.body ? (document.body.innerText || '') : '').normalize('NFC');
             const m = txt.match(new RegExp(CREATED_LABEL.source + '[^\\n]{0,100}', 'i'));
-            if (m) out.createdRaw = m[0].slice(0, 140);
+            if (m) {
+                let creationText = m[0];
+                if (!CREATED_DATE.test(creationText)) {
+                    const following = txt.slice(m.index + m[0].length).match(/^\n[ \t]*([^\n]{1,100})/);
+                    if (following && CREATED_DATE.test(following[1])) {
+                        creationText += ' ' + following[1].trim();
+                    }
+                }
+                if (CREATED_DATE.test(creationText)) out.createdRaw = creationText.slice(0, 140);
+            }
             const html = document.documentElement ? (document.documentElement.outerHTML || '') : '';
             if (!out.createdRaw && html) {
                 const idx = html.indexOf('"field_type":"creation_date"');
@@ -447,6 +468,7 @@ _FB_PAGE_METRICS_JS = r"""
     const t0 = Date.now();
     while (Date.now() - t0 < 6000) {
         const r = scrape();
+        if (r.accessState !== 'ok' || r.readyState === 'loading' || r.bodyTextLength === 0) return r;
         if (r.createdRaw) return r;
         if (r.feedReady && (r.times.length > 0 || Date.now() - t0 > 3000)) return r;
         await new Promise(res => setTimeout(res, 400));
@@ -456,7 +478,7 @@ _FB_PAGE_METRICS_JS = r"""
 """
 
 
-PARSER_VERSION = "f3-2026-11-05.1"
+PARSER_VERSION = "f3-2026-11-16.2"
 DEFAULT_DISPLAY_TIMEZONE = "Asia/Ho_Chi_Minh"
 ACTIVITY_WINDOW_DAYS = 7
 STALE_AFTER_HOURS = 48
@@ -911,6 +933,8 @@ def _fb_listing_url_error(url: Any) -> Optional[str]:
     path = (parsed.path or "").lower()
     if path.startswith("/login") or path == "/login.php":
         return "login"
+    if path.startswith("/checkpoint"):
+        return "checkpoint"
     if "/pages" in path or "/bookmarks" in path:
         return None
     return "nav"
@@ -966,11 +990,13 @@ async def fetch_pages_cdp(
     TRANSIENT_TARGET_IDS.add(str(target_id))
 
     started_at = utc_now()
+    budget = float(timeout or DISCOVERY_DEADLINE_S)
+    scan_deadline = time.monotonic() + min(DISCOVERY_DEADLINE_S, max(1.0, budget))
     try:
         # Đợi tab navigate tới facebook.com (auto-attach sẽ configure
         # stealth rồi resume tab như mọi tab user mở).
         ws_url = None
-        connect_deadline = time.monotonic() + min(timeout, 15.0)
+        connect_deadline = min(scan_deadline, time.monotonic() + min(timeout, 15.0))
         while time.monotonic() < connect_deadline and not ws_url:
             _check_abort()
             try:
@@ -1019,10 +1045,13 @@ async def fetch_pages_cdp(
                     )
                     not_ready = False
                     while time.monotonic() < resp_deadline:
-                        msg = json.loads(await asyncio.wait_for(
-                            ws.recv(),
-                            timeout=max(0.2, resp_deadline - time.monotonic()),
-                        ))
+                        try:
+                            msg = json.loads(await asyncio.wait_for(
+                                ws.recv(),
+                                timeout=max(0.2, resp_deadline - time.monotonic()),
+                            ))
+                        except asyncio.TimeoutError:
+                            return None, "timeout"
                         if msg.get("id") != my_id:
                             continue
                         err = msg.get("error")
@@ -1048,10 +1077,6 @@ async def fetch_pages_cdp(
                     await asyncio.sleep(0.4)
                 return None, "not_ready"
 
-            budget = float(timeout or DISCOVERY_DEADLINE_S)
-            scan_deadline = time.monotonic() + min(
-                DISCOVERY_DEADLINE_S, max(1.0, budget)
-            )
             accumulator = PageAccumulator()
             total = None
             end_marker = False
@@ -1059,7 +1084,8 @@ async def fetch_pages_cdp(
             ui_recognized = False
             identity_status = "unknown"
             account_id = None
-            login_status = True
+            # Absence of a login form in an empty document is not proof of login.
+            login_status = None
             login_lost = False
             nav_error = False
             deadline_hit = False
@@ -1071,6 +1097,7 @@ async def fetch_pages_cdp(
             unrecognized_rounds = 0
             nav_bad_rounds = 0
             round_index = 0
+            scroll_rounds = 0
             eval_failures = 0
             last_snap: Dict[str, Any] = {}
 
@@ -1082,14 +1109,19 @@ async def fetch_pages_cdp(
                 if len(accumulator) >= MAX_PAGES:
                     max_pages_hit = True
                     break
-                if round_index >= MAX_SCROLL_ROUNDS:
+                if scroll_rounds >= MAX_SCROLL_ROUNDS:
                     max_scrolls_hit = True
                     break
 
                 snap, state = await _evaluate_round(scan_deadline)
                 if snap is None:
+                    if state in ("deadline", "timeout", "not_ready"):
+                        # Execution contexts and evaluations can be unavailable
+                        # while the new document is still being committed.
+                        await asyncio.sleep(min(0.5, max(0.0, scan_deadline - time.monotonic())))
+                        continue
                     eval_failures += 1
-                    if eval_failures >= 3 or state == "timeout":
+                    if eval_failures >= 3:
                         nav_error = True
                         break
                     await asyncio.sleep(0.5)
@@ -1103,21 +1135,41 @@ async def fetch_pages_cdp(
                     login_lost = True
                     break
 
+                url_error = _fb_listing_url_error(snap.get("url"))
+                if url_error == "login":
+                    login_status = False
+                    login_lost = True
+                    break
+                if url_error == "checkpoint" or str(snap.get("url") or "").startswith("chrome-error:"):
+                    login_status = None
+                    nav_error = True
+                    break
+
                 snap_account = str(snap.get("accountId") or "").strip()
                 if re.fullmatch(r"\d{5,}", snap_account or ""):
                     account_id = snap_account
                     identity_status = "verified"
+                    login_status = True
                     if (
                         expected_account_id
                         and str(expected_account_id) != account_id
                     ):
                         break
 
-                url_error = _fb_listing_url_error(snap.get("url"))
-                if url_error == "login":
-                    login_status = False
-                    login_lost = True
-                    break
+                listing_evidence = bool(snap.get("pages") or snap.get("emptyConfirmed")
+                                        or snap.get("endMarker"))
+                content_evidence = bool(snap.get("uiRecognized") or listing_evidence)
+                blank_shell = snap.get("bodyTextLength") == 0 and not content_evidence
+                pending_document = snap.get("readyState") == "loading" or blank_shell
+                # A loading role=list/grid is a skeleton, not listing evidence.
+                pending_initial_ui = not ui_recognized and not listing_evidence and bool(snap.get("loading"))
+                if pending_document or pending_initial_ui:
+                    # Facebook's URL/DOMContentLoaded can precede SPA content by
+                    # seconds. Polling that shell is not a stable/scroll round.
+                    last_loading = True
+                    stable_rounds = unrecognized_rounds = nav_bad_rounds = 0
+                    await asyncio.sleep(min(0.5, max(0.0, scan_deadline - time.monotonic())))
+                    continue
                 if url_error:
                     nav_bad_rounds += 1
                     if nav_bad_rounds >= 3:
@@ -1127,12 +1179,13 @@ async def fetch_pages_cdp(
                     continue
                 nav_bad_rounds = 0
 
+                scroll_rounds += 1
                 last_loading = bool(snap.get("loading"))
                 added = accumulator.add_many(snap.get("pages") or [])
                 last_added = added > 0
-                ui_recognized = ui_recognized or bool(
-                    snap.get("uiRecognized")
-                )
+                ui_recognized = ui_recognized or content_evidence
+                if ui_recognized:
+                    login_status = True
                 if snap.get("endMarker"):
                     end_marker = True
                 if (
@@ -1175,16 +1228,16 @@ async def fetch_pages_cdp(
                 else:
                     unrecognized_rounds = 0
 
-                if round_index >= MAX_SCROLL_ROUNDS:
+                if scroll_rounds >= MAX_SCROLL_ROUNDS:
                     max_scrolls_hit = True
                     break
                 if len(accumulator) >= MAX_PAGES:
                     max_pages_hit = True
                     break
 
-                if round_index == 1:
+                if scroll_rounds == 1:
                     stable_rounds = 0
-                elif added == 0 and not last_loading:
+                elif ui_recognized and added == 0 and not last_loading:
                     stable_rounds += 1
                     if stable_rounds >= STABLE_ROUNDS:
                         break
@@ -1202,7 +1255,7 @@ async def fetch_pages_cdp(
                 total=total,
                 end_marker=end_marker,
                 empty_confirmed=empty_confirmed,
-                ui_recognized=ui_recognized or round_index == 0,
+                ui_recognized=ui_recognized,
                 logged_in=login_status,
                 login_lost=login_lost,
                 identity_status=identity_status,
@@ -1218,8 +1271,8 @@ async def fetch_pages_cdp(
                 collector_version=COLLECTOR_VERSION,
             )
             result["rounds"] = round_index
-            result["scroll_rounds"] = round_index
-            result["logged_in"] = login_status and not login_lost
+            result["scroll_rounds"] = scroll_rounds
+            result["logged_in"] = result["login_status"]
             result["url"] = last_snap.get("url")
             return result
     finally:
@@ -1235,37 +1288,60 @@ async def fetch_pages_cdp(
 
 
 def _fb_url_identity(url: str) -> tuple:
-    """(page_id|None, path chuẩn hóa) để kiểm tra navigation đúng page."""
-    from urllib.parse import parse_qs, urlparse
-
+    """Return the page identity, normalized path and transparency view flag."""
     try:
         parsed = urlparse(str(url or "").strip())
+        host = parsed.hostname or ""
     except ValueError:
-        return (None, "")
+        return None, "", False
+    if parsed.scheme not in ("http", "https") or not (
+        host == "facebook.com" or host.endswith(".facebook.com")
+    ):
+        return None, "", False
     path = (parsed.path or "").rstrip("/").lower()
+    query = parse_qs(parsed.query)
+    section = "/about_profile_transparency"
+    transparency = path.endswith(section) or query.get("sk") == [section[1:]]
+    if path.endswith(section):
+        path = path.removesuffix(section)
     page_id = None
     m = re.match(r"^/pages/[^/]+/(\d{5,})", path)
     if m:
         page_id = m.group(1)
     if not page_id:
-        qid = (parse_qs(parsed.query).get("id") or [None])[0]
+        qid = (query.get("id") or [None])[0]
         if qid and re.fullmatch(r"\d{5,}", str(qid)):
             page_id = str(qid)
     if not page_id:
         m = re.search(r"(?:^|/)(\d{5,})$", path) or re.search(r"-(\d{5,})$", path)
         if m:
             page_id = m.group(1)
-    return (page_id, path)
+    return page_id, path, transparency
 
 
 def _fb_same_page(actual_url: str, expected_url: str) -> bool:
-    actual_id, actual_path = _fb_url_identity(actual_url)
-    expected_id, expected_path = _fb_url_identity(expected_url)
-    if not actual_path or not expected_path:
+    actual_id, actual_path, actual_view = _fb_url_identity(actual_url)
+    expected_id, expected_path, expected_view = _fb_url_identity(expected_url)
+    if not actual_path or not expected_path or actual_view != expected_view:
         return False
     if actual_id and expected_id:
         return actual_id == expected_id
-    return actual_path == expected_path
+    return actual_path == expected_path and expected_path != "/profile.php"
+
+
+def _fb_transparency_url(page_url: str) -> str:
+    """Preserve profile.php identity and existing query parameters."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parsed = urlsplit(page_url)
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+             if key != "sk"]
+    if parsed.path.rstrip("/").lower() == "/profile.php":
+        query.append(("sk", "about_profile_transparency"))
+        path = parsed.path
+    else:
+        path = parsed.path.rstrip("/") + "/about_profile_transparency"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, urlencode(query), ""))
 
 
 async def fetch_pages_deep_cdp(
@@ -1281,23 +1357,43 @@ async def fetch_pages_deep_cdp(
     ~4-8s (2 lần navigate). Trả {page_url: {"times", "created_raw",
     "observed_at", "completed", "parser_version", ...}}. Chỉ nhận metrics
     khi URL tab đã khớp đúng page đích (không đọc DOM của page trước).
-    Trang nào lỗi vẫn có entry rỗng để UI hiển thị "không rõ" thay vì treo.
+    Trang timeout giữ entry/metrics đã đọc và tiếp tục trong budget tổng.
+    Login/checkpoint dừng các trang còn lại. Cleanup tab có timeout riêng.
     """
     import websockets
 
-    def _http_json(path, method="GET"):
+    scan_deadline = time.monotonic() + max(0.0, float(timeout))
+
+    def _check_abort():
+        if should_abort and should_abort():
+            raise ScanAborted(
+                "Profile đã dừng trong khi quét chi tiết; giữ nguyên dữ liệu cũ."
+            )
+
+    async def _pause(seconds, deadline):
+        _check_abort()
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(min(seconds, remaining))
+        _check_abort()
+
+    def _http_json(path, method="GET", *, cleanup=False):
+        remaining = scan_deadline - time.monotonic()
+        if remaining <= 0 and not cleanup:
+            raise asyncio.TimeoutError()
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}{path}", method=method
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=2 if cleanup else min(5.0, remaining)) as resp:
             body = resp.read().decode("utf-8", "replace")
             try:
                 return json.loads(body)
             except json.JSONDecodeError:
                 return {}
 
-    from urllib.parse import quote
-
+    _check_abort()
+    if time.monotonic() >= scan_deadline:
+        return {}
     try:
         try:
             info = await asyncio.to_thread(_http_json, "/json/new?about%3Ablank", "PUT")
@@ -1315,8 +1411,9 @@ async def fetch_pages_deep_cdp(
     results: Dict[str, Dict[str, Any]] = {}
     try:
         ws_url = None
-        deadline = time.monotonic() + 10.0
+        deadline = min(scan_deadline, time.monotonic() + 10.0)
         while time.monotonic() < deadline and not ws_url:
+            _check_abort()
             try:
                 targets = await asyncio.to_thread(_http_json, "/json/list")
                 for t in targets or []:
@@ -1326,23 +1423,35 @@ async def fetch_pages_deep_cdp(
             except Exception:
                 pass
             if not ws_url:
-                await asyncio.sleep(0.3)
+                await _pause(0.3, deadline)
         if not ws_url:
             raise RuntimeError("Tab quét chi tiết không kết nối được.")
 
-        async with websockets.connect(ws_url, open_timeout=3) as ws:
+        _check_abort()
+        if time.monotonic() >= scan_deadline:
+            return results
+        async with websockets.connect(
+            ws_url, open_timeout=min(3.0, scan_deadline - time.monotonic()), close_timeout=1
+        ) as ws:
             msg_id = 61000
 
-            async def _evaluate(expression: str, deadline_s: float = 9.0):
-                """Navigate-ready evaluate với retry khi context chưa sẵn."""
+            async def _send(payload, deadline):
+                _check_abort()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                await asyncio.wait_for(ws.send(json.dumps(payload)), timeout=min(2.0, remaining))
+
+            async def _evaluate(expression: str, deadline: float):
+                """One bounded evaluation; navigation retries context/timeout failures."""
                 nonlocal msg_id
-                end = time.monotonic() + deadline_s
-                attempt = 0
-                while time.monotonic() < end and attempt < 6:
-                    attempt += 1
-                    msg_id += 1
-                    my_id = msg_id
-                    await ws.send(json.dumps({
+                _check_abort()
+                if time.monotonic() >= deadline:
+                    return None
+                msg_id += 1
+                my_id = msg_id
+                try:
+                    await _send({
                         "id": my_id,
                         "method": "Runtime.evaluate",
                         "params": {
@@ -1350,59 +1459,59 @@ async def fetch_pages_deep_cdp(
                             "awaitPromise": True,
                             "returnByValue": True,
                         },
-                    }))
-                    resp_deadline = min(end, time.monotonic() + 7.0)
-                    got = None
-                    not_ready = False
-                    while time.monotonic() < resp_deadline:
+                    }, deadline)
+                except asyncio.TimeoutError:
+                    return None
+                resp_deadline = min(deadline, time.monotonic() + 7.0)
+                while time.monotonic() < resp_deadline:
+                    _check_abort()
+                    try:
                         msg = json.loads(await asyncio.wait_for(
-                            ws.recv(),
-                            timeout=max(0.2, resp_deadline - time.monotonic()),
+                            ws.recv(), timeout=min(0.5, resp_deadline - time.monotonic()),
                         ))
-                        if msg.get("id") != my_id:
-                            continue
-                        err = msg.get("error")
-                        if err:
-                            text = str(err.get("message") or "")
-                            if "context" in text.lower() or "Navigation" in text:
-                                not_ready = True
-                            break
-                        value = ((msg.get("result") or {}).get("result") or {}).get("value")
-                        got = value if isinstance(value, dict) else None
-                        break
-                    if got is not None:
-                        return got
-                    await asyncio.sleep(0.7 if not_ready else 0.5)
+                    except asyncio.TimeoutError:
+                        await _pause(0.05, resp_deadline)
+                        continue
+                    if msg.get("id") != my_id:
+                        continue
+                    if msg.get("error") or (msg.get("result") or {}).get("exceptionDetails"):
+                        return None
+                    value = ((msg.get("result") or {}).get("result") or {}).get("value")
+                    return value if isinstance(value, dict) else None
                 return None
 
-            async def _navigate_and_evaluate(url: str, deadline_s: float = 8.0):
-                """Navigate rồi chỉ nhận metrics khi location đã khớp page đích."""
+            async def _navigate_and_evaluate(url: str):
+                """Wait for matching page and readable SPA body within both budgets."""
                 nonlocal msg_id
+                end = min(scan_deadline, time.monotonic() + DEEP_NAVIGATION_TIMEOUT_S)
                 msg_id += 1
-                await ws.send(json.dumps({
-                    "id": msg_id,
-                    "method": "Page.navigate",
-                    "params": {"url": url},
-                }))
-                end = time.monotonic() + deadline_s
-                for _ in range(2):
-                    remaining = end - time.monotonic()
-                    if remaining <= 0.4:
-                        break
-                    metrics = await _evaluate(
-                        _FB_PAGE_METRICS_JS, deadline_s=min(7.0, remaining)
-                    )
-                    if metrics and _fb_same_page(metrics.get("url"), url):
-                        return metrics
-                    await asyncio.sleep(0.3)
+                try:
+                    await _send({"id": msg_id, "method": "Page.navigate", "params": {"url": url}}, end)
+                except asyncio.TimeoutError:
+                    return None
+                while time.monotonic() < end:
+                    _check_abort()
+                    metrics = await _evaluate(_FB_PAGE_METRICS_JS, end)
+                    if metrics:
+                        access = metrics.get("accessState")
+                        path = urlparse(str(metrics.get("url") or "")).path.lower()
+                        if access == "checkpoint" or path.startswith("/checkpoint"):
+                            return {"accessState": "checkpoint"}
+                        if access == "login_required" or path.startswith("/login"):
+                            return {"accessState": "login_required"}
+                        evidence = any(metrics.get(key) for key in (
+                            "times", "createdRaw", "followersRaw", "likesRaw", "category", "feedReady"))
+                        readable = metrics.get("bodyTextLength", 0) > 0 or evidence
+                        if (_fb_same_page(metrics.get("url"), url)
+                                and metrics.get("readyState") != "loading" and readable):
+                            return metrics
+                    await _pause(0.3, end)
                 return None
 
             for page in pages:
-                if should_abort and should_abort():
-                    raise ScanAborted(
-                        "Profile đã dừng trong khi quét chi tiết; "
-                        "giữ nguyên dữ liệu cũ."
-                    )
+                _check_abort()
+                if time.monotonic() >= scan_deadline:
+                    break
                 page_url = (page.get("url") or "").strip()
                 entry: Dict[str, Any] = {
                     "times": [],
@@ -1420,30 +1529,36 @@ async def fetch_pages_deep_cdp(
                     "article_count": 0,
                     "parser_version": PARSER_VERSION,
                 }
+                results[page_url] = entry
                 if page_url:
                     # 1) Trang chính page: mốc thời gian bài đăng (feed) + follower/like header.
                     main_metrics = await _navigate_and_evaluate(page_url)
                     if main_metrics:
+                        entry["access_state"] = main_metrics.get("accessState") or "ok"
+                        if entry["access_state"] in ("login_required", "checkpoint"):
+                            break
                         entry["times"] = main_metrics.get("times") or []
                         entry["title"] = main_metrics.get("title")
                         entry["followers_raw"] = main_metrics.get("followersRaw")
                         entry["likes_raw"] = main_metrics.get("likesRaw")
                         entry["category"] = main_metrics.get("category")
                         entry["observed_page_id"] = main_metrics.get("observedPageId")
-                        entry["access_state"] = main_metrics.get("accessState") or "ok"
                         entry["feed_ready"] = bool(main_metrics.get("feedReady"))
                         entry["article_count"] = main_metrics.get("articleCount") or 0
                         entry["completed"] = bool(main_metrics.get("feedReady"))
                         entry["parser_version"] = (
                             main_metrics.get("parserVersion") or PARSER_VERSION
                         )
+                        entry["created_raw"] = main_metrics.get("createdRaw")
                     # 2) Trang about_profile_transparency: nhãn ngày tạo trang.
-                    about_url = page_url.rstrip("/") + "/about_profile_transparency"
+                    about_url = _fb_transparency_url(page_url)
                     about_metrics = await _navigate_and_evaluate(about_url)
+                    if about_metrics and about_metrics.get("accessState") in ("login_required", "checkpoint"):
+                        entry["access_state"] = about_metrics["accessState"]
+                        entry["completed"] = False
+                        break
                     if about_metrics and about_metrics.get("createdRaw"):
                         entry["created_raw"] = about_metrics["createdRaw"]
-                    elif main_metrics and main_metrics.get("createdRaw"):
-                        entry["created_raw"] = main_metrics["createdRaw"]
                     if about_metrics:
                         if not entry["observed_page_id"] and about_metrics.get("observedPageId"):
                             entry["observed_page_id"] = about_metrics["observedPageId"]
@@ -1451,20 +1566,19 @@ async def fetch_pages_deep_cdp(
                             entry["followers_raw"] = about_metrics["followersRaw"]
                         if not entry["likes_raw"] and about_metrics.get("likesRaw"):
                             entry["likes_raw"] = about_metrics["likesRaw"]
-                results[page_url] = entry
         return results
     finally:
         TRANSIENT_TARGET_IDS.discard(str(target_id))
         try:
-            await asyncio.to_thread(_http_json, f"/json/close/{target_id}", "PUT")
+            await asyncio.to_thread(_http_json, f"/json/close/{target_id}", "PUT", cleanup=True)
         except Exception:
             try:
-                await asyncio.to_thread(_http_json, f"/json/close/{target_id}", "GET")
+                await asyncio.to_thread(_http_json, f"/json/close/{target_id}", "GET", cleanup=True)
             except Exception:
                 pass
 
 
-def _candidate_from_detail(item: Any, observed_at: datetime.datetime):
+def _candidate_from_detail(item: Any, observed_at: datetime.datetime, display_tz: Any = None):
     """Một mốc thời gian ứng viên từ deep scan; loại bài ghim/bình luận/gợi ý."""
     if not isinstance(item, dict):
         return None
@@ -1480,6 +1594,32 @@ def _candidate_from_detail(item: Any, observed_at: datetime.datetime):
         if parsed:
             n, unit, raw = parsed["n"], parsed["u"], parsed["raw"]
     interval = relative_label_interval(n, unit, observed_at)
+    if interval is None:
+        absolute_text = str(raw or "")
+        # Post timestamps require an explicit calendar order before date parsing.
+        if re.search(r"\b\d{1,2}[/.-]\d{1,2}[/.-]\d{4}\b", absolute_text):
+            return None
+        day = parse_fb_created_date(absolute_text)
+        hour_match = re.search(
+            r"(?:lúc|at)\s+(\d{1,2}):(\d{2})(?:\s*(AM|PM))?\s*$",
+            absolute_text, re.I,
+        )
+        if day is None or hour_match is None:
+            return None
+        hour, minute = int(hour_match[1]), int(hour_match[2])
+        period = (hour_match[3] or "").upper()
+        if minute > 59 or hour > 23 or (period and not 1 <= hour <= 12):
+            return None
+        if period:
+            hour = hour % 12 + (12 if period == "PM" else 0)
+        local = datetime.datetime.combine(day, datetime.time(hour, minute))
+        tz = resolve_display_timezone(display_tz)
+        # Both folds preserve the uncertainty of repeated clock minutes at DST.
+        bounds = [local.replace(tzinfo=tz, fold=fold).astimezone(datetime.timezone.utc)
+                  for fold in (0, 1)]
+        bounds = [value for value in bounds if value.astimezone(tz).replace(tzinfo=None) == local]
+        if bounds:
+            interval = (min(bounds), max(bounds) + datetime.timedelta(minutes=1))
     if interval is None:
         return None
     unit_key = _UNIT_ALIASES.get(str(unit or "").strip().lower(), str(unit or ""))
@@ -1539,7 +1679,7 @@ def merge_page_details(
                                    "scan_id": str(info.get("scan_id") or data.get("scan_id") or "")}
         candidates = []
         for item in info.get("times") or []:
-            cand = _candidate_from_detail(item, page_obs)
+            cand = _candidate_from_detail(item, page_obs, display_tz=tz)
             if cand is not None:
                 candidates.append(cand)
         # Nhãn không thể trỏ tới tương lai — bỏ ứng viên hỏng thay vì nhận.

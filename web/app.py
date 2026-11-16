@@ -1988,8 +1988,15 @@ def _run_facebook_scan(
         updated, scan = applied
         if (
             force
-            and scan.get("discovery_status") in (STATUS_COMPLETE, STATUS_PARTIAL)
+            and scan.get("discovery_status") == STATUS_COMPLETE
             and scan.get("observed_count") == 0
+            and (
+                scan.get("completion_reason") == "EMPTY_CONFIRMED"
+                or (
+                    scan.get("completion_reason") == "TOTAL_MATCH"
+                    and scan.get("total_pages_in_source") == 0
+                )
+            )
         ):
             cleared = profile_manager.clear_facebook_pages(profile_id)
             if cleared is not None:
@@ -2019,10 +2026,12 @@ def _run_facebook_scan(
             stale_after_hours=stale_after_hours,
         )
         observed = int(scan.get("observed_count") or 0)
+        login_status = scan.get("login_status")
+        login_known = isinstance(login_status, bool)
         return {
             "success": True,
-            "logged_in": bool(scan.get("login_status")),
-            "login_status": bool(scan.get("login_status")),
+            "logged_in": login_status if login_known else None,
+            "login_status": login_status if login_known else "unknown",
             "pages": enriched,
             "source": "live" if observed else "cache",
             "stale": _fanpage_stale(

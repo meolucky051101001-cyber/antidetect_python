@@ -442,30 +442,46 @@ def test_fetch_pages_deep_rejects_metrics_from_previous_page(monkeypatch):
     assert entry["created_raw"] == "Page created on January 1, 2024"
 
 
-def test_fetch_pages_deep_discards_data_when_navigation_stays_wrong(monkeypatch):
+@pytest.mark.parametrize("path,access_state", [("login", "login_required"), ("checkpoint", "checkpoint")])
+def test_fetch_pages_deep_stops_at_access_redirect(monkeypatch, path, access_state):
     _no_sleep(monkeypatch)
     _fake_http(monkeypatch, _deep_routes())
     page_url = "https://www.facebook.com/neverloads"
     module = _fake_websockets([
         _eval_with_id(61002, {
-            "url": "https://www.facebook.com/login",
+            "url": f"https://www.facebook.com/{path}",
+            "title": "Other document",
             "times": [{"n": 5, "u": "m", "own": True}],
             "feedReady": True,
         }),
-        _eval_with_id(61003, {
-            "url": "https://www.facebook.com/login",
-            "times": [{"n": 5, "u": "m", "own": True}],
-            "feedReady": True,
-        }),
+    ])
+    monkeypatch.setitem(sys.modules, "websockets", module)
+
+    got = asyncio.run(facebook.fetch_pages_deep_cdp(
+        9333, [{"url": page_url}, {"url": "https://www.facebook.com/anotherpage"}], timeout=2.0
+    ))
+
+    entry = got[page_url]
+    assert entry["times"] == []
+    assert entry["created_raw"] is None
+    assert entry["completed"] is False
+    assert entry["title"] is None
+    assert entry["feed_ready"] is False
+    assert entry["access_state"] == access_state
+    assert list(got) == [page_url]
+
+
+def test_fetch_pages_deep_waits_for_profile_transparency_view(monkeypatch):
+    _no_sleep(monkeypatch)
+    _fake_http(monkeypatch, _deep_routes())
+    page_url = "https://www.facebook.com/profile.php?id=123456789"
+    about_url = page_url + "&sk=about_profile_transparency"
+    module = _fake_websockets([
+        _eval_with_id(61002, {"url": page_url, "feedReady": True}),
+        _eval_with_id(61004, {"url": page_url, "feedReady": True}),
         _eval_with_id(61005, {
-            "url": "https://www.facebook.com/login",
+            "url": about_url,
             "createdRaw": "Page created on January 1, 2024",
-            "feedReady": False,
-        }),
-        _eval_with_id(61006, {
-            "url": "https://www.facebook.com/login",
-            "createdRaw": "Page created on January 1, 2024",
-            "feedReady": False,
         }),
     ])
     monkeypatch.setitem(sys.modules, "websockets", module)
@@ -474,7 +490,49 @@ def test_fetch_pages_deep_discards_data_when_navigation_stays_wrong(monkeypatch)
         9333, [{"url": page_url}], timeout=2.0
     ))
 
-    entry = got[page_url]
-    assert entry["times"] == []
-    assert entry["created_raw"] is None
-    assert entry["completed"] is False
+    assert got[page_url]["created_raw"] == "Page created on January 1, 2024"
+
+
+def test_launcher_deep_budget_reaches_all_seven_slow_pages(monkeypatch):
+    from antidetect.launcher import BrowserLauncher
+
+    clock = types.SimpleNamespace(now=0.0)
+    monkeypatch.setattr(facebook, "time", types.SimpleNamespace(monotonic=lambda: clock.now))
+    _fake_http(monkeypatch, _deep_routes())
+
+    class Socket(_FakeWebSocket):
+        async def send(self, raw):
+            command = json.loads(raw)
+            self.command = command
+            if command["method"] == "Page.navigate":
+                self.url = command["params"]["url"]
+
+        async def recv(self):
+            # Each main/transparency document takes the parser's full six-second wait.
+            clock.now += 6.0
+            value = {"url": self.url, "feedReady": True, "followersRaw": "10 followers"}
+            if "about_profile_transparency" in self.url:
+                value["createdRaw"] = "Page created January 1, 2024"
+            return json.dumps(_eval_with_id(self.command["id"], value))
+
+    monkeypatch.setitem(sys.modules, "websockets", types.SimpleNamespace(
+        connect=lambda *args, **kwargs: Socket([]),
+    ))
+    pages = [{"url": f"https://www.facebook.com/fixture{index}"} for index in range(7)]
+
+    async def discover(*args, **kwargs):
+        return {"logged_in": True, "discovery_status": "partial", "pages": pages}
+
+    launcher = types.SimpleNamespace(
+        require_cdp=lambda _: None,
+        active_ports={"fixture": 9333},
+        manager=types.SimpleNamespace(get_profile=lambda _: None),
+        _facebook_scan_alive=lambda _: True,
+        _facebook_pages_cdp=discover,
+        _facebook_pages_deep_cdp=facebook.fetch_pages_deep_cdp,
+    )
+    result = BrowserLauncher.fetch_facebook_pages(launcher, "fixture", deep=True)
+
+    assert len(result["pages"]) == 7
+    assert all(page.get("created_date") == "2024-01-01" for page in result["pages"])
+    assert all(page.get("followers_raw") == "10 followers" for page in result["pages"])

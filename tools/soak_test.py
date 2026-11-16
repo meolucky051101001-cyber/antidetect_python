@@ -316,6 +316,7 @@ class SoakRunner:
         self.critical_reason = None
         self.stop_requested = False
         self._sample_count = 0
+        self._healthy_active_samples = 0
         self._server_failures = 0
         self._low_memory_samples = 0
         self._tab_cycles = 0
@@ -351,6 +352,7 @@ class SoakRunner:
             "profiles": [],
             "counters": {
                 "samples": 0,
+                "healthy_active_samples": 0,
                 "lifecycle_cycles": 0,
                 "tab_cycles": 0,
                 "copy_cycles": 0,
@@ -737,8 +739,19 @@ class SoakRunner:
             "available_mb": round(available, 1) if available is not None else None,
             "artifacts": artifacts,
         }
+        minimum_running = max(1, self.min_active)
+        if (
+            health_status == 200
+            and health_body.get("application") == "antidetect-python"
+            and list_status == 200
+            and running >= minimum_running
+            and cdp_states.get("healthy", 0) >= minimum_running
+            and degraded == 0
+        ):
+            self._healthy_active_samples += 1
         self._sample_count += 1
         self.state["counters"]["samples"] = self._sample_count
+        self.state["counters"]["healthy_active_samples"] = self._healthy_active_samples
         self.state["last_sample"] = sample
         _append_jsonl(self.metrics_path, sample)
         if self._low_memory_samples >= 3:
@@ -1053,6 +1066,10 @@ class SoakRunner:
                     self.server.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     self.server.kill()
+                    try:
+                        self.server.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        self._error("server_cleanup", "Dashboard chưa thoát sau kill", critical=True)
         if self.local_server:
             self.local_server.shutdown()
             self.local_server.server_close()
@@ -1076,11 +1093,31 @@ class SoakRunner:
         latencies = sorted(self._api_latencies)
         p95 = latencies[int(len(latencies) * 0.95)] if latencies else None
         duration = time.time() - self._started_ts
+        planned_seconds = self.hours * 3600
+        required_exercises = {
+            "tab": planned_seconds > self.args.tab_interval,
+            "lifecycle": planned_seconds > self.args.cycle_interval + 25.0,
+            "copy": planned_seconds > min(self.args.copy_interval, 3600),
+        }
+        workload_checks = {
+            "profile_started": any(profile.get("starts", 0) > 0 for profile in self.profiles),
+            "healthy_active_sample": self._healthy_active_samples > 0,
+            "tab": self._tabs_opened > 0 if required_exercises["tab"] else None,
+            "lifecycle": self._lifecycle_cycles > 0 if required_exercises["lifecycle"] else None,
+            "copy": self._copy_cycles > 0 if required_exercises["copy"] else None,
+        }
+        cleanup_checks = {
+            "process_observation_available": psutil is not None,
+            "profile_browsers_exited": orphan_count == 0,
+            "dashboard_exited": self.server is None or self.server.poll() is not None,
+            "staging_empty": artifacts["staging_files"] == 0,
+        }
         passed = (
             completed
             and not self.critical
-            and orphan_count == 0
             and not self.errors
+            and all(value is not False for value in workload_checks.values())
+            and all(cleanup_checks.values())
         )
         self.state["finished_at"] = _now_iso()
         self.state["status"] = "completed" if passed else "failed"
@@ -1093,6 +1130,11 @@ class SoakRunner:
             "stop_requested": self.stop_requested,
             "critical_reason": self.critical_reason,
             "samples": self._sample_count,
+            "healthy_active_samples": self._healthy_active_samples,
+            "workload_required": required_exercises,
+            "workload_checks": workload_checks,
+            "cleanup_checks": cleanup_checks,
+            "scope": "local tabs, profile lifecycle and transactional profile copy",
             "lifecycle_cycles": self._lifecycle_cycles,
             "tab_cycles": self._tab_cycles,
             "copy_cycles": self._copy_cycles,

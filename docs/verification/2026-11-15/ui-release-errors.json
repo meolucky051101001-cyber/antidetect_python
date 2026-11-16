@@ -1,0 +1,71 @@
+{
+  "suite": "Real dashboard release error paths",
+  "timestamp": "2026-11-15T23:54:18.140347+07:00",
+  "base_commit": "793038de34a6fd5aa480b3dd1d1fc638338b795c",
+  "python": "3.10.11",
+  "playwright": "1.62.0",
+  "test_file": "test_ui_release_errors.py",
+  "opt_in": "ANTIDETECT_RUN_UI_SMOKE=1",
+  "command": "python -m pytest test_ui_release_errors.py -vv --basetemp <fresh UUID temp directory> --junitxml <TEMP>/antidetect-ui-release-errors.xml -o junit_family=xunit1 -o faulthandler_timeout=100",
+  "result": {
+    "passed": 3,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "pytest_display_seconds": 38.75,
+    "junit_seconds": 38.698
+  },
+  "browser": {
+    "mode": "headless",
+    "concurrent_browser_instances": 1,
+    "shared_module_browser": true,
+    "profile_browsers_launched": 0
+  },
+  "checks": [
+    {
+      "name": "test_malformed_batch_import_has_no_partial_profiles",
+      "seconds": 5.138,
+      "result": "passed",
+      "observed": "HTTP 200 batch: 1 committed, 3 rejected; UI counts and errors; no orphan directories"
+    },
+    {
+      "name": "test_stale_edit_shows_conflict_and_preserves_newer_data",
+      "seconds": 1.016,
+      "result": "passed",
+      "observed": "Actual concurrent API write; stale UI PUT 409; warning visible; newer metadata and reopened edit preserved"
+    },
+    {
+      "name": "test_real_scheduler_failure_and_accepted_job_are_distinct",
+      "seconds": 32.382,
+      "result": "passed",
+      "observed": "Real scheduler tick: proxy callback failed with retry; fanpage enqueue accepted, linked job failed at static gate; both UI labels verified"
+    }
+  ],
+  "validation": {
+    "ruff": "python -m ruff check test_ui_release_errors.py: passed",
+    "responses_mocked": false,
+    "schedule_history_injected": false,
+    "renderer_called_with_fixture_data": false,
+    "facebook_accessed": false,
+    "independent_opt_in_guard": "Module-level skip before importing Playwright helpers when not Windows or ANTIDETECT_RUN_UI_SMOKE != 1."
+  },
+  "successful_run_cleanup": {
+    "server_process_present_after_run": false,
+    "playwright_driver_present_after_run": false,
+    "temporary_data_removed": true,
+    "server_log_retained_outside_repository": true
+  },
+  "diagnostic_runs": {
+    "count": 2,
+    "outcome": "Interrupted after Playwright response body retrieval stalled; helper now waits for rendered profile row and uses a real authenticated GET. Final complete suite passed.",
+    "processes_stopped": true,
+    "cleanup_blocker": "Automatic approval review rejected the scoped PowerShell recursive cleanup: blocked by policy.",
+    "residual_temporary_directories": {
+      "count": 2,
+      "location": "Windows TEMP",
+      "prefix": "antidetect-ui-smoke-",
+      "contents": "Synthetic test profiles only; no user profiles or browser sessions."
+    }
+  },
+  "scope": "Actual local server/API/UI/persisted metadata and actual scheduler callbacks. Does not exercise external Facebook or successful browser-profile launch."
+}

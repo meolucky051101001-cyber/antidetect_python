@@ -1,0 +1,58 @@
+{
+  "passed": true,
+  "completed_duration": true,
+  "duration_seconds": 243.7,
+  "planned_hours": 0.06,
+  "min_active": 1,
+  "stop_requested": false,
+  "critical_reason": null,
+  "samples": 18,
+  "healthy_active_samples": 18,
+  "workload_required": {
+    "tab": true,
+    "lifecycle": true,
+    "copy": true
+  },
+  "workload_checks": {
+    "profile_started": true,
+    "healthy_active_sample": true,
+    "tab": true,
+    "lifecycle": true,
+    "copy": true
+  },
+  "cleanup_checks": {
+    "process_observation_available": true,
+    "profile_browsers_exited": true,
+    "dashboard_exited": true,
+    "staging_empty": true
+  },
+  "scope": "two synthetic profiles; about:blank and localhost tabs, lifecycle and copy",
+  "lifecycle_cycles": 2,
+  "tab_cycles": 6,
+  "copy_cycles": 2,
+  "tabs_opened": 12,
+  "tabs_closed": 10,
+  "memory_shed": 0,
+  "errors": 0,
+  "orphan_processes": 0,
+  "api_latency_p95_ms": 4011.1,
+  "chrome_peak": {
+    "rss_mb": 1440.9,
+    "count": 24
+  },
+  "server_peak": {
+    "rss_mb": 63.4,
+    "threads": 15,
+    "handles": 803
+  },
+  "min_available_mb": 883.3,
+  "artifacts": {
+    "staging_files": 0,
+    "staging_bytes": 0,
+    "operation_files": 4,
+    "operation_bytes": 8272,
+    "lock_files": 8
+  },
+  "source_state": "working tree before final parser timestamp correction",
+  "account_sessions_used": false
+}
