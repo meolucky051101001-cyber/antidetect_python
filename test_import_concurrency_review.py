@@ -242,3 +242,78 @@ def test_bulk_invalid_proxy_does_not_create_direct(manager):
     result = asyncio.run(web.bulk_create_profiles(web.BulkCreateRequest(count=1, proxies=["http://host:0"])))
     assert result["created_count"] == 0
     assert manager.list_profiles() == []
+
+
+@pytest.mark.parametrize("browser_path", [
+    r"C:\synthetic\payload.exe", r".\browser.exe",
+    r"\\synthetic-server\share\browser.exe", "chrome-999.0.0.1",
+])
+def test_external_import_cannot_authorize_browser_executable(manager, browser_path):
+    existing = _profile(manager)
+    before = Path(storage.PROFILES_JSON).read_bytes()
+    result = asyncio.run(web.import_profiles(web.ImportProfilesRequest(profiles=[
+        {"name": "untrusted-browser", "browser_path": browser_path}
+    ])))
+    assert result["imported_count"] == 0
+    assert result["failed_count"] == 1
+    assert result["failed"][0]["code"] == "INVALID_PROFILE_IMPORT"
+    assert "browser_path" in result["failed"][0]["reason"]
+    assert browser_path not in result["failed"][0]["reason"]
+    assert Path(storage.PROFILES_JSON).read_bytes() == before
+    assert [p.id for p in manager.list_profiles()] == [existing.id]
+
+
+@pytest.mark.parametrize("browser_path", [None, "", "   "])
+def test_metadata_import_without_executable_keeps_identity_configuration(browser_path):
+    entry = {
+        "name": "synthetic-import", "browser_path": browser_path,
+        "fingerprint": {"canvas_noise_seed": 12345, "audio_noise_seed": 67890, "stealth_disable": ["canvas"]},
+        "pid": 20, "launch_id": "foreign", "owner_instance_id": "foreign",
+    }
+    result = prepare_import_profile(entry, 0, lambda _: [])
+    assert result.browser_path is None
+    assert result.pid is None and result.status == "stopped"
+    assert result.fingerprint.canvas_noise_seed == 12345
+    assert result.fingerprint.audio_noise_seed == 67890
+    assert result.fingerprint.stealth_disable == ["canvas"]
+
+
+def test_local_profile_custom_browser_is_not_changed_by_import_policy(manager):
+    profile = Profile(name="local-synthetic", browser_path=r"C:\synthetic\trusted\chrome.exe")
+    manager.commit_staged_profile(profile)
+    assert manager.get_profile(profile.id).browser_path == profile.browser_path
+
+
+@pytest.mark.parametrize("algorithm,verification", [
+    (1, "compatibility"), (1, "strict"), (2, "compatibility"), (2, "strict"),
+])
+def test_reset_rotates_seeds_without_migrating_identity_policy(
+    manager, monkeypatch, algorithm, verification,
+):
+    p = _profile(manager, name="synthetic reset policy")
+    p.fingerprint.fingerprint_algorithm_version = algorithm
+    p.fingerprint.verification_mode = verification
+    p.fingerprint.stealth_disable = ["canvas", "audio", "worker"]
+    p.fingerprint.webrtc_mode = "block"
+    p.fingerprint.canvas_noise_seed = 0
+    p.fingerprint.audio_noise_seed = 7654321
+    p.browser_path = r"C:\SyntheticFixture\trusted-browser.exe"
+    p.notes = "Retain unrelated metadata"
+    p = manager.update_profile(p, expected_revision=p.revision)
+    generated = p.fingerprint.model_copy(update={
+        "fingerprint_algorithm_version": 2, "verification_mode": "strict",
+        "stealth_disable": [], "webrtc_mode": "auto", "canvas_noise_seed": 1234, "audio_noise_seed": 5678,
+    })
+    monkeypatch.setattr(web, "generate_fingerprint", lambda **kwargs: generated)
+    updated = asyncio.run(web.reset_fingerprint_endpoint(p.id))
+    stored = storage.ProfileManager().get_profile(p.id)
+    for result in (updated, stored):
+        assert result.fingerprint.fingerprint_algorithm_version == algorithm
+        assert result.fingerprint.verification_mode == verification
+        assert result.fingerprint.stealth_disable == ["canvas", "audio", "worker"]
+        assert result.fingerprint.webrtc_mode == "block"
+        assert result.fingerprint.canvas_noise_seed == 1234
+        assert result.fingerprint.audio_noise_seed == 5678
+        assert result.browser_path == p.browser_path
+        assert result.notes == p.notes
+        assert result.revision == p.revision + 1

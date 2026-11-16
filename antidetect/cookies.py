@@ -2,6 +2,7 @@
 import asyncio
 import json
 import urllib.request
+from .loopback import connect_loopback, open_loopback
 from typing import Any, Dict, List, Optional
 
 
@@ -48,7 +49,7 @@ def normalize_cookies(cookies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 async def _browser_ws_url(port: int) -> str:
     url = f"http://127.0.0.1:{port}/json/version"
     req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=2) as resp:
+    with open_loopback(req, timeout=2) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     ws_url = data.get("webSocketDebuggerUrl")
     if not ws_url:
@@ -61,7 +62,7 @@ async def fetch_cookies_cdp(port: int) -> List[Dict[str, Any]]:
     import websockets
 
     ws_url = await _browser_ws_url(port)
-    async with websockets.connect(ws_url, max_size=10 * 1024 * 1024) as ws:
+    async with connect_loopback(ws_url, max_size=10 * 1024 * 1024) as ws:
         await ws.send(json.dumps({"id": 999, "method": "Storage.getCookies"}))
         while True:
             message = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
@@ -76,7 +77,7 @@ async def set_cookies_cdp(port: int, cookies: List[Dict[str, Any]]) -> bool:
     import websockets
 
     ws_url = await _browser_ws_url(port)
-    async with websockets.connect(ws_url, max_size=10 * 1024 * 1024) as ws:
+    async with connect_loopback(ws_url, max_size=10 * 1024 * 1024) as ws:
         await ws.send(json.dumps({
             "id": 888,
             "method": "Storage.setCookies",

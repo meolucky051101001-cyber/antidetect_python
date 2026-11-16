@@ -9,6 +9,7 @@ import json
 import re
 import time
 import urllib.request
+from .loopback import connect_loopback, open_loopback
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -959,7 +960,7 @@ async def fetch_pages_cdp(
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}{path}", method=method
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with open_loopback(req, timeout=5) as resp:
             body = resp.read().decode("utf-8", "replace")
             try:
                 return json.loads(body)
@@ -1017,7 +1018,7 @@ async def fetch_pages_cdp(
                 "Tab Facebook không tải được trong thời gian chờ."
             )
 
-        async with websockets.connect(
+        async with connect_loopback(
             ws_url, max_size=10 * 1024 * 1024, open_timeout=3
         ) as ws:
             msg_id = 62000
@@ -1384,7 +1385,7 @@ async def fetch_pages_deep_cdp(
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}{path}", method=method
         )
-        with urllib.request.urlopen(req, timeout=2 if cleanup else min(5.0, remaining)) as resp:
+        with open_loopback(req, timeout=2 if cleanup else min(5.0, remaining)) as resp:
             body = resp.read().decode("utf-8", "replace")
             try:
                 return json.loads(body)
@@ -1430,7 +1431,7 @@ async def fetch_pages_deep_cdp(
         _check_abort()
         if time.monotonic() >= scan_deadline:
             return results
-        async with websockets.connect(
+        async with connect_loopback(
             ws_url, open_timeout=min(3.0, scan_deadline - time.monotonic()), close_timeout=1
         ) as ws:
             msg_id = 61000

@@ -146,8 +146,15 @@ def finished_runner(runner, monkeypatch):
     runner._sample_count = 10
     runner._healthy_active_samples = 10
     runner._tabs_opened = 2
-    runner._lifecycle_cycles = 1
-    runner._copy_cycles = 1
+    runner._lifecycle_cycles = 2
+    runner._copy_cycles = 2
+    runner.workload.register("profile-1")
+    for _ in range(2):
+        for realm in soak.CONTRACT_REALMS:
+            runner.workload.record({
+                "profile_id": "profile-1", "realm": realm,
+                "checks": {name: True for name in soak.CONTRACT_CHECKS},
+            })
     monkeypatch.setattr(soak, "_chrome_processes", lambda *_a: {})
     return runner
 
@@ -193,18 +200,18 @@ def test_memory_adapted_workload_can_pass_with_observed_browser(finished_runner)
     assert all(summary["cleanup_checks"].values())
 
 
-def test_short_run_reports_exercises_outside_its_duration(finished_runner):
+def test_short_run_still_requires_explicit_minimum_cycles(finished_runner):
     finished_runner.hours = 0.01
     finished_runner._tabs_opened = 0
     finished_runner._lifecycle_cycles = 0
     finished_runner._copy_cycles = 0
 
-    assert finished_runner._finalize() == 0
+    assert finished_runner._finalize() == 1
     summary = finished_runner.state["summary"]
     assert summary["workload_required"] == {"tab": False, "lifecycle": False, "copy": False}
     assert summary["workload_checks"]["tab"] is None
-    assert summary["workload_checks"]["lifecycle"] is None
-    assert summary["workload_checks"]["copy"] is None
+    assert summary["workload_checks"]["lifecycle"] is False
+    assert summary["workload_checks"]["copy"] is False
 
 
 def test_unfinished_staging_prevents_soak_acceptance(finished_runner, monkeypatch):
@@ -230,3 +237,112 @@ def test_samples_require_verified_browser_health(runner, monkeypatch, health, ex
 
     assert runner.state["counters"]["samples"] == 1
     assert runner.state["counters"]["healthy_active_samples"] == expected
+
+
+def _contract_report(realm="page", profile_id="profile-1"):
+    return {
+        "profile_id": profile_id, "realm": realm,
+        "checks": {name: True for name in soak.CONTRACT_CHECKS},
+    }
+
+
+def test_elapsed_soak_cannot_pass_without_canvas_and_worker_execution(finished_runner):
+    finished_runner.workload = soak._WorkloadCollector()
+    assert finished_runner._finalize() == 1
+    assert finished_runner.state["summary"]["workload_checks"]["canvas_workers"] is False
+
+
+def test_each_started_profile_needs_every_contract_realm(finished_runner):
+    finished_runner.profiles.append({"id": "profile-2", "name": "Soak 2", "active": False, "starts": 1})
+    finished_runner.workload.register("profile-2")
+    for _ in range(2):
+        finished_runner.workload.record(_contract_report(profile_id="profile-2"))
+    assert finished_runner._finalize() == 1
+    assert finished_runner.state["summary"]["workload_checks"]["canvas_workers"] is False
+
+
+def test_contract_failure_prevents_pass_and_reports_only_aggregate(finished_runner):
+    report = _contract_report("nested_worker")
+    report["checks"]["drawPreserved"] = False
+    assert finished_runner.workload.record(report)
+    assert finished_runner._finalize() == 1
+    workload = finished_runner.state["summary"]["canvas_worker_workload"]
+    assert workload["executions"] == 7
+    assert workload["failures"] == 1
+    assert workload["profiles"]["profile-1"]["nested_worker"]["failed_checks"] == {"drawPreserved": 1}
+
+
+@pytest.mark.parametrize("defect", ["pixels", "unknown-profile", "unknown-realm", "missing-check", "nonboolean"])
+def test_collector_rejects_noncontract_or_raw_payloads(defect):
+    collector = soak._WorkloadCollector()
+    collector.register("profile-1")
+    report = _contract_report()
+    if defect == "pixels":
+        report["pixels"] = [123, 234]
+    elif defect == "unknown-profile":
+        report["profile_id"] = "foreign-profile"
+    elif defect == "unknown-realm":
+        report["realm"] = "foreign-realm"
+    elif defect == "missing-check":
+        report["checks"].pop("readStable")
+    else:
+        report["checks"]["readStable"] = 1
+    assert not collector.record(report)
+    snapshot = collector.snapshot()
+    assert snapshot["executions"] == 0
+    assert snapshot["invalid_reports"] == 1
+    assert "pixels" not in json.dumps(snapshot)
+
+
+def test_stalled_contract_is_not_a_recent_execution(monkeypatch):
+    collector = soak._WorkloadCollector()
+    collector.register("profile-1")
+    monkeypatch.setattr(soak.time, "monotonic", lambda: 100)
+    for realm in soak.CONTRACT_REALMS:
+        collector.record(_contract_report(realm))
+    monkeypatch.setattr(soak.time, "monotonic", lambda: 221)
+    assert set(collector.stale_realms("profile-1", 100)) == set(soak.CONTRACT_REALMS)
+    assert collector.stale_realms("profile-1", 220) == []
+
+
+def test_lifecycle_counter_counts_only_successful_restart(runner, monkeypatch):
+    monkeypatch.setattr(runner, "_stop_profile", lambda *_args: True)
+    monkeypatch.setattr(runner, "_start_profile", lambda *_args: False)
+    runner._lifecycle_cycle()
+    assert runner._lifecycle_cycles == 0
+
+
+def test_workload_http_requires_same_origin_and_accepts_compact_report(tmp_path):
+    import threading
+    import urllib.error
+    import urllib.request
+
+    collector = soak._WorkloadCollector()
+    collector.register("profile-1")
+    server = soak._QuietSoakServer(("127.0.0.1", 0), soak._SoakPageHandler)
+    server.workload = collector
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:" + str(server.server_port)
+    try:
+        body = json.dumps(_contract_report()).encode()
+        request = urllib.request.Request(base + "/workload", data=body, headers={
+            "Content-Type": "application/json", "Origin": "https://example.invalid",
+        })
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            soak.open_loopback(request, timeout=2)
+        assert denied.value.code == 403
+        request = urllib.request.Request(base + "/workload", data=body, headers={
+            "Content-Type": "application/json", "Origin": base,
+        })
+        with soak.open_loopback(request, timeout=2) as response:
+            assert response.status == 204
+        with soak.open_loopback(base + "/soak?profile=profile-1", timeout=2) as response:
+            html = response.read()
+            assert b"/soak-workload.js" in html and b"/contract.js" in html
+            assert response.headers["Cache-Control"] == "no-store"
+        assert collector.snapshot()["executions"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(2)

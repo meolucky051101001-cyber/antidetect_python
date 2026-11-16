@@ -902,31 +902,34 @@ class ProfileManager:
             return False
 
         p_dir = os.path.join(PROFILES_DATA_DIR, profile_id)
-        if os.path.exists(p_dir):
-            last_error = None
-            for attempt in range(3):
-                try:
-                    shutil.rmtree(p_dir)
-                    last_error = None
-                    break
-                except PermissionError as e:
-                    last_error = e
-                    if attempt < 2:
-                        time.sleep(0.5 * (attempt + 1))
-                except Exception as e:
-                    last_error = e
-                    break
-
-            if os.path.exists(p_dir):
-                _safe_log(
-                    f"[Storage] Không thể xóa thư mục profile {profile_id} "
-                    f"(file đang bị khóa). Hãy đóng trình duyệt trước khi xóa. "
-                    f"Chi tiết: {type(last_error).__name__ if last_error else 'unknown'}"
-                )
+        last_error = None
+        for attempt in range(3):
+            try:
+                remove_operation_target(PROFILES_DATA_DIR, profile_id)
+                last_error = None
+                break
+            except ProfileCopyError as e:
                 raise ProfileDeletionError(
-                    "Không thể xóa thư mục profile (file đang bị khóa). "
-                    "Metadata và mật khẩu proxy được giữ nguyên; hãy đóng trình duyệt rồi thử lại."
-                )
+                    "Unsafe profile path; metadata and secrets were preserved."
+                ) from e
+            except PermissionError as e:
+                last_error = e
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+            except Exception as e:
+                last_error = e
+                break
+
+        if os.path.exists(p_dir):
+            _safe_log(
+                f"[Storage] Không thể xóa thư mục profile {profile_id} "
+                f"(file đang bị khóa). Hãy đóng trình duyệt trước khi xóa. "
+                f"Chi tiết: {type(last_error).__name__ if last_error else 'unknown'}"
+            )
+            raise ProfileDeletionError(
+                "Không thể xóa thư mục profile (file đang bị khóa). "
+                "Metadata và mật khẩu proxy được giữ nguyên; hãy đóng trình duyệt rồi thử lại."
+            )
 
         # Directory is gone. Persist the metadata removal before deleting
         # the DPAPI entry: if this write fails, the secret is still needed
@@ -1337,9 +1340,15 @@ class ProfileManager:
         if not orig:
             return None
 
-        if copy_data and source_running is not None:
+        def assert_source_idle():
+            if not copy_data:
+                return
             try:
-                running = bool(source_running(profile_id))
+                if source_running is None:
+                    raise RuntimeError("missing source state verifier")
+                running = source_running(profile_id)
+                if running is not True and running is not False:
+                    raise RuntimeError("inconclusive source state")
             except Exception as e:
                 raise ProfileCopyError(
                     "Không xác minh được profile nguồn đã dừng; hủy sao chép.",
@@ -1350,6 +1359,7 @@ class ProfileManager:
                     "Hãy đóng profile trước khi sao chép dữ liệu phiên.",
                     code="SOURCE_RUNNING",
                 )
+        assert_source_idle()
 
         new_fp = generate_fingerprint(
             target_os=orig.fingerprint.os,
@@ -1412,6 +1422,7 @@ class ProfileManager:
                     copied_files=copied.total_files,
                     copied_bytes=copied.total_bytes,
                 )
+                assert_source_idle()
                 promote_staging(staging_user_data, target_user_data)
                 journal.update("promoted", promoted=True)
             else:

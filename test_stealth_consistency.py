@@ -168,8 +168,8 @@ def test_disabled_groups_are_honoured(monkeypatch):
     js = get_stealth_script(_windows_fp())
     # battery/network là default-off nên DISABLED luôn chứa cả 4 nhóm này.
     assert 'const DISABLED = new Set(["battery", "canvas", "network", "webgl"])' in js
-    assert "if (!DISABLED.has('webgl'))" in js
-    assert "if (!DISABLED.has('canvas')" in js
+    assert "if (!CONTRACT_V2 && !DISABLED.has('webgl'))" in js
+    assert "if (DISABLED.has('canvas')) return;" in js
 
     monkeypatch.setenv("ANTIDETECT_STEALTH_DISABLE", "all")
     assert _disabled_stealth_groups() == set(STEALTH_GROUPS)

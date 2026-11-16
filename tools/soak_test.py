@@ -33,6 +33,9 @@ except ImportError:  # pragma: no cover - psutil là optional
     psutil = None
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+from antidetect.loopback import open_loopback
 REAL_DATA_DIR = os.path.realpath(os.path.join(BASE_DIR, "data"))
 STATE_FILENAME = "soak_state.json"
 EVENTS_FILENAME = "soak_events.jsonl"
@@ -43,6 +46,88 @@ MAX_ERRORS = 100
 # trước khi ghi error để retry thành công không bị tính là lỗi chức năng.
 TRANSIENT_TAB_CONFLICT_CODES = {"CDP_STARTING", "CDP_UNHEALTHY", "PROFILE_BUSY"}
 OPEN_TAB_RETRY_DELAY = 2.0
+CONTRACT_REALMS = ("page", "classic_worker", "nested_worker")
+CONTRACT_CHECKS = (
+    "executionSucceeded", "readStable", "fullTileEqual", "negativeCropEqual",
+    "unchangedWhilePending", "unchangedAfterExport", "drawPreserved", "repeatedExportsEqual",
+)
+WORKLOAD_MAX_BYTES = 4096
+WORKLOAD_STALE_SECONDS = 120.0
+
+
+class _WorkloadCollector:
+    """Retain aggregate booleans/counts only, never fixture pixels or images."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._profiles = {}
+        self._invalid = 0
+
+    def register(self, profile_id):
+        with self._lock:
+            self._profiles.setdefault(profile_id, {
+                realm: {"executions": 0, "failures": 0, "failed_checks": {},
+                        "last_report_at": None, "last_report_monotonic": None}
+                for realm in CONTRACT_REALMS
+            })
+
+    def record(self, payload):
+        with self._lock:
+            if not isinstance(payload, dict) or set(payload) != {"profile_id", "realm", "checks"}:
+                self._invalid += 1
+                return False
+            profile_id, realm, checks = (payload.get(key) for key in ("profile_id", "realm", "checks"))
+            if (not isinstance(profile_id, str) or profile_id not in self._profiles
+                    or not isinstance(realm, str) or realm not in CONTRACT_REALMS
+                    or not isinstance(checks, dict) or set(checks) != set(CONTRACT_CHECKS)
+                    or any(type(value) is not bool for value in checks.values())):
+                self._invalid += 1
+                return False
+            entry = self._profiles[profile_id][realm]
+            entry["executions"] += 1
+            failed = [name for name in CONTRACT_CHECKS if not checks[name]]
+            entry["failures"] += int(bool(failed))
+            for name in failed:
+                entry["failed_checks"][name] = entry["failed_checks"].get(name, 0) + 1
+            entry["last_report_at"] = _now_iso()
+            entry["last_report_monotonic"] = time.monotonic()
+            return True
+
+    def snapshot(self):
+        with self._lock:
+            profiles = {
+                profile_id: {
+                    realm: {key: (dict(value) if isinstance(value, dict) else value)
+                            for key, value in entry.items() if key != "last_report_monotonic"}
+                    for realm, entry in realms.items()
+                }
+                for profile_id, realms in self._profiles.items()
+            }
+            entries = [entry for realms in profiles.values() for entry in realms.values()]
+            return {
+                "executions": sum(entry["executions"] for entry in entries),
+                "failures": sum(entry["failures"] for entry in entries),
+                "invalid_reports": self._invalid, "profiles": profiles,
+            }
+
+    def stale_realms(self, profile_id, started_monotonic):
+        now = time.monotonic()
+        if now - started_monotonic <= WORKLOAD_STALE_SECONDS:
+            return []
+        with self._lock:
+            return [
+                realm for realm, entry in self._profiles.get(profile_id, {}).items()
+                if now - (entry["last_report_monotonic"] or started_monotonic) > WORKLOAD_STALE_SECONDS
+            ]
+
+    def passes(self, started_ids, minimum=2):
+        snapshot = self.snapshot()
+        if not started_ids or snapshot["failures"] or snapshot["invalid_reports"]:
+            return False
+        return all(
+            snapshot["profiles"].get(profile_id, {}).get(realm, {}).get("executions", 0) >= minimum
+            for profile_id in started_ids for realm in CONTRACT_REALMS
+        )
 
 
 def _now_iso():
@@ -81,7 +166,7 @@ def _http(base, method, path, token=None, body=None, headers=None, timeout=30):
         req.add_header(key, value)
     started = time.perf_counter()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_loopback(req, timeout=timeout) as resp:
             payload = _decode_json(resp.read())
             return resp.status, payload, (time.perf_counter() - started) * 1000, None
     except urllib.error.HTTPError as exc:
@@ -93,7 +178,7 @@ def _http(base, method, path, token=None, body=None, headers=None, timeout=30):
 
 def _http_plain(url, timeout=10):
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with open_loopback(url, timeout=timeout) as resp:
             return resp.status, _decode_json(resp.read()), None
     except Exception as exc:
         return -1, {}, f"{type(exc).__name__}: {exc}"
@@ -267,18 +352,54 @@ class _QuietSoakServer(ThreadingHTTPServer):
 
 
 class _SoakPageHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = (
-            b"<!doctype html><meta charset='utf-8'><title>Antidetect soak</title>"
-            b"<h1>Antidetect soak test page</h1>"
-            b"<script>setInterval(function(){document.title='soak-'+Date.now();},5000);</script>"
-        )
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+    def _send(self, status, body=b"", mime="text/plain; charset=utf-8"):
+        self.send_response(status)
+        self.send_header("Content-Type", mime)
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path in ("/", "/soak"):
+            body = (
+                b"<!doctype html><meta charset='utf-8'><title>Antidetect soak</title>"
+                b"<h1>Synthetic canvas and worker soak</h1>"
+                b"<script src='/contract.js'></script><script src='/soak-workload.js'></script>"
+            )
+            self._send(200, body, "text/html; charset=utf-8")
+        elif path in ("/contract.js", "/soak-workload.js"):
+            filename = "fingerprint_browser.js" if path == "/contract.js" else "soak_workload.js"
+            with open(os.path.join(BASE_DIR, "tools", "fixtures", filename), "rb") as source:
+                body = source.read()
+            self._send(200, body, "text/javascript; charset=utf-8")
+        else:
+            self._send(404)
+
+    def do_POST(self):
+        expected_origin = "http://127.0.0.1:" + str(self.server.server_port)
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= WORKLOAD_MAX_BYTES:
+                self._send(413)
+                return
+            raw = self.rfile.read(length)
+        except ValueError:
+            self._send(400)
+            return
+        if (self.path != "/workload" or self.headers.get("Origin") != expected_origin
+                or self.headers.get_content_type() != "application/json"):
+            self._send(403)
+            return
+        try:
+            payload = json.loads(raw)
+        except (ValueError, UnicodeError):
+            self._send(400)
+            return
+        self._send(204 if self.server.workload.record(payload) else 400)
 
     def log_message(self, *_args):
         pass
@@ -292,6 +413,9 @@ class SoakRunner:
     def __init__(self, args):
         self.args = args
         self.hours = float(args.hours)
+        self.min_lifecycle_cycles = max(0, int(getattr(args, "min_lifecycle_cycles", 2)))
+        self.min_copy_cycles = max(0, int(getattr(args, "min_copy_cycles", 2)))
+        self.workload = _WorkloadCollector()
         self.target_profiles = max(1, int(args.profiles))
         self.min_active = min(
             max(0, int(getattr(args, "min_active", 0))), self.target_profiles
@@ -349,6 +473,8 @@ class SoakRunner:
             "results_dir": self.results_dir,
             "target_profiles": self.target_profiles,
             "min_active": self.min_active,
+            "min_lifecycle_cycles": self.min_lifecycle_cycles,
+            "min_copy_cycles": self.min_copy_cycles,
             "profiles": [],
             "counters": {
                 "samples": 0,
@@ -359,6 +485,8 @@ class SoakRunner:
                 "tabs_opened": 0,
                 "tabs_closed": 0,
                 "memory_shed": 0,
+                "contract_executions": 0,
+                "contract_failures": 0,
                 "errors": 0,
             },
             "last_sample": {},
@@ -432,6 +560,7 @@ class SoakRunner:
 
     def _start_local_server(self):
         self.local_server = _QuietSoakServer(("127.0.0.1", 0), _SoakPageHandler)
+        self.local_server.workload = self.workload
         self.local_thread = threading.Thread(
             target=self.local_server.serve_forever, name="soak-page", daemon=True
         )
@@ -509,6 +638,7 @@ class SoakRunner:
                     self._error("create_profile", error or f"HTTP {status}", critical=True)
                     raise SoakFailure("Không tạo được profile soak.")
                 profile_id = body["id"]
+            self.workload.register(profile_id)
             self.profiles.append(
                 {
                     "id": profile_id,
@@ -541,7 +671,8 @@ class SoakRunner:
         status, body, _latency, error = _http(
             self.base,
             "POST",
-            f"/api/profiles/{profile['id']}/start",
+            f"/api/profiles/{profile['id']}/start?"
+            + urllib.parse.urlencode({"url": f"{self.soak_base}/soak?profile={profile['id']}"}),
             token=self.token,
             timeout=180,
         )
@@ -556,6 +687,7 @@ class SoakRunner:
         profile["pid"] = body.get("pid")
         profile["port"] = body.get("port")
         profile["starts"] = profile.get("starts", 0) + 1
+        profile["workload_started_monotonic"] = time.monotonic()
         _hide_pid(profile["pid"])
         health = (body.get("cdp_health") or {}).get("state")
         if body.get("degraded") or health not in (None, "healthy"):
@@ -716,6 +848,16 @@ class SoakRunner:
                 self._low_memory_samples = 0
                 self._shed_blocked_logged = False
         artifacts = self._artifact_counts()
+        workload = self.workload.snapshot()
+        self.state["counters"]["contract_executions"] = workload["executions"]
+        self.state["counters"]["contract_failures"] = workload["failures"] + workload["invalid_reports"]
+        if workload["failures"] or workload["invalid_reports"]:
+            self._error("canvas_worker_contract", "Synthetic canvas/worker contract failed.", critical=True)
+        for profile in self.profiles:
+            if profile["active"] and profile.get("workload_started_monotonic") is not None:
+                stale = self.workload.stale_realms(profile["id"], profile["workload_started_monotonic"])
+                if stale:
+                    self._error("canvas_worker_stalled", "No recent contract report: " + ", ".join(stale), critical=True)
         sample = {
             "at": _now_iso(),
             "elapsed_seconds": round(time.time() - self._started_ts, 1),
@@ -738,6 +880,7 @@ class SoakRunner:
             "cdp_states": cdp_states,
             "available_mb": round(available, 1) if available is not None else None,
             "artifacts": artifacts,
+            "canvas_worker_workload": workload,
         }
         minimum_running = max(1, self.min_active)
         if (
@@ -924,8 +1067,10 @@ class SoakRunner:
         profile = active[self._cycle_index % len(active)]
         self._cycle_index += 1
         stopped = self._stop_profile(profile, "cycle")
-        if stopped or not profile["active"]:
-            self._start_profile(profile)
+        restarted = self._start_profile(profile) if stopped or not profile["active"] else False
+        if not (stopped and restarted):
+            self._save()
+            return
         self._lifecycle_cycles += 1
         self.state["counters"]["lifecycle_cycles"] = self._lifecycle_cycles
         self._event("lifecycle_cycle", profile=profile["name"])
@@ -951,6 +1096,7 @@ class SoakRunner:
             timeout=300,
         )
         target_id = body.get("id") if isinstance(body, dict) else None
+        copy_complete = False
         if status == 200 and target_id:
             target_dir = os.path.join(
                 self.data_dir, "profiles", target_id, "user_data"
@@ -981,6 +1127,7 @@ class SoakRunner:
                     f"target {target_id}: {delete_error or delete_body.get('detail')}",
                 )
             else:
+                copy_complete = size > 0
                 self._event("copy_verified", source=source["name"], bytes=size)
         else:
             self._error(
@@ -996,8 +1143,9 @@ class SoakRunner:
                     token=self.token,
                     timeout=120,
                 )
-        self._start_profile(source)
-        self._copy_cycles += 1
+        restarted = self._start_profile(source)
+        if copy_complete and restarted:
+            self._copy_cycles += 1
         self.state["counters"]["copy_cycles"] = self._copy_cycles
         self._event(
             "copy_cycle",
@@ -1099,12 +1247,17 @@ class SoakRunner:
             "lifecycle": planned_seconds > self.args.cycle_interval + 25.0,
             "copy": planned_seconds > min(self.args.copy_interval, 3600),
         }
+        workload = self.workload.snapshot()
+        started_ids = [profile["id"] for profile in self.profiles if profile.get("starts", 0) > 0]
+        self.state["counters"]["contract_executions"] = workload["executions"]
+        self.state["counters"]["contract_failures"] = workload["failures"] + workload["invalid_reports"]
         workload_checks = {
             "profile_started": any(profile.get("starts", 0) > 0 for profile in self.profiles),
             "healthy_active_sample": self._healthy_active_samples > 0,
             "tab": self._tabs_opened > 0 if required_exercises["tab"] else None,
-            "lifecycle": self._lifecycle_cycles > 0 if required_exercises["lifecycle"] else None,
-            "copy": self._copy_cycles > 0 if required_exercises["copy"] else None,
+            "lifecycle": self._lifecycle_cycles >= max(self.min_lifecycle_cycles, int(required_exercises["lifecycle"])),
+            "copy": self._copy_cycles >= max(self.min_copy_cycles, int(required_exercises["copy"])),
+            "canvas_workers": self.workload.passes(started_ids),
         }
         cleanup_checks = {
             "process_observation_available": psutil is not None,
@@ -1134,7 +1287,11 @@ class SoakRunner:
             "workload_required": required_exercises,
             "workload_checks": workload_checks,
             "cleanup_checks": cleanup_checks,
-            "scope": "local tabs, profile lifecycle and transactional profile copy",
+            "scope": "localhost canvas, classic/nested workers, tabs, lifecycle and transactional copy; no egress-isolation claim",
+            "canvas_worker_workload": workload,
+            "minimum_contract_executions_per_realm_per_started_profile": 2,
+            "min_lifecycle_cycles": self.min_lifecycle_cycles,
+            "min_copy_cycles": self.min_copy_cycles,
             "lifecycle_cycles": self._lifecycle_cycles,
             "tab_cycles": self._tab_cycles,
             "copy_cycles": self._copy_cycles,
@@ -1239,6 +1396,8 @@ def main(argv=None):
     run_parser.add_argument("--hours", type=float, default=24.0)
     run_parser.add_argument("--profiles", type=int, default=5)
     run_parser.add_argument("--min-active", type=int, default=0)
+    run_parser.add_argument("--min-lifecycle-cycles", type=int, default=2)
+    run_parser.add_argument("--min-copy-cycles", type=int, default=2)
     run_parser.add_argument("--port", type=int, default=0)
     run_parser.add_argument("--data-dir", default="")
     run_parser.add_argument("--results-dir", default="")

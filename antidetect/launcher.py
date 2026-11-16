@@ -44,8 +44,13 @@ from .cdp_health import (
     CdpHealthRegistry,
     CdpUnavailable,
 )
-from .stealth import get_stealth_script, get_worker_stealth_script, get_webgl_limits
-from .process_identity import browser_pids_using_dir, read_browser_identity
+from .stealth import get_stealth_script, get_worker_stealth_script, get_webgl_limits, get_stealth_capabilities
+from .process_identity import (
+    browser_pids_using_dir, read_browser_identity, invalidate_identity,
+    terminate_verified_browser, browser_process_birth,
+)
+from .loopback import open_loopback, connect_loopback
+from .launch_verification import LaunchVerification, verification_origin
 from .profile_locks import ProfileLockTimeout, ProfileLocks
 from .applog import get_logger
 from . import metrics
@@ -184,7 +189,7 @@ class BrowserLauncher:
         # R4: page configuration is split into two phases. The CDP thread
         # pauses on about:blank until the main thread verifies core values,
         # then navigates and reports when the new document has loaded.
-        self._core_verified_events: Dict[str, threading.Event] = {}
+        self._core_verified_events: Dict[str, LaunchVerification] = {}
         self._navigation_events: Dict[str, threading.Event] = {}
         self._page_load_events: Dict[str, Any] = {}
         # P2: brands/fullVersionList đo được từ Chrome host, cache theo
@@ -495,6 +500,7 @@ class BrowserLauncher:
         """Verify ownership for either a live Popen PID or a recovered record."""
         if not pid:
             return {"state": "absent", "port": None, "created": None}
+        invalidate_identity(pid)
         return read_browser_identity(pid, user_data_dir or "")
 
     def _identity_for_stop(self, pid, user_data_dir, attempts: int = 3):
@@ -614,9 +620,17 @@ class BrowserLauncher:
         record = self._runtime_store.get(profile_id)
         if not record:
             return None
+        invalidate_identity(record.get("pid"))
         identity = read_browser_identity(
             record.get("pid"), record.get("user_data_dir") or ""
         )
+        if (identity.get("state") == "owned" and record.get("created")
+                and identity.get("created") != record["created"]):
+            # Never relabel a reused PID with a new creation identity.
+            identity = {"state": "mismatch", "reason": "process_birth_changed"}
+        if (identity.get("state") == "owned" and record.get("birth_ticks") is not None
+                and identity.get("birth_ticks") != record["birth_ticks"]):
+            identity = {"state": "mismatch", "reason": "process_birth_changed"}
         if identity.get("state") == "owned":
             actual_port = identity.get("port") or record.get("port")
             if actual_port:
@@ -733,15 +747,33 @@ class BrowserLauncher:
         user_data_dir = os.path.join(PROFILES_DATA_DIR, profile_id, "user_data")
         if not os.path.isdir(user_data_dir):
             return False
-        exclude = {
-            proc.pid
-            for proc in self.active_processes.values()
-            if proc is not None and proc.poll() is None
-        }
-        pids = browser_pids_using_dir(user_data_dir, exclude_pids=exclude)
-        # None means the process table was unavailable; do not block copies on
-        # an unanswerable query (the source is already not tracked as running).
+        pids = browser_pids_using_dir(user_data_dir)
+        if pids is None:
+            raise RuntimeError("PROCESS_STATE_UNVERIFIED: không xác minh được thư mục profile đã rảnh")
         return bool(pids)
+
+    def _cleanup_failed_launch(self, profile_id, proc, launch_id):
+        """Retain recovery state unless this exact launch has definitely exited."""
+        record = self._runtime_store.get(profile_id) or {}
+        if record and (record.get("launch_id") != launch_id or record.get("pid") != proc.pid):
+            return False
+        try:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            if proc.poll() is not None:
+                return self._clear_process(profile_id, expected_record=record)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        self.cdp_health.mark_degraded(profile_id, launch_id, REASON_STOP_FAILED, restart_required=True)
+        try:
+            self._runtime_store.upsert_if_owner(
+                profile_id, launch_id=launch_id, pid=proc.pid,
+                cleanup_failed=True, cdp_health=self.cdp_health.snapshot(profile_id),
+            )
+        except Exception:
+            pass  # The live Popen handle is still retained in active_processes.
+        return False
 
     # ------------------------------------------------------------------
     # Lưu & khôi phục các tab đang mở của từng profile qua các lần tắt/bật
@@ -766,7 +798,7 @@ class BrowserLauncher:
             if not (lower.startswith("http://") or lower.startswith("https://")):
                 continue
             if lower.startswith(("http://127.0.0.1:", "http://localhost:")):
-                if "/json/" in lower or "/devtools/" in lower:
+                if "/json/" in lower or "/devtools/" in lower or "/__antidetect_verify__/" in lower:
                     continue
             if cleaned and cleaned[-1] == url:
                 continue
@@ -830,7 +862,7 @@ class BrowserLauncher:
         if not port or not user_data_dir:
             return []
         try:
-            with urllib.request.urlopen(
+            with open_loopback(
                 f"http://127.0.0.1:{int(port)}/json/list", timeout=1.0
             ) as resp:
                 targets = json.loads(resp.read().decode("utf-8", "replace"))
@@ -887,11 +919,11 @@ class BrowserLauncher:
         while time.monotonic() < deadline:
             try:
                 def pages():
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=1) as r:
+                    with open_loopback(f"http://127.0.0.1:{port}/json/list", timeout=1) as r:
                         return json.loads(r.read())
                 targets = await asyncio.to_thread(pages)
                 target = next(t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl"))
-                async with websockets.connect(target["webSocketDebuggerUrl"], open_timeout=1, close_timeout=1) as ws:
+                async with connect_loopback(target["webSocketDebuggerUrl"], open_timeout=1, close_timeout=1) as ws:
                     await ws.send(json.dumps({"id": 91001, "method": "Page.getFrameTree"}))
                     end = min(deadline, time.monotonic() + 2)
                     while time.monotonic() < end:
@@ -941,7 +973,7 @@ class BrowserLauncher:
             while time.monotonic() < deadline:
                 try:
                     def list_pages():
-                        with urllib.request.urlopen(
+                        with open_loopback(
                             f"http://127.0.0.1:{port}/json/list", timeout=1
                         ) as r:
                             return json.loads(r.read())
@@ -964,7 +996,7 @@ class BrowserLauncher:
                 return None
 
             async def _probe():
-                async with websockets.connect(page_ws, open_timeout=2) as ws:
+                async with connect_loopback(page_ws, open_timeout=2) as ws:
                     await ws.send(json.dumps({
                         "id": 70001,
                         "method": "Page.navigate",
@@ -1086,7 +1118,10 @@ class BrowserLauncher:
         # Authentic mode disables the WebGL hook, so the page reports the
         # host GPU. Comparing it to the stored fingerprint would fail on every
         # launch and mark a healthy profile as degraded.
-        webgl_spoofed = "webgl" not in (getattr(fp, "stealth_disable", None) or [])
+        webgl_spoofed = (
+            getattr(fp, "fingerprint_algorithm_version", 1) == 1
+            and "webgl" not in (getattr(fp, "stealth_disable", None) or [])
+        )
         expected_texture = None
         expected_viewport = None
         limits = get_webgl_limits(fp)
@@ -1102,7 +1137,7 @@ class BrowserLauncher:
         while time.monotonic() < deadline:
             try:
                 def pages():
-                    with urllib.request.urlopen(
+                    with open_loopback(
                         f"http://127.0.0.1:{port}/json/list", timeout=1
                     ) as r:
                         return json.loads(r.read())
@@ -1112,7 +1147,7 @@ class BrowserLauncher:
                     t for t in targets
                     if t.get("type") == "page" and t.get("webSocketDebuggerUrl")
                 )
-                async with websockets.connect(
+                async with connect_loopback(
                     target["webSocketDebuggerUrl"],
                     open_timeout=1,
                     close_timeout=1,
@@ -1219,6 +1254,26 @@ class BrowserLauncher:
             await asyncio.sleep(0.25)
         return {"ok": False, "checks": {}, "actual": None, "error": "timeout"}
 
+    async def _verify_on_local_origin(self, port, fp):
+        """Check secure-context values on a data-free localhost page before targets."""
+        with verification_origin() as url:
+            with open_loopback(f"http://127.0.0.1:{port}/json/list", timeout=2) as response:
+                pages = json.loads(response.read())
+            target = next(item for item in pages if item.get("type") == "page"
+                          and item.get("webSocketDebuggerUrl"))
+            async with connect_loopback(target["webSocketDebuggerUrl"],
+                                        open_timeout=2, close_timeout=1) as ws:
+                await ws.send(json.dumps({"id": 88001, "method": "Page.navigate",
+                                          "params": {"url": url}}))
+                while True:
+                    reply = json.loads(await asyncio.wait_for(ws.recv(), 3))
+                    if reply.get("id") == 88001:
+                        if reply.get("error") or reply.get("result", {}).get("errorText"):
+                            return {"ok": False, "checks": {}, "error": "local_navigation_failed"}
+                        break
+            return await self._verify_emulation(
+                port, fp, require_client_hints=True, deadline_seconds=5)
+
     async def _setup_cdp_stealth(
         self,
         port: int,
@@ -1240,6 +1295,9 @@ class BrowserLauncher:
                 # without touching the new generation's health.
                 return
         handshake_established = False
+        launch_gate = self._core_verified_events.get(profile.id)
+        ready_event = self._cdp_ready_events.get(profile.id)
+        navigation_event = self._navigation_events.get(profile.id)
 
         # Use the launch-time normalized copy, not the stored profile. The
         # stored model may still contain legacy RAM/screen values; the injected
@@ -1253,6 +1311,13 @@ class BrowserLauncher:
         # reliable than the requested port because Chrome may choose another.
         ws_url = None
         for _ in range(25):
+            if launch_id and (
+                self.cdp_health.current_launch_id(profile.id) != launch_id
+                or not self._cdp_process_alive(profile.id)
+            ):
+                if session is not None:
+                    session.mark_closed()
+                return
             if user_data_dir:
                 active_port_file = os.path.join(user_data_dir, "DevToolsActivePort")
                 if os.path.exists(active_port_file):
@@ -1261,11 +1326,13 @@ class BrowserLauncher:
                             first_line = _pf.readline().strip()
                             if first_line.isdigit():
                                 port = int(first_line)
-                                self.active_ports[profile.id] = port
                                 try:
-                                    self._runtime_store.upsert(
-                                        profile.id, port=port, cdp_port_source="DevToolsActivePort"
-                                    )
+                                    if launch_id:
+                                        self._runtime_store.upsert_if_owner(
+                                            profile.id, launch_id=launch_id,
+                                            owner_instance=self.instance_id,
+                                            port=port, cdp_port_source="DevToolsActivePort",
+                                        )
                                 except Exception:
                                     pass
                     except Exception:
@@ -1273,7 +1340,7 @@ class BrowserLauncher:
             try:
                 url = f"http://127.0.0.1:{port}/json/version"
                 req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=1) as resp:
+                with open_loopback(req, timeout=1) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                     ws_url = data.get("webSocketDebuggerUrl")
                     if ws_url:
@@ -1349,13 +1416,15 @@ class BrowserLauncher:
         pending_responses: Dict[int, asyncio.Future] = {}
         target_tasks: Set[asyncio.Task] = set()
         try:
-            async with websockets.connect(
+            async with connect_loopback(
                 ws_url, max_size=20 * 1024 * 1024
             ) as ws:
                 msg_id = 0
                 attached_sessions: Set[str] = set()
+                target_owners = {}
+                worker_pauses = {}
 
-                async def send(method, params=None, session_id=None):
+                async def send(method, params=None, session_id=None, sent_event=None):
                     nonlocal msg_id
                     msg_id += 1
                     current_id = msg_id
@@ -1372,6 +1441,8 @@ class BrowserLauncher:
                         ws.send(json.dumps(payload)),
                         timeout=HEARTBEAT_TIMEOUT_SECONDS,
                     )
+                    if sent_event is not None:
+                        sent_event.set()
                     try:
                         res = await asyncio.wait_for(
                             fut, timeout=HEARTBEAT_TIMEOUT_SECONDS
@@ -1379,25 +1450,34 @@ class BrowserLauncher:
                         if "error" in res:
                             raise RuntimeError(f"CDP {method} error: {res['error']}")
                         return res.get("result", {})
+                    except asyncio.TimeoutError as exc:
+                        raise asyncio.TimeoutError(f"CDP {method} response timed out") from exc
                     finally:
                         pending_responses.pop(current_id, None)
 
-                def spawn_target_task(coro, session_id):
+                def spawn_target_task(coro, session_id, target_id):
                     """Run target setup without leaking expected close races as task tracebacks."""
                     async def guarded():
                         try:
                             await coro
                         except Exception:
-                            # If setup failed before resuming a paused target, make a
-                            # best effort to unpause it so Chrome does not keep a
-                            # dead/worker target frozen.
+                            # Strict launches must not run a target whose setup
+                            # failed. Close only that target; if closing fails,
+                            # retain its pause and report degraded health.
                             try:
-                                await send(
-                                    "Runtime.runIfWaitingForDebugger",
-                                    session_id=session_id,
-                                )
+                                if fp.verification_mode == "strict":
+                                    await send("Target.closeTarget", {"targetId": target_id})
+                                else:
+                                    if session_id in worker_pauses:
+                                        await send("Debugger.disable", session_id=session_id)
+                                    await send(
+                                        "Runtime.runIfWaitingForDebugger",
+                                        session_id=session_id,
+                                    )
                             except Exception:
                                 pass
+                            finally:
+                                worker_pauses.pop(session_id, None)
                             raise
 
                     task = asyncio.create_task(guarded())
@@ -1527,31 +1607,25 @@ class BrowserLauncher:
                     # OOPIFs are subtargets of a page. Enable auto-attach on the
                     # page session as well; otherwise module workers and
                     # cross-origin frames run without the stealth payload.
+                    # Shared/service workers belong only to the browser session
+                    # so two debugger sessions cannot race their startup pause.
                     await send(
                         "Target.setAutoAttach",
                         {
                             "autoAttach": True,
                             "waitForDebuggerOnStart": True,
                             "flatten": True,
+                            "filter": [{"type": "service_worker", "exclude": True},
+                                       {"type": "shared_worker", "exclude": True}, {}],
                         },
                         session_id=session_id,
                     )
                     await send(
                         "Page.addScriptToEvaluateOnNewDocument",
-                        {"source": stealth_js},
+                        {"source": stealth_js, "runImmediately": True},
                         session_id=session_id,
                     )
-                    # Page.addScript only covers future documents. The initial
-                    # about:blank document already exists, so apply the same
-                    # payload now before the R4 core verification pass.
-                    try:
-                        await send(
-                            "Runtime.evaluate",
-                            {"expression": stealth_js, "silent": True},
-                            session_id=session_id,
-                        )
-                    except Exception:
-                        pass
+                    # Chrome installs once in each existing/future document.
                     await send(
                         "Emulation.setTimezoneOverride",
                         {"timezoneId": fp.timezone},
@@ -1590,13 +1664,19 @@ class BrowserLauncher:
                     # The main thread can now verify core values on the initial
                     # about:blank page. Navigation waits for that handshake so
                     # a slow page cannot invalidate verification halfway through.
-                    if profile.id in self._cdp_ready_events:
-                        self._cdp_ready_events[profile.id].set()
+                    if ready_event is not None and (
+                        not launch_id or self.cdp_health.current_launch_id(profile.id) == launch_id
+                    ):
+                        ready_event.set()
                     if first_tab:
                         try:
-                            core_event = self._core_verified_events.get(profile.id)
-                            if core_event is not None:
-                                await asyncio.to_thread(core_event.wait, 8.0)
+                            core_event = launch_gate
+                            allowed = core_event is not None and await asyncio.to_thread(core_event.wait, 20.0)
+                            if (not allowed or (launch_id and
+                                    self.cdp_health.current_launch_id(profile.id) != launch_id)):
+                                if navigation_event is not None:
+                                    navigation_event.set()
+                                return
                             if target_url == "about:blank":
                                 nav_event = self._navigation_events.get(profile.id)
                                 if nav_event is not None:
@@ -1622,6 +1702,11 @@ class BrowserLauncher:
                                         await asyncio.sleep(0.5)
                                     except Exception:
                                         pass
+                                elif fp.verification_mode == "strict":
+                                    # The transient verification server has stopped.
+                                    # Do not leave its dead URL as the user's tab.
+                                    await send("Page.navigate", {"url": "about:blank"},
+                                               session_id=session_id)
                             elif target_url:
                                 load_event = asyncio.Event()
                                 self._page_load_events[session_id] = load_event
@@ -1656,20 +1741,14 @@ class BrowserLauncher:
                             "autoAttach": True,
                             "waitForDebuggerOnStart": True,
                             "flatten": True,
+                            "filter": [{"type": "service_worker", "exclude": True},
+                                       {"type": "shared_worker", "exclude": True}, {}],
                         },
                         session_id=session_id,
                     )
                     await send(
                         "Page.addScriptToEvaluateOnNewDocument",
-                        {"source": stealth_js},
-                        session_id=session_id,
-                    )
-                    # P0-04: Báo hiệu stealth đã được nạp thành công vào document
-                    if profile.id in self._cdp_ready_events:
-                        self._cdp_ready_events[profile.id].set()
-                    await send(
-                        "Runtime.evaluate",
-                        {"expression": stealth_js, "silent": True},
+                        {"source": stealth_js, "runImmediately": True},
                         session_id=session_id,
                     )
                     await send(
@@ -1705,7 +1784,55 @@ class BrowserLauncher:
                             session_id=session_id,
                         )
                         return
+                    # A service worker may wait before creating its execution
+                    # context. Release that startup wait only after arming a
+                    # before-script breakpoint, then inject at the first script.
+                    service_pause = None
+                    if target_info.get("type") == "service_worker":
+                        service_pause = asyncio.Event()
+                        worker_pauses[session_id] = service_pause
+                        # Chrome queues worker-domain commands until startup is
+                        # released. Put both debugger commands on the wire in
+                        # order before release; awaiting their responses first
+                        # deadlocks because the context does not yet exist.
+                        startup_tasks = []
+                        try:
+                            for method, params in (
+                                ("Debugger.enable", {}),
+                                ("Debugger.setInstrumentationBreakpoint",
+                                 {"instrumentation": "beforeScriptExecution"}),
+                            ):
+                                queued = asyncio.Event()
+                                startup_tasks.append(asyncio.create_task(send(
+                                    method, params, session_id=session_id,
+                                    sent_event=queued,
+                                )))
+                                await asyncio.wait_for(queued.wait(), timeout=HEARTBEAT_TIMEOUT_SECONDS)
+                            await send("Runtime.runIfWaitingForDebugger", session_id=session_id)
+                            _, breakpoint = await asyncio.gather(*startup_tasks)
+                        finally:
+                            for startup_task in startup_tasks:
+                                if not startup_task.done():
+                                    startup_task.cancel()
+                            await asyncio.gather(*startup_tasks, return_exceptions=True)
+                        try:
+                            await asyncio.wait_for(service_pause.wait(), timeout=HEARTBEAT_TIMEOUT_SECONDS)
+                        except asyncio.TimeoutError as exc:
+                            raise asyncio.TimeoutError("Service worker first-script pause timed out") from exc
+                        await send("Debugger.removeBreakpoint",
+                                   {"breakpointId": breakpoint["breakpointId"]},
+                                   session_id=session_id)
                     await send("Runtime.enable", session_id=session_id)
+                    # Auto-attachment is not recursive: dedicated workers can
+                    # create further workers before the page session sees them.
+                    await send(
+                        "Target.setAutoAttach",
+                        {"autoAttach": True, "waitForDebuggerOnStart": True,
+                         "flatten": True,
+                         "filter": [{"type": "service_worker", "exclude": True},
+                                    {"type": "shared_worker", "exclude": True}, {}]},
+                        session_id=session_id,
+                    )
                     # S6: workers are separate targets. Apply the same
                     # timezone/locale/UA at the CDP layer where supported, then
                     # fall back to the worker payload for navigator/Intl values.
@@ -1732,7 +1859,7 @@ class BrowserLauncher:
                     # Workers do not support Page.addScriptToEvaluateOnNewDocument.
                     # At waitForDebuggerOnStart they have a context but have not
                     # executed user code yet, so Runtime.evaluate is safe.
-                    await send(
+                    evaluated = await send(
                         "Runtime.evaluate",
                         {
                             "expression": worker_js,
@@ -1742,14 +1869,33 @@ class BrowserLauncher:
                         },
                         session_id=session_id,
                     )
-                    await send(
-                        "Runtime.runIfWaitingForDebugger", session_id=session_id
-                    )
+                    if evaluated.get("exceptionDetails"):
+                        raise RuntimeError("Worker configuration evaluation failed")
+                    if service_pause is not None:
+                        await send("Debugger.resume", session_id=session_id)
+                        await send("Debugger.disable", session_id=session_id)
+                        worker_pauses.pop(session_id, None)
+                    else:
+                        await send(
+                            "Runtime.runIfWaitingForDebugger", session_id=session_id
+                        )
+
+                async def detach_duplicate(session_id):
+                    try:
+                        await send("Target.detachFromTarget", {"sessionId": session_id})
+                    except Exception:
+                        # The duplicate may already have disappeared. Never
+                        # resume or reinject through it on this cleanup path.
+                        pass
 
                 async def dispatch_event(event):
                     method = event.get("method", "")
                     params = event.get("params", {})
                     session_id = event.get("sessionId")
+
+                    if method == "Debugger.paused" and session_id in worker_pauses:
+                        worker_pauses[session_id].set()
+                        return
 
                     if method == "Page.loadEventFired":
                         load_event = self._page_load_events.get(session_id)
@@ -1763,7 +1909,12 @@ class BrowserLauncher:
                         return
 
                     if method == "Target.detachedFromTarget":
-                        attached_sessions.discard(params.get("sessionId"))
+                        detached = params.get("sessionId")
+                        attached_sessions.discard(detached)
+                        worker_pauses.pop(detached, None)
+                        for target_id, owner in list(target_owners.items()):
+                            if owner == detached:
+                                target_owners.pop(target_id, None)
                         asyncio.create_task(sync_session_tabs(0.35))
                         return
 
@@ -1771,16 +1922,30 @@ class BrowserLauncher:
                         target_info = params.get("targetInfo", {})
                         target_type = target_info.get("type", "")
                         attached_id = params.get("sessionId")
-                        if not attached_id:
+                        if not attached_id or attached_id in attached_sessions:
                             return
+                        target_id = target_info.get("targetId")
+                        if target_id and target_id in target_owners:
+                            # Browser and page auto-attach can report the same
+                            # worker through different sessions. Only its first
+                            # session may install or release the startup pause.
+                            # Detaching the duplicate does not run user code.
+                            task = asyncio.create_task(detach_duplicate(attached_id))
+                            target_tasks.add(task)
+                            task.add_done_callback(target_tasks.discard)
+                            return
+                        if target_id:
+                            target_owners[target_id] = attached_id
                         attached_sessions.add(attached_id)
                         if target_type == "page":
                             spawn_target_task(
-                                configure_page(attached_id, target_info), attached_id
+                                configure_page(attached_id, target_info), attached_id,
+                                target_info.get("targetId"),
                             )
                         elif target_type == "iframe":
                             spawn_target_task(
-                                configure_iframe(attached_id, target_info), attached_id
+                                configure_iframe(attached_id, target_info), attached_id,
+                                target_info.get("targetId"),
                             )
                         elif target_type in (
                             "worker",
@@ -1788,7 +1953,8 @@ class BrowserLauncher:
                             "shared_worker",
                         ):
                             spawn_target_task(
-                                configure_worker(attached_id, target_info), attached_id
+                                configure_worker(attached_id, target_info), attached_id,
+                                target_info.get("targetId"),
                             )
                         else:
                             asyncio.create_task(
@@ -2022,25 +2188,60 @@ class BrowserLauncher:
         pinned_name = (getattr(profile, "browser_path", None) or "").strip() if profile else ""
         env_path = (os.environ.get("ANTIDETECT_BROWSER_PATH") or "").strip()
 
+        def safe_candidate(path: str) -> Optional[str]:
+            # Selection is a local trust decision; imports cannot set this field.
+            # Do not follow network paths, aliases or reparse points at execution.
+            import stat
+            path = os.path.abspath(path)
+            if path.startswith(("\\\\", "//")):
+                return None
+            cursor = path
+            try:
+                while True:
+                    entry = os.lstat(cursor)
+                    if stat.S_ISLNK(entry.st_mode) or (
+                        getattr(entry, "st_file_attributes", 0)
+                        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                    ):
+                        return None
+                    parent = os.path.dirname(cursor)
+                    if parent == cursor:
+                        break
+                    cursor = parent
+                if (os.path.basename(path).lower() not in
+                        {"chrome.exe", "msedge.exe", "chromium.exe"} or not os.path.isfile(path)):
+                    return None
+                return path
+            except OSError:
+                return None
+
         def resolve_pinned(name: str) -> Optional[str]:
             def find_exe(directory: str) -> Optional[str]:
-                exe = os.path.join(directory, "chrome-win64", "chrome.exe")
-                if os.path.isfile(exe):
-                    return exe
-                for root, _dirs, files in os.walk(directory):
-                    if "chrome.exe" in files:
-                        return os.path.join(root, "chrome.exe")
+                direct = safe_candidate(os.path.join(directory, "chrome-win64", "chrome.exe"))
+                if direct:
+                    return direct
+                for root, dirs, files in os.walk(directory, followlinks=False):
+                    # Each candidate validates all ancestors, including junctions.
+                    for filename in ("chrome.exe", "msedge.exe", "chromium.exe"):
+                        if filename in files:
+                            candidate = safe_candidate(os.path.join(root, filename))
+                            if candidate:
+                                return candidate
+                    # Avoid traversing junctions even when they have no candidate.
+                    dirs[:] = [entry for entry in dirs
+                               if not os.path.islink(os.path.join(root, entry))
+                               and not (getattr(os.lstat(os.path.join(root, entry)), "st_file_attributes", 0) & 0x400)]
                 return None
 
             if os.path.isabs(name):
-                # Đường dẫn tuyệt đối: file exe trực tiếp, hoặc thư mục
-                # browser (env có thể trỏ vào chrome-<version>/).
                 if os.path.isfile(name):
-                    return name
+                    return safe_candidate(name)
                 if os.path.isdir(name):
                     return find_exe(name)
                 return None
-            # Tên trong browsers/: chrome-<version> → chrome-win64/chrome.exe
+            # A managed pin is one directory name, never a path.
+            if name in {".", ".."} or any(char in name for char in "/\\:"):
+                return None
             return find_exe(os.path.join(BROWSERS_DIR, name))
 
         if pinned_name:
@@ -2065,10 +2266,10 @@ class BrowserLauncher:
                 ],
             )
             if versions:
-                return os.path.join(
+                return safe_candidate(os.path.join(
                     BROWSERS_DIR, versions[-1], "chrome-win64", "chrome.exe"
-                )
-        return self.browser_path
+                ))
+        return safe_candidate(self.browser_path) if self.browser_path else None
 
     def begin_shutdown(self) -> None:
         """Refuse new launches; in-flight launches clean their exact generation."""
@@ -2121,6 +2322,11 @@ class BrowserLauncher:
             profile = self.manager.get_profile(profile_id)
             if not profile:
                 return {"success": False, "error": "Profile không tồn tại"}
+            if (profile.fingerprint.verification_mode == "strict"
+                    and profile.fingerprint.fingerprint_algorithm_version < 2):
+                return {"success": False, "code": "FINGERPRINT_MIGRATION_REQUIRED",
+                        "error": "Strict verification cần fingerprint v2; hãy nâng phiên bản thuật toán một cách chủ động.",
+                        "navigation_allowed": False, "browser_started": False}
 
             # Giai đoạn 2: browser per-profile / pin — resolve TRƯỚC mọi use
             # (UA/Client Hints + brands probe phải theo đúng binary này).
@@ -2148,6 +2354,14 @@ class BrowserLauncher:
 
             profile_dir = self.manager.get_profile_dir(profile_id)
             user_data_dir = os.path.join(profile_dir, "user_data")
+            if os.path.isdir(user_data_dir):
+                other_processes = browser_pids_using_dir(user_data_dir)
+                if other_processes is None:
+                    return {"success": False, "code": "PROCESS_STATE_UNVERIFIED",
+                            "error": "Chưa xác minh được thư mục profile đã rảnh; chưa khởi chạy."}
+                if other_processes:
+                    return {"success": False, "code": "PROFILE_BUSY",
+                            "error": "Thư mục profile đang được trình duyệt khác sử dụng."}
             os.makedirs(user_data_dir, exist_ok=True)
             self._prepare_clean_chrome_preferences(user_data_dir)
 
@@ -2298,6 +2512,7 @@ class BrowserLauncher:
                         user_data_dir=user_data_dir,
                         exe=browser_path,
                         started_at=int(time.time()),
+                        birth_ticks=browser_process_birth(proc.pid),
                         launch_id=launch_id,
                         owner_instance=self.instance_id,
                         cdp_health={
@@ -2328,7 +2543,7 @@ class BrowserLauncher:
                 # P0-04: Tạo event để CDP thread báo hiệu stealth script đã được nạp.
                 # R4: add the core-verification and navigation handshake events.
                 cdp_ready = threading.Event()
-                core_verified = threading.Event()
+                core_verified = LaunchVerification(launch_id)
                 navigation_done = threading.Event()
                 self._cdp_ready_events[profile_id] = cdp_ready
                 self._core_verified_events[profile_id] = core_verified
@@ -2358,9 +2573,12 @@ class BrowserLauncher:
                 # Chờ CDP tiêm stealth thành công vào trang (tối đa 6.0 giây)
                 stealth_ok = cdp_ready.wait(timeout=6.0)
 
-                # Chrome may choose a different port than requested; the CDP
-                # thread updates active_ports from DevToolsActivePort.
-                actual_port = self.active_ports.get(profile_id, port)
+                # Read the generation-bound port under the launch lock. A late
+                # CDP thread must not recreate local state after cleanup.
+                current_runtime = self._runtime_store.get(profile_id) or {}
+                actual_port = (current_runtime.get("port")
+                               if current_runtime.get("launch_id") == launch_id else None) or port
+                self.active_ports[profile_id] = actual_port
                 page_ready = _safe_run_async(self._probe_page_ready(actual_port))
                 verification = {"ok": False, "checks": {}, "actual": None}
                 core_verification = verification
@@ -2368,15 +2586,30 @@ class BrowserLauncher:
                     # Phase 1: verify the initial about:blank document before
                     # the CDP thread is allowed to navigate.
                     core_verification = _safe_run_async(
-                        self._verify_emulation(actual_port, fp)
+                        self._verify_on_local_origin(actual_port, fp)
+                        if fp.verification_mode == "strict"
+                        else self._verify_emulation(actual_port, fp)
                     )
                     verification = core_verification
-                core_verified.set()
+                core_verified.complete(
+                    launch_id, bool(core_verification.get("ok")) and runtime_persisted)
+                navigation_allowed = core_verified.state == "verified"
+                if fp.verification_mode == "strict" and not navigation_allowed:
+                    cleanup_ok = self._cleanup_failed_launch(profile_id, proc, launch_id)
+                    return {
+                        "success": False, "code": "CONFIGURATION_UNVERIFIED",
+                        "error": "Không xác minh được cấu hình; chưa mở trang đích.",
+                        "browser_started": True, "configuration_verified": False,
+                        "navigation_allowed": False, "cleanup_failed": not cleanup_ok,
+                        "verification": verification, "launched_now": True,
+                        "fingerprint_capabilities": get_stealth_capabilities(fp),
+                        "cdp_health": self.cdp_health.snapshot(profile_id),
+                    }
 
                 # Phase 2: after navigation, verify Client Hints on HTTPS
                 # documents. about:blank has no secure-context Client Hints,
                 # so that check belongs only to this second pass.
-                if stealth_ok and page_ready and target_url and target_url != "about:blank":
+                if navigation_allowed and stealth_ok and page_ready and target_url and target_url != "about:blank":
                     navigation_done.wait(timeout=12.0)
                     if target_url.startswith("https://"):
                         post_verification = _safe_run_async(
@@ -2440,6 +2673,15 @@ class BrowserLauncher:
                     and runtime_persisted
                     and final_health.get("state") == STATE_HEALTHY
                 )
+                capabilities = get_stealth_capabilities(fp)
+                if fp.fingerprint_algorithm_version == 2:
+                    launch_warnings.append(
+                        "Fingerprint v2: chỉ Canvas 2D có phân tách; WebGL/audio/fonts/media/WebGPU dùng giá trị native chung của máy."
+                    )
+                else:
+                    launch_warnings.append(
+                        "Fingerprint legacy v1 còn giới hạn nhất quán; chưa nâng thuật toán tự động."
+                    )
                 warning_parts = list(launch_warnings)
                 if not runtime_persisted:
                     warning_parts.insert(
@@ -2462,6 +2704,9 @@ class BrowserLauncher:
                     "stealth_injected": stealth_ok,
                     "emulation_verified": configuration_verified,
                     "configuration_verified": configuration_verified,
+                    "browser_started": True,
+                    "navigation_allowed": navigation_allowed,
+                    "fingerprint_capabilities": capabilities,
                     # MED-3: client automation phải check trường này, không chỉ
                     # "success" — browser đã mở nhưng fingerprint có thể chưa
                     # được che khi stealth/verify thất bại.
@@ -2474,18 +2719,16 @@ class BrowserLauncher:
                     "warning": "; ".join(warning_parts) if warning_parts else None,
                 }
             except Exception as e:
-                # H15: Nếu Popen thành công nhưng các bước sau lỗi, kill proc
-                if proc and proc.poll() is None:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                self._clear_process(profile_id)
+                cleanup_ok = (
+                    self._cleanup_failed_launch(profile_id, proc, launch_id)
+                    if proc is not None else self._clear_process(profile_id)
+                )
                 self._cdp_ready_events.pop(profile_id, None)
                 self._core_verified_events.pop(profile_id, None)
                 self._navigation_events.pop(profile_id, None)
                 log.error(f"[Launcher] Lỗi khởi chạy: {type(e).__name__}: {e}")
                 return {
+                    "cleanup_failed": not cleanup_ok,
                     "success": False,
                     "error": "Lỗi khởi chạy trình duyệt. Vui lòng thử lại.",
                 }
@@ -2588,80 +2831,26 @@ class BrowserLauncher:
             try:
                 exited = False
                 if sys.platform == "win32":
-                    # First request normal closure; always continue to /F when
-                    # graceful taskkill fails or the process does not exit. The
-                    # previous early-return left Chrome and the profile lock alive.
-                    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    last_error = ""
-                    for force in (False, True):
-                        if not proc:
-                            current = self._identity_for_owner(pid, user_data_dir)
-                            if current["state"] in ("absent", "mismatch"):
-                                break
-                            if current["state"] == "unknown":
-                                return _stop_failed("Chưa xác minh lại được tiến trình; giữ nguyên trạng thái để kiểm tra.")
-                            if current["state"] != "owned" or current.get("created") != identity.get("created"):
-                                return _stop_failed("Tiến trình đã thay đổi; giữ nguyên trạng thái để kiểm tra.")
-                        args = ["taskkill", "/PID", str(pid), "/T"]
-                        if force:
-                            args.append("/F")
-                        try:
-                            result = subprocess.run(
-                                args,
-                                capture_output=True,
-                                timeout=8,
-                                creationflags=flags,
-                            )
-                            if result.returncode == 0:
-                                # taskkill không /F báo lỗi với process con của
-                                # Chrome; lỗi đó không được dính vào kết quả khi
-                                # lượt /F sau đã thành công.
-                                last_error = ""
-                            else:
-                                stderr = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
-                                last_error = stderr or f"taskkill exit {result.returncode}"
-                        except (OSError, subprocess.SubprocessError) as e:
-                            last_error = str(e)
-
-                        if proc:
-                            try:
-                                proc.wait(timeout=3)
-                            except subprocess.TimeoutExpired:
-                                pass
-                            if proc.poll() is not None:
-                                break
-                        elif self._wait_identity_gone(pid, user_data_dir, 4.0) in (
-                            "absent",
-                            "mismatch",
-                        ):
-                            break
-                    # Windows có thể giữ PID hiện thêm vài giây sau taskkill /F.
-                    final_state = ""
                     if proc:
-                        for _ in range(8):
-                            try:
-                                proc.wait(timeout=0.5)
-                            except subprocess.TimeoutExpired:
-                                pass
-                            if proc.poll() is not None:
-                                break
+                        # Popen owns the native handle, so PID reuse cannot
+                        # redirect termination to a different process.
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait(timeout=5)
                         exited = proc.poll() is not None
                     else:
-                        final_state = self._wait_identity_gone(pid, user_data_dir, 10.0)
-                        if final_state not in ("absent", "mismatch"):
-                            # Một lần CIM timeout không chứng minh browser còn
-                            # sống; hỏi lại lần cuối trước khi giữ trạng thái.
-                            final_state = self._identity_for_owner(
-                                pid, user_data_dir, 5.0
-                            )["state"]
-                        exited = final_state in ("absent", "mismatch")
-                    if not exited:
-                        detail = f" ({last_error})" if last_error else ""
-                        state_note = "" if proc else f" [xác minh cuối: {final_state}]"
-                        return _stop_failed(
-                            f"Windows chưa dừng được trình duyệt{detail}{state_note}. "
-                            "Dữ liệu trạng thái được giữ nguyên."
-                        )
+                        if record.get("created") and record["created"] != identity.get("created"):
+                            return _stop_failed("Tiến trình đã thay đổi; không gửi lệnh tắt.")
+                        if (record.get("birth_ticks") is not None
+                                and record["birth_ticks"] != identity.get("birth_ticks")):
+                            return _stop_failed("Tiến trình đã thay đổi; không gửi lệnh tắt.")
+                        outcome = terminate_verified_browser(pid, user_data_dir, identity)
+                        exited = outcome.get("state") == "absent"
+                        if not exited:
+                            return _stop_failed("Chưa xác nhận được tiến trình đã dừng; dữ liệu trạng thái được giữ nguyên.")
                 elif proc:
                     proc.terminate()
                     try:
@@ -2727,12 +2916,12 @@ class BrowserLauncher:
             from urllib.parse import quote
             target_url = f"http://127.0.0.1:{port}/json/new?{quote(url, safe=':/?&=#%')}"
             req = urllib.request.Request(target_url, method="PUT")
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with open_loopback(req, timeout=3) as resp:
                 return resp.status in (200, 201)
         except Exception:
             try:
                 from urllib.parse import quote
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/new?{quote(url, safe=':/?&=#%')}", timeout=3) as resp:
+                with open_loopback(f"http://127.0.0.1:{port}/json/new?{quote(url, safe=':/?&=#%')}", timeout=3) as resp:
                     return True
             except Exception as e:
                 log.warning(f"[Launcher] Lỗi mở tab mới: {e}")

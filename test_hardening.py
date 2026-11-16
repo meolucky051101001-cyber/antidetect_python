@@ -205,7 +205,7 @@ def test_second_instance_otc_never_mints_locally(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    monkeypatch.setattr(run.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+    monkeypatch.setattr(run, "open_loopback", lambda req, timeout=0: FakeResponse())
     assert run.get_unlock_code_for_ui(8000, allow_local=False) == "otc_from_server"
 
     def fail_local(*args, **kwargs):
@@ -213,8 +213,8 @@ def test_second_instance_otc_never_mints_locally(monkeypatch):
 
     monkeypatch.setattr(web_app, "create_unlock_code", fail_local)
     monkeypatch.setattr(
-        run.urllib.request,
-        "urlopen",
+        run,
+        "open_loopback",
         lambda req, timeout=0: (_ for _ in ()).throw(OSError("server down")),
     )
     assert run.get_unlock_code_for_ui(8000, allow_local=False) is None
@@ -261,7 +261,7 @@ def test_stop_server_409_does_not_taskkill(monkeypatch):
     def conflict(req, timeout=0):
         raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, None)
 
-    monkeypatch.setattr(server_control.urllib.request, "urlopen", conflict)
+    monkeypatch.setattr(server_control, "open_loopback", conflict)
     calls = []
     monkeypatch.setattr(
         server_control.subprocess,

@@ -1131,6 +1131,12 @@ async def reset_fingerprint_endpoint(profile_id: str, target_os: Optional[str] =
         longitude=lon if lon is not None else auto_lon,
         browser_brand=detect_browser_brand(getattr(launcher, "browser_path", None)),
     )
+    # Reset rotates identity values, not the user's algorithm/security policy.
+    # Migration is an explicit edit and still uses the existing revision CAS.
+    new_fp.fingerprint_algorithm_version = p.fingerprint.fingerprint_algorithm_version
+    new_fp.verification_mode = p.fingerprint.verification_mode
+    new_fp.stealth_disable = list(p.fingerprint.stealth_disable)
+    new_fp.webrtc_mode = p.fingerprint.webrtc_mode
     p.fingerprint = new_fp
     try:
         updated = profile_manager.update_fingerprint_only(p.id, p.fingerprint, p.revision)
@@ -1613,36 +1619,66 @@ _token_rotate_lock = threading.Lock()
 _token_rotate_times: list = []
 
 
+def _mutate_api_token(request: Request, *, revoke: bool):
+    """Recheck authorization while holding the same lock as the mutation.
+
+    Middleware authorization may precede another process's revoke. The second
+    check prevents that stale request from recreating a token after revocation.
+    """
+    from antidetect.runtime_auth import (
+        api_token_lock, delete_api_token_hash, write_api_token_hash,
+    )
+
+    try:
+        with api_token_lock():
+            if not authorized(request):
+                raise HTTPException(status_code=401, detail="Chưa xác thực")
+            if revoke:
+                delete_api_token_hash()
+                return {"success": True, "message": "Đã thu hồi API token."}
+            now = time.time()
+            with _token_rotate_lock:
+                _token_rotate_times[:] = [t for t in _token_rotate_times if now - t < 60]
+                if len(_token_rotate_times) >= 5:
+                    raise HTTPException(
+                        status_code=429, detail="Quá nhiều lần tạo token trong 1 phút."
+                    )
+                _token_rotate_times.append(now)
+            import hashlib as _hashlib
+            token = secrets.token_urlsafe(32)
+            write_api_token_hash(_hashlib.sha256(token.encode("utf-8")).hexdigest())
+            return {
+                "success": True,
+                "token": token,
+                "note": "Token chỉ hiển thị MỘT lần này. Lưu ngay vào chỗ an toàn; làm mất chỉ có thể rotate token mới.",
+            }
+    except HTTPException:
+        raise
+    except (OSError, RuntimeError):
+        # Do not expose the DPAPI path, OS error, or any capability in errors.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "TOKEN_STORAGE_UNAVAILABLE",
+                "message": "Không cập nhật được API token. Hãy thử lại sau.",
+            },
+        ) from None
+
+
 @app.post("/api/auth/token/rotate")
 async def rotate_api_token(request: Request):
-    """Tạo API token dài hạn mới (token cũ vô hiệu ngay). Trả plaintext 1 lần."""
+    """Create a persistent API token, returning plaintext only after persistence."""
     if not authorized(request):
-        raise HTTPException(status_code=401, detail='Chưa xác thực')
-    now = time.time()
-    with _token_rotate_lock:
-        _token_rotate_times[:] = [t for t in _token_rotate_times if now - t < 60]
-        if len(_token_rotate_times) >= 5:
-            raise HTTPException(status_code=429, detail='Quá nhiều lần tạo token trong 1 phút.')
-        _token_rotate_times.append(now)
-    import hashlib as _hashlib
-    token = secrets.token_urlsafe(32)
-    from antidetect.runtime_auth import write_api_token_hash
-    await asyncio.to_thread(
-        write_api_token_hash,
-        _hashlib.sha256(token.encode('utf-8')).hexdigest(),
-    )
-    return {"success": True, "token": token,
-            "note": "Token chỉ hiển thị MỘT lần này. Lưu ngay vào chỗ an toàn; làm mất chỉ có thể rotate token mới."}
+        raise HTTPException(status_code=401, detail="Chưa xác thực")
+    return await asyncio.to_thread(_mutate_api_token, request, revoke=False)
 
 
 @app.delete("/api/auth/token")
 async def revoke_api_token(request: Request):
-    """Thu hồi API token dài hạn."""
+    """Revoke the persistent API token; report storage failures accurately."""
     if not authorized(request):
-        raise HTTPException(status_code=401, detail='Chưa xác thực')
-    from antidetect.runtime_auth import delete_api_token_hash
-    await asyncio.to_thread(delete_api_token_hash)
-    return {"success": True, "message": "Đã thu hồi API token."}
+        raise HTTPException(status_code=401, detail="Chưa xác thực")
+    return await asyncio.to_thread(_mutate_api_token, request, revoke=True)
 
 
 # --- Đợt C: Lịch tự động ---
@@ -2177,7 +2213,7 @@ async def delete_facebook_pages(profile_id: str):
 
 @app.post("/api/profiles/import")
 async def import_profiles(req: ImportProfilesRequest):
-    """Import profiles từ export JSON. Id mới tự sinh; password proxy phải nhập lại."""
+    """Import metadata only; executable selection and proxy secrets stay local."""
     entries = req.profiles or []
     if not entries:
         raise HTTPException(status_code=400, detail="Không có profile nào trong payload (profiles: []).")

@@ -1,6 +1,6 @@
 import uuid
 import time
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Literal
 from pydantic import BaseModel, Field, field_validator, field_serializer, SerializationInfo
 
 REDACTED_SECRET = "********"
@@ -153,6 +153,9 @@ class ProxyConfig(BaseModel):
 
 
 class FingerprintConfig(BaseModel):
+    # Missing revision means legacy. New generated identities explicitly opt in.
+    fingerprint_algorithm_version: Literal[1, 2] = 1
+    verification_mode: Literal["strict", "compatibility"] = "compatibility"
     os: str = "windows"  # windows, macos, linux
     browser_brand: str = "chrome"  # chrome, edge, chromium
     user_agent: str = (

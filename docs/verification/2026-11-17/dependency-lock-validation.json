@@ -1,0 +1,53 @@
+{
+  "checkpoint": "2026-11-17 frozen working tree; final local regression passed; commit/remote CI pending",
+  "platform": "Windows x64",
+  "python": "CPython 3.10.11",
+  "source_index": "https://pypi.org/simple",
+  "constraints_pins_changed": false,
+  "clean_install": {
+    "runtime": {
+      "packages": 30,
+      "require_hashes": true,
+      "offline_wheels": true,
+      "pip_check": "passed",
+      "smoke_imports": "passed"
+    },
+    "dev": {
+      "packages": 45,
+      "require_hashes": true,
+      "offline_wheels": true,
+      "pip_check": "passed",
+      "smoke_imports": "passed"
+    },
+    "audit": {
+      "packages": 29,
+      "require_hashes": true,
+      "offline_wheels": true,
+      "pip_check": "passed",
+      "smoke_imports": "passed"
+    }
+  },
+  "locked_environment_targeted_tests": {
+    "passed": 162,
+    "seconds": 9.46,
+    "scope": "auth/import/transport/soak-helper/Node UI slice; not final full suite"
+  },
+  "advisory": {
+    "tool": "pip-audit==2.10.1",
+    "scope": "30 packages in dedicated runtime target; excludes installer/scanner environments",
+    "result": "No known vulnerabilities found",
+    "exit_code": 0,
+    "vulnerabilities": 0,
+    "inventory_packages": 30
+  },
+  "locks": {
+    "requirements-win-py310.lock.txt": "feddac628a0b95f28d14941d7d14690621b349d7a337739c59fb48d9f5762061",
+    "requirements-dev-win-py310.lock.txt": "0c57223d63a08f742d57781c32357cd2969181e3074e237f26ba12a89e81584d",
+    "requirements-audit-win-py310.lock.txt": "127c5302040020c1613807185a724ba3e9dcd6e65dd9b63ba821bc3c490392ff"
+  },
+  "limitations": [
+    "Hash checks prove reviewed wheel bytes, not upstream package trust or absence of future advisories.",
+    "Only CPython 3.10 Windows x64 is locked.",
+    "Final full regression is recorded in AUDIT_IMPLEMENTATION_STATUS_2026-11-17.md; remote GitHub CI is pending."
+  ]
+}

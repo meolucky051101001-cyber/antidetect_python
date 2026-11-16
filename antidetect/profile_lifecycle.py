@@ -34,6 +34,14 @@ def stop_and_delete(manager: Any, launcher: Any, profile_id: str) -> Dict[str, A
                     return {"success": False, "code": "STOP_FAILED", "error": "Chưa xác minh được profile đã dừng; dữ liệu được giữ nguyên."}
             # Every cooperating launch uses this same lock and must reload
             # metadata after acquiring it.
+            directory_in_use = getattr(launcher, "profile_data_in_use", None)
+            if callable(directory_in_use):
+                try:
+                    busy = directory_in_use(profile_id)
+                except Exception:
+                    return {"success": False, "code": "PROCESS_STATE_UNVERIFIED", "error": "Chưa xác minh được thư mục profile đã rảnh; dữ liệu được giữ nguyên."}
+                if busy:
+                    return {"success": False, "code": "PROFILE_BUSY", "error": "Thư mục profile vẫn đang được trình duyệt sử dụng."}
             deleted = manager.delete_profile(profile_id)
             return {
                 "success": bool(deleted),

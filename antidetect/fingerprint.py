@@ -903,6 +903,8 @@ def generate_fingerprint(
     languages = [l for l in dict.fromkeys(languages) if l]
 
     generated = FingerprintConfig(
+        fingerprint_algorithm_version=2,
+        verification_mode="strict",
         os=target_os,
         browser_brand=browser_brand,
         user_agent=ua,

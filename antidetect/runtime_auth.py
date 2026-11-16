@@ -92,11 +92,19 @@ def delete_runtime(*, expected_instance_id=None):
 API_TOKEN_FILE = _DATA_DIR / 'api_token.dpapi'
 
 
+def api_token_lock():
+    """Serialize authentication-token mutations across app/CLI processes."""
+    from .profile_locks import ProfileLocks
+
+    return ProfileLocks(API_TOKEN_FILE.parent, suffix=".auth").acquire("api-token")
+
+
 def write_api_token_hash(token_hash):
-    """Lưu SHA-256 hex của API token dài hạn (DPAPI). Plaintext không lưu."""
-    _atomic_write_bytes(
-        API_TOKEN_FILE, _crypt(json.dumps({"sha256": token_hash}).encode(), True)
-    )
+    """Persist only the API token hash; callers may hold api_token_lock."""
+    with api_token_lock():
+        _atomic_write_bytes(
+            API_TOKEN_FILE, _crypt(json.dumps({"sha256": token_hash}).encode(), True)
+        )
 
 
 def read_api_token_hash():
@@ -109,7 +117,9 @@ def read_api_token_hash():
 
 
 def delete_api_token_hash():
-    try:
-        API_TOKEN_FILE.unlink()
-    except OSError:
-        pass
+    """Idempotently revoke; storage failures must reach the caller."""
+    with api_token_lock():
+        try:
+            API_TOKEN_FILE.unlink()
+        except FileNotFoundError:
+            pass

@@ -27,7 +27,8 @@ import time
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import Request
+from antidetect.loopback import open_loopback
 
 import pytest
 
@@ -38,7 +39,6 @@ pytestmark = pytest.mark.skipif(
 
 ROOT = Path(__file__).resolve().parent
 IDENTITY_FIELDS = ("launch_id", "owner_instance", "pid", "user_data_dir")
-_LOOPBACK_OPENER = build_opener(ProxyHandler({}))
 CLEANUP_COUNT_SCOPE = (
     "Chrome/Edge processes whose --user-data-dir is inside the fixture TEMP root; "
     "excludes unrelated Chrome sessions and standalone native-brand-probe directories."
@@ -69,7 +69,7 @@ def _http(base, method, path, token=None, payload=None, timeout=60):
     request = Request(base + path, data=body, headers=headers, method=method)
     try:
         # A fixture bearer must never be sent through env or Windows proxies.
-        with _LOOPBACK_OPENER.open(request, timeout=timeout) as response:
+        with open_loopback(request, timeout=timeout) as response:
             data = response.read()
             return response.status, json.loads(data) if data else {}
     except HTTPError as exc:

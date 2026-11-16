@@ -170,6 +170,61 @@ def test_stale_edit_shows_conflict_and_preserves_newer_data(dashboard, live_serv
     record_property("observed", "Actual concurrent API write; stale UI PUT 409; warning visible; newer metadata and reopened edit preserved")
 
 
+def test_fingerprint_revision_and_verification_controls_preserve_then_migrate(
+    dashboard, live_server, record_property,
+):
+    page = dashboard
+    created = _create_profile(page, live_server, "UI explicit fingerprint migration")
+    assert created["fingerprint"]["fingerprint_algorithm_version"] == 2
+    assert created["fingerprint"]["verification_mode"] == "strict"
+    profile_id = created["id"]
+    fingerprint = dict(created["fingerprint"], fingerprint_algorithm_version=1,
+                       verification_mode="compatibility", canvas_noise_seed=0,
+                       audio_noise_seed=7654321)
+    legacy = _api(page, live_server, "PUT", f"/api/profiles/{profile_id}", {
+        "fingerprint": fingerprint, "expected_revision": created["revision"],
+    })
+    page.click("button[onclick='refreshProfiles()']")
+    page.wait_for_function("""([id, revision]) => currentProfiles.some(
+        p => p.id === id && p.revision === revision)""", arg=[profile_id, legacy["revision"]])
+
+    def edit_and_save(algorithm, mode, expected_revision, *, migrate=False):
+        _profile_row(page, profile_id).locator("button[onclick^='openEditModal']").click()
+        page.wait_for_selector("#editModal:not(.hidden)")
+        assert page.input_value("#edit-fp-algorithm") == "1"
+        assert page.input_value("#edit-fp-verification") == "compatibility"
+        if migrate:
+            page.select_option("#edit-fp-algorithm", algorithm)
+            page.select_option("#edit-fp-verification", mode)
+        else:
+            page.fill("#edit-notes", "An unrelated note must preserve identity settings.")
+        with page.expect_response(
+            lambda r: r.url.endswith(f"/api/profiles/{profile_id}") and r.request.method == "PUT"
+        ) as response:
+            page.click("#editModal button[onclick='submitSaveProfileEdit()']")
+        assert response.value.status == 200, response.value.text()
+        payload = response.value.request.post_data_json
+        assert payload["expected_revision"] == expected_revision
+        assert payload["fingerprint"]["fingerprint_algorithm_version"] == int(algorithm)
+        assert payload["fingerprint"]["verification_mode"] == mode
+        assert payload["fingerprint"]["canvas_noise_seed"] == 0
+        assert payload["fingerprint"]["audio_noise_seed"] == 7654321
+        fresh = _api(page, live_server, "GET", f"/api/profiles/{profile_id}")
+        page.wait_for_selector("#editModal", state="hidden")
+        page.wait_for_function("""([id, revision]) => currentProfiles.some(
+            p => p.id === id && p.revision === revision)""", arg=[profile_id, fresh["revision"]])
+        return fresh
+
+    preserved = edit_and_save("1", "compatibility", legacy["revision"])
+    migrated = edit_and_save("2", "strict", preserved["revision"], migrate=True)
+    stored = next(p for p in _metadata(live_server) if p["id"] == profile_id)
+    assert stored["fingerprint"] == migrated["fingerprint"]
+    assert migrated["fingerprint"]["fingerprint_algorithm_version"] == 2
+    assert migrated["fingerprint"]["verification_mode"] == "strict"
+    assert migrated["status"] == "stopped"
+    record_property("observed", "New profile v2/strict; unrelated edit preserves legacy mode and zero canvas seed; explicit migration preserves seeds and uses revision CAS")
+
+
 def _create_due_schedule(page, name, action, profile_id):
     page.fill("#sched-time", datetime.now().strftime("%H:%M"))
     page.fill("#sched-name", name)
