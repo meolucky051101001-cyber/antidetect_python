@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 import multiprocessing
 import threading
-import time
 
 import pytest
 
@@ -140,7 +139,7 @@ def test_enqueue_dedup_is_atomic_across_processes(tmp_path):
     assert all(process.exitcode == 0 for process in processes)
 
 
-def make_manager(tmp_path, *, launched_now=False):
+def make_manager(tmp_path, *, launched_now=False, heartbeat_interval=5.0, lease_seconds=90.0):
     profile = SimpleNamespace(id="p", name="Profile", facebook_pages=[])
     manager = MagicMock()
     manager.list_profiles.return_value = [profile]
@@ -154,7 +153,12 @@ def make_manager(tmp_path, *, launched_now=False):
     launcher.stop.return_value = {"success": True}
     launcher.fetch_facebook_pages.return_value = {"discovery_status": "complete", "login_status": True, "pages": [], "completion_reason": "END_OF_LIST"}
     repo = FanpageRepository(str(tmp_path / "jobs.db"))
-    jobs = FanpageSyncJobManager(repo=repo, profile_manager=manager, launcher=launcher, heartbeat_interval=.03, lease_seconds=.15)
+    # Outcome tests use the production lease budget so slow SQLite/CI startup
+    # cannot expire a job before its worker or heartbeat starts.
+    jobs = FanpageSyncJobManager(
+        repo=repo, profile_manager=manager, launcher=launcher,
+        heartbeat_interval=heartbeat_interval, lease_seconds=lease_seconds,
+    )
     return jobs, manager, launcher
 
 
@@ -169,9 +173,17 @@ def test_job_cleanup_uses_launch_ownership_and_generation(tmp_path, launched_now
         launcher.stop.assert_not_called()
 
 
-def test_slow_scan_heartbeat_and_remote_cancel_prevent_publish(tmp_path):
-    jobs, manager, launcher = make_manager(tmp_path)
-    entered, release = threading.Event(), threading.Event()
+def test_slow_scan_heartbeat_and_remote_cancel_prevent_publish(tmp_path, monkeypatch):
+    jobs, manager, launcher = make_manager(tmp_path, heartbeat_interval=.03)
+    entered, release, renewed = threading.Event(), threading.Event(), threading.Event()
+    renew_lease = jobs.repo.renew_job_lease
+
+    def observe_renewal(*args, **kwargs):
+        result = renew_lease(*args, **kwargs)
+        renewed.set()
+        return result
+
+    monkeypatch.setattr(jobs.repo, "renew_job_lease", observe_renewal)
     def scan(*_args):
         entered.set()
         assert release.wait(5)
@@ -180,8 +192,12 @@ def test_slow_scan_heartbeat_and_remote_cancel_prevent_publish(tmp_path):
     job, _ = jobs.enqueue_job(auto_start=True)
     try:
         assert entered.wait(3)
-        # Real heartbeat runs independently of the blocked network scan.
-        time.sleep(.22)
+        # Observe a real renewal while the scan stays blocked, without relying
+        # on a subsecond lease surviving a shared CI runner's disk latency.
+        renewed.clear()
+        assert renewed.wait(3)
+        current = jobs.repo.get_sync_job(job["id"])
+        assert current["lease_expires_at"] > job["lease_expires_at"]
         assert jobs.repo.recover_interrupted_jobs(current_owner_instance="B") == 0
         other_repo = FanpageRepository(jobs.repo.db_path)
         other_repo.request_job_cancel(job["id"])
