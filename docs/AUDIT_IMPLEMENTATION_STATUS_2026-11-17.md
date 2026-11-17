@@ -5,7 +5,7 @@
 - Worktree: `C:/Users/admin/.codex/worktrees/release-validation/Antidetect Python`.
 - Nhánh: `codex/audit-remediation-2026-11-17`; [draft PR #4](https://github.com/meolucky051101001-cyber/antidetect_python/pull/4), base `codex/release-validation-2026-11-15` của [PR #3](https://github.com/meolucky051101001-cyber/antidetect_python/pull/3). Không merge hoặc đổi base trong lượt này.
 - Dữ liệu kiểm thử: profile mới trong TEMP, credential giả, SQLite tổng hợp và localhost. Không đọc/in cookie, mở hoặc sao chép profile thật; không nghiệm thu Facebook hay migration production.
-- Source đang có thay đổi mới so với `cda73573baef6bf53021cbce2c5feb042a8b0eaa`. SHA ứng viên, source freeze, CI mới và manifest bằng chứng cuối **PENDING**. Regression trên môi trường Windows/Python 3.10 sạch, cài từ hash lock: **1063 passed, 7 skipped, 1 warning ZIP có chủ đích; coverage 78.74%, 174.06 s**. Ruff, compileall, dependency-lock check và pip check đạt. Các số test mục tiêu bên dưới là các lượt riêng có thể trùng nhau, không cộng thành tổng regression.
+- Source mới đang chốt sau `0624bbe429282a56489287f28536b846c427a32e`. Lượt full regression trên Windows/Python 3.10 từ hash lock: **1193 passed, 7 skipped, 1 warning ZIP có chủ đích; coverage 78.95%, 174.65 s**. Ruff, compileall, dependency-lock check và pip check đạt. CI run `44053925710` của `0624bbe` hiện có cả ba job xanh sau lần chạy lại browser; nguyên nhân lỗi browser lượt đầu chưa xác nhận, không coi lần đó là pass. Source mới cần CI đúng head và manifest freeze riêng. Các lượt test mục tiêu có thể trùng full regression, không cộng thành tổng.
 
 ## Đối chiếu triển khai
 
@@ -33,6 +33,17 @@
 - Runtime dependency inventory/SBOM: **30 packages, 0 known vulnerabilities** tại lần scan đó; hash locks runtime/dev/audit đã kiểm sạch.
 
 Đây là bằng chứng lịch sử cho source trước các thay đổi mới, không thay CI ứng viên. Lượt soak ngắn thành công trước đó dài **913.5 s**, 2 profile tổng hợp, 4 lifecycle, 3 copy, 300 canvas/worker executions, 0 lỗi/orphan và cleanup đạt. Runtime source là `a49a29a`; commit `cda7357` sau đó chỉ sửa lock tooling/extras/docs. Lượt soak `8ec670a` trước sửa stop đã thất bại và không được tính pass. Không cộng thời gian những source khác nhau để đạt M9.
+
+## Bản sửa chốt resource và evidence (development)
+
+- RAM dashboard chỉ đọc cmdline các browser và RSS của cây process khớp chính xác canonical user-data-dir. Cache theo toàn bộ mapping profile/thư mục, giữ khóa scan và giải phóng cache `psutil.process_iter` trong `finally`; không giữ handles của mọi process trên máy. Năm scan trực tiếp sau sửa tăng 2 handles thay vì khoảng 600 đã tái hiện trước đó.
+- Mỗi sample soak dùng một snapshot CIM chung cho mọi profile. Unknown/partial vẫn fail-closed; không chẩn đoán missing/orphan từ snapshot thiếu, không cộng healthy sample từ quan sát chưa hoàn tất. Destructive process checks vẫn giữ native handle/birth binding riêng.
+- Lần đầu WinVerifyTrust khởi tạo bộ xác minh chữ ký trên host đo riêng tăng 132 handles; bảy lần verify uncached tiếp theo không tăng. Bootstrap riêng chỉ dùng TEMP làm nóng trust offline trước baseline app-ready, không spawn browser; lưu PID/operation/browser attestation, cold-before-trust, warm-after-trust và raw cold-to-cooldown. Budget workload giữ nguyên **128 MB / 128 handles / 16 threads**; không đổi threshold để biến lượt fail thành pass.
+- Soak dùng monotonic cho deadline/elapsed/completion; UTC chỉ hiển thị. Mười fake-clock tests kiểm nhảy đồng hồ ±7 ngày cho 2h/24h.
+- Candidate validator kiểm đủ named boolean gates, exact integer counters, số hữu hạn, state-summary/PID/budget/delta nhất quán, cleanup từng restart và strict negative navigation. Thiếu hoặc malformed evidence không được tính pass.
+- Runtime/UI failures ghi log tail có giới hạn và lọc credential; không in Playwright session/header dump. Không thay gate/retry để che lỗi CI chưa tái hiện.
+- Soak development sau sửa: **338.6 s PASS**, 2 profile tổng hợp, 4 lifecycle, 3 copy, 126 canvas/worker executions, 0 errors/orphans; cleanup đạt. Baseline app-ready 358 → cooldown 423 handles (**+65**), RAM **+10.7 MB**, threads **+2**. Raw cold before trust/app imports 123 → cooldown 423 (**+300**) được công bố riêng; bao gồm trust initialization **+145** và startup. Không suy từ lượt ngắn này thành nghiệm thu 15 phút/2h/24h.
+- Reports ngoài Git: `%TEMP%/audit-final-resource-regression-20261117.log` và `%TEMP%/antidetect-warm-trust-soak-20261117-202904/results/soak_summary.json`. Browser/runtime/UI/canvas/network cùng source: **8 passed, 0 skipped, 218.82 s**, 4 warning record_property/JUnit không ảnh hưởng assertions; reports tại `%TEMP%/audit-resource-browser-20261117-205117/`. Sau bản chốt warmup evidence, riêng candidate validator **138 passed** và Ruff đạt. Candidate freeze/restore/matrix/preflight/long/overnight còn chờ kết quả thực.
 
 ## Phần còn chờ nghiệm thu
 

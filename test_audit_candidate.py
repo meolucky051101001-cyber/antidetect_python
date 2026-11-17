@@ -51,6 +51,17 @@ def matrix_report(spec):
                                                                   "final_health": {"state": "healthy"}}
                                                          for _ in range(4)]}
                                               for mode in ("unique", "authentic")}}}})
+    for scenario in scenarios:
+        evidence = scenario["evidence"]
+        evidence["scope_checks"] = {"canvas_realms": "passed", "strict_rejection": {
+            "success": False, "process_running": False, "navigation_allowed": False,
+            "forbidden_requests": 0, "cleanup_confirmed": True}}
+        evidence["cleanup"] = [{"mode": mode, "restart_index": index, "success": True}
+                               for mode in ("unique", "authentic") for index in range(4)]
+        for mode in ("unique", "authentic"):
+            for index, run in enumerate(evidence["modes"][mode]["runs"]):
+                run["restart_index"] = index
+                run["cleanup_attempts"] = [{"success": True}]
     spec["report"].write_text(json.dumps({"status": "passed", "exhaustive_gate": "passed",
                                           "installed_browser_gate": "passed",
                                           "plan": {"seeds": [0, 12345, 987654321], "reads": 10, "restarts": 3},
@@ -260,3 +271,227 @@ def test_resumed_state_never_becomes_a_pass_from_saved_stage_status(tmp_path, st
              "stages": {name: {"status": "passed" if name == "restore" else "not_run"} for name in candidate.STAGES}}
     assert state["complete"] is False
     assert any(item["status"] != "passed" for item in state["stages"].values())
+
+
+def complete_soak_report(tmp_path):
+    """Representative emitted soak state with real gate names and metrics."""
+    baseline = {"pid": 101, "rss_mb": 70, "handles": 40, "threads": 8}
+    budget = {"rss_mb_delta": 128, "handles_delta": 128, "threads_delta": 16}
+    baseline_scope = "application ready after offline trust warmup; before profile workload"
+    warmup = {"schema": 1, "pid": 101,
+              "browser": {"path": "C:/synthetic/chrome.exe", "sha256": "a" * 64,
+                          "version": "157.0.1.2", "publisher": "Google LLC"},
+              "cold_before_trust": {"pid": 101, "handles": 10},
+              "warm_after_trust": {"pid": 101, "handles": 30}, "trust_handles_delta": 20}
+    report = {
+        "passed": True, "completed_duration": True, "duration_seconds": 901,
+        "planned_hours": .25, "errors": 0, "orphan_processes": 0,
+        "stop_requested": False, "critical_reason": None,
+        "cleanup_checks": {name: True for name in (
+            "process_observation_available", "process_observation_complete",
+            "profile_browsers_exited", "dashboard_exited", "staging_empty")},
+        "workload_checks": {name: True for name in (
+            "profile_started", "healthy_active_sample", "tab", "lifecycle", "copy", "canvas_workers")},
+        "lifecycle_cycles": 2, "copy_cycles": 2, "samples": 60, "healthy_active_samples": 60,
+        "min_available_mb": 900,
+        "server_cooldown": {"passed": True, "baseline": baseline,
+                            "baseline_scope": baseline_scope, "trust_initialization": warmup,
+                            "cold_to_cooldown_handles_delta": 40,
+                            "cold_to_cooldown_scope": "raw process cold before trust/application imports vs final cooldown; "
+                            "includes documented trust initialization and application startup",
+                            "cooldown": {"pid": 101, "rss_mb": 80, "handles": 50, "threads": 10},
+                            "deltas": {"rss_mb": 10, "handles": 10, "threads": 2}, "budget": budget},
+    }
+    state = {"status": "completed", "target_profiles": 2, "min_active": 1,
+             "hours": .25, "min_lifecycle_cycles": 2, "min_copy_cycles": 2,
+             "server_actual_pid": 101, "resource_baseline": baseline,
+             "resource_baseline_scope": baseline_scope, "resource_trust_warmup": warmup,
+             "resource_budget": budget, "summary": report}
+    spec = {"name": "preflight", "report": tmp_path / "soak_summary.json",
+            "soak_state": tmp_path / "soak_state.json"}
+    write_soak_report(spec, report, state)
+    return spec, report, state
+
+
+def write_soak_report(spec, report, state):
+    spec["report"].write_text(json.dumps(report), encoding="utf-8")
+    spec["soak_state"].write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_complete_soak_state_and_summary_pass(tmp_path):
+    spec, _report, _state = complete_soak_report(tmp_path)
+    candidate.require_report(spec)
+
+
+@pytest.mark.parametrize("damage", ["missing_recorded", "missing_report", "mismatched_record", "cold_pid",
+                                    "warm_pid", "trust_pid", "cold_handles", "warm_handles", "trust_delta",
+                                    "cold_delta", "missing_baseline_scope", "state_scope", "cold_scope"])
+def test_soak_rejects_missing_or_inconsistent_trust_warmup(tmp_path, damage):
+    spec, report, state = complete_soak_report(tmp_path)
+    check = report["server_cooldown"]
+    warmup = state["resource_trust_warmup"]
+    if damage == "missing_recorded":
+        del state["resource_trust_warmup"]
+    elif damage == "missing_report":
+        del check["trust_initialization"]
+    elif damage == "mismatched_record":
+        check["trust_initialization"] = {**warmup, "trust_handles_delta": 21}
+    elif damage == "cold_pid":
+        warmup["cold_before_trust"]["pid"] = 102
+    elif damage == "warm_pid":
+        warmup["warm_after_trust"]["pid"] = 102
+    elif damage == "trust_pid":
+        warmup["pid"] = 102
+    elif damage == "cold_handles":
+        warmup["cold_before_trust"]["handles"] = False
+    elif damage == "warm_handles":
+        warmup["warm_after_trust"]["handles"] = -1
+    elif damage == "trust_delta":
+        warmup["trust_handles_delta"] = 21
+    elif damage == "cold_delta":
+        check["cold_to_cooldown_handles_delta"] = 41
+    elif damage == "missing_baseline_scope":
+        del check["baseline_scope"]
+    elif damage == "state_scope":
+        state["resource_baseline_scope"] = "undisclosed cold baseline"
+    else:
+        check["cold_to_cooldown_scope"] = "undisclosed cold delta"
+    write_soak_report(spec, report, state)
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)
+
+
+@pytest.mark.parametrize("field", ["path", "sha256", "version", "publisher"])
+@pytest.mark.parametrize("value", [None, "", " ", True])
+def test_soak_requires_complete_trust_attestation(tmp_path, field, value):
+    spec, report, state = complete_soak_report(tmp_path)
+    state["resource_trust_warmup"]["browser"][field] = value
+    write_soak_report(spec, report, state)
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)
+
+
+@pytest.mark.parametrize("field,value", [("sha256", "z" * 64), ("sha256", "a" * 63),
+                                        ("publisher", "Synthetic Publisher")])
+def test_soak_rejects_invalid_trust_attestation_identity(tmp_path, field, value):
+    spec, report, state = complete_soak_report(tmp_path)
+    state["resource_trust_warmup"]["browser"][field] = value
+    write_soak_report(spec, report, state)
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)
+
+
+@pytest.mark.parametrize("field", ["lifecycle_cycles", "copy_cycles", "samples", "healthy_active_samples",
+                                    "errors", "orphan_processes"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True, False, "2", 2.0, -1])
+def test_soak_rejects_noninteger_or_negative_counts(tmp_path, field, value):
+    spec, report, state = complete_soak_report(tmp_path)
+    report[field] = value
+    write_soak_report(spec, report, state)
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)
+
+
+@pytest.mark.parametrize("damage", ["missing_samples", "no_samples", "missing_healthy", "no_healthy"])
+def test_soak_requires_observed_healthy_samples(tmp_path, damage):
+    spec, report, state = complete_soak_report(tmp_path)
+    if damage == "missing_samples":
+        del report["samples"]
+    elif damage == "no_samples":
+        report["samples"] = 0
+    elif damage == "missing_healthy":
+        del report["healthy_active_samples"]
+    else:
+        report["healthy_active_samples"] = 0
+    write_soak_report(spec, report, state)
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)
+
+
+@pytest.mark.parametrize("group,key", [
+    ("cleanup_checks", name) for name in (
+        "process_observation_available", "process_observation_complete",
+        "profile_browsers_exited", "dashboard_exited", "staging_empty")
+] + [("workload_checks", name) for name in (
+    "profile_started", "healthy_active_sample", "tab", "lifecycle", "copy", "canvas_workers")])
+def test_soak_rejects_missing_named_observation(tmp_path, group, key):
+    spec, report, state = complete_soak_report(tmp_path)
+    del report[group][key]
+    write_soak_report(spec, report, state)
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)
+
+
+@pytest.mark.parametrize("group", ["cleanup_checks", "workload_checks"])
+@pytest.mark.parametrize("value", [None, 1, "passed", {}, []])
+def test_soak_rejects_unknown_or_nonboolean_observations(tmp_path, group, value):
+    spec, report, state = complete_soak_report(tmp_path)
+    report[group][next(iter(report[group]))] = value
+    write_soak_report(spec, report, state)
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)
+
+
+def test_soak_rejects_unrelated_gate_mappings(tmp_path):
+    spec, report, state = complete_soak_report(tmp_path)
+    report["cleanup_checks"] = {"unrelated": True}
+    report["workload_checks"] = {"unrelated": None}
+    write_soak_report(spec, report, state)
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)
+
+
+@pytest.mark.parametrize("damage", ["in_progress", "different_summary", "missing_baseline", "forged_budget", "forged_delta"])
+def test_soak_rejects_incomplete_or_inconsistent_resource_evidence(tmp_path, damage):
+    spec, report, state = complete_soak_report(tmp_path)
+    if damage == "in_progress":
+        state["status"] = "running"
+    elif damage == "different_summary":
+        state["summary"] = {}
+    elif damage == "missing_baseline":
+        del report["server_cooldown"]["baseline"]
+    elif damage == "forged_budget":
+        report["server_cooldown"]["budget"]["handles_delta"] = 900
+    else:
+        report["server_cooldown"]["deltas"]["handles"] = 1
+    write_soak_report(spec, report, state)
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)
+
+
+@pytest.mark.parametrize("field", ["duration_seconds", "min_available_mb"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True])
+def test_soak_rejects_nonfinite_or_boolean_measurements(tmp_path, field, value):
+    spec, report, state = complete_soak_report(tmp_path)
+    report[field] = value
+    write_soak_report(spec, report, state)
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)
+
+
+@pytest.mark.parametrize("damage", ["missing_cleanup", "duplicate_cleanup", "failed_cleanup", "missing_strict",
+                                    "forbidden_navigation", "unconfirmed_cleanup", "unfinished_run_cleanup"])
+def test_matrix_rejects_missing_or_failed_cleanup_and_strict_evidence(tmp_path, damage):
+    browser = browser_fixture(tmp_path)
+    spec = {"name": "fingerprint", "report": tmp_path / "fingerprint.json", "candidate_commit": "fixture",
+            "browser_inventory": [{"name": "chrome", "sha256": candidate.sha256(browser), "status": "available"}]}
+    matrix_report(spec)
+    report = json.loads(spec["report"].read_text(encoding="utf-8"))
+    evidence = report["scenarios"][0]["evidence"]
+    if damage == "missing_cleanup":
+        del evidence["cleanup"]
+    elif damage == "duplicate_cleanup":
+        evidence["cleanup"][-1] = evidence["cleanup"][0]
+    elif damage == "failed_cleanup":
+        evidence["cleanup"][0]["success"] = False
+    elif damage == "missing_strict":
+        del evidence["scope_checks"]["strict_rejection"]
+    elif damage == "forbidden_navigation":
+        evidence["scope_checks"]["strict_rejection"]["forbidden_requests"] = 1
+    elif damage == "unconfirmed_cleanup":
+        evidence["scope_checks"]["strict_rejection"]["cleanup_confirmed"] = None
+    else:
+        evidence["modes"]["unique"]["runs"][0]["cleanup_attempts"] = [{"success": False}]
+    spec["report"].write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(candidate.CandidateError, match="missing, incomplete"):
+        candidate.require_report(spec)

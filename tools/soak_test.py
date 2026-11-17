@@ -36,7 +36,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 from antidetect.loopback import open_loopback
-from antidetect.process_identity import browser_pids_using_dir
+from antidetect.process_identity import browser_pids_using_dirs
 REAL_DATA_DIR = os.path.realpath(os.path.join(BASE_DIR, "data"))
 STATE_FILENAME = "soak_state.json"
 EVENTS_FILENAME = "soak_events.jsonl"
@@ -247,8 +247,9 @@ def _chrome_processes(dirs):
     if psutil is None:
         return {}
     result = {}
+    inventory = browser_pids_using_dirs(dirs)
     for profile_id, directory in dirs.items():
-        pids = browser_pids_using_dir(directory)
+        pids = inventory.get(profile_id)
         entry = {"pids": [], "rss_mb": 0.0, "cpu_percent": None,
                  "observation_complete": pids is not None,
                  "rss_scope": "summed matching processes and descendants; shared pages may be counted twice"}
@@ -454,6 +455,9 @@ class SoakRunner:
         self._started_ts = time.time()
         self._deadline_ts = self._started_ts + self.hours * 3600
         self._started_mono = time.monotonic()
+        # Wall time is display evidence only; clock corrections cannot shorten
+        # or extend the acceptance workload or its measured duration.
+        self._deadline_mono = self._started_mono + self.hours * 3600
         self.state = {
             "schema": 1,
             "status": "starting",
@@ -576,8 +580,12 @@ class SoakRunner:
             os.path.join(self.results_dir, "server.log"), "ab", buffering=0
         )
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        warmup_operation = str(uuid.uuid4())
+        warmup_path = os.path.join(self.results_dir, "trust-warmup.json")
         self.server = subprocess.Popen(
-            [sys.executable, os.path.join(BASE_DIR, "run.py"), f"--port={self.port}"],
+            [sys.executable, os.path.join(BASE_DIR, "tools", "soak_server.py"),
+             "--port", str(self.port), "--data-dir", self.data_dir,
+             "--report", warmup_path, "--operation-id", warmup_operation],
             cwd=BASE_DIR,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -603,12 +611,40 @@ class SoakRunner:
                 actual = descendants.get(server_info.get("pid"))
                 if actual is None or server_info.get("instance_id") != body.get("instance_id"):
                     raise SoakFailure("Không xác minh được process server để đo tài nguyên.")
+                try:
+                    with open(warmup_path, encoding="utf-8") as fh:
+                        warmup = json.load(fh)
+                    cold, warm = warmup["cold_before_trust"], warmup["warm_after_trust"]
+                    attested = warmup["browser"]
+                    configured_browser = env.get("ANTIDETECT_BROWSER_PATH")
+                    valid = (
+                        warmup.get("schema") == 1 and warmup.get("operation_id") == warmup_operation
+                        and warmup.get("pid") == actual.pid
+                        and os.path.normcase(os.path.realpath(warmup.get("data_dir", "")))
+                        == os.path.normcase(os.path.realpath(self.data_dir))
+                        and all(sample.get("pid") == actual.pid
+                                and type(sample.get("handles")) is int and sample["handles"] >= 0
+                                for sample in (cold, warm))
+                        and warmup.get("trust_handles_delta") == warm["handles"] - cold["handles"]
+                        and len(attested.get("sha256", "")) == 64
+                        and all(value in "0123456789abcdefABCDEF" for value in attested["sha256"])
+                        and attested.get("publisher") in ("Google LLC", "Microsoft Corporation")
+                        and bool(attested.get("version")) and bool(attested.get("path"))
+                        and (not configured_browser or os.path.normcase(os.path.realpath(configured_browser))
+                             == os.path.normcase(os.path.realpath(attested["path"])))
+                    )
+                    if not valid:
+                        raise ValueError("warmup identity mismatch")
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                    raise SoakFailure("Không xác minh được cold/warm trust evidence của server fixture.") from error
+                self.state["resource_trust_warmup"] = warmup
                 self._server_observer = actual
                 self._server_baseline = _process_metrics(actual)
                 if not self._server_baseline:
                     raise SoakFailure("Không đo được tài nguyên server baseline.")
                 self.state["server_actual_pid"] = actual.pid
                 self.state["resource_baseline"] = self._server_baseline
+                self.state["resource_baseline_scope"] = "application ready after offline trust warmup; before profile workload"
                 self.state["resource_budget"] = {"rss_mb_delta": 128, "handles_delta": 128, "threads_delta": 16,
                                                  "scope": "idle server before profiles vs after browser cleanup; not Chrome peak leak proof"}
                 self._event("server_ready", pid=self.server.pid, port=self.port)
@@ -817,16 +853,18 @@ class SoakRunner:
                 running += 1
             if health in ("degraded", "recovery_required"):
                 degraded += 1
-            pids = chrome.get(profile["id"], {}).get("pids", [])
+            observation = chrome.get(profile["id"], {})
+            pids = observation.get("pids", [])
+            observation_complete = observation.get("observation_complete") is True
             if profile["active"] and profile.get("pid"):
                 _hide_pid(profile["pid"])
-            if profile["active"] and not pids:
+            if observation_complete and profile["active"] and not pids:
                 self._error(
                     "missing_chrome",
                     f"{profile['name']}: active nhưng không thấy process",
                     critical=True,
                 )
-            if not profile["active"] and pids:
+            if observation_complete and not profile["active"] and pids:
                 self._error(
                     "orphan_chrome",
                     f"{profile['name']}: không active nhưng còn {len(pids)} process",
@@ -841,7 +879,9 @@ class SoakRunner:
         server_metrics = _process_metrics(self._server_observer)
         if self._server_observer is not None and server_metrics is None:
             self._error("server_metrics", "Bound server process measurement unavailable.", critical=True)
-        if any(entry.get("observation_complete") is not True for entry in chrome.values()):
+        observation_complete = (set(chrome) == set(self._chrome_map()) and all(
+            entry.get("observation_complete") is True for entry in chrome.values()))
+        if not observation_complete:
             self._error("process_observation", "Profile process scan incomplete; cannot certify resources or idle.", critical=True)
         chrome_total = sum(entry["rss_mb"] for entry in chrome.values())
         chrome_count = sum(len(entry["pids"]) for entry in chrome.values())
@@ -883,7 +923,7 @@ class SoakRunner:
                     self._error("canvas_worker_stalled", "No recent contract report: " + ", ".join(stale), critical=True)
         sample = {
             "at": _now_iso(),
-            "elapsed_seconds": round(time.time() - self._started_ts, 1),
+            "elapsed_seconds": round(time.monotonic() - self._started_mono, 1),
             "health_status": health_status,
             "profiles_status": list_status,
             "api_latency_ms": {
@@ -913,6 +953,7 @@ class SoakRunner:
             and running >= minimum_running
             and cdp_states.get("healthy", 0) >= minimum_running
             and degraded == 0
+            and observation_complete
         ):
             self._healthy_active_samples += 1
         self._sample_count += 1
@@ -1193,9 +1234,9 @@ class SoakRunner:
             self._check_stop_requested()
             if self.stop_requested or self.critical:
                 break
-            if time.time() >= self._deadline_ts:
-                break
             now = time.monotonic()
+            if now >= self._deadline_mono:
+                break
             if now >= next_sample:
                 self._sample()
                 next_sample = max(next_sample + self.args.sample_interval, now + 1)
@@ -1212,7 +1253,7 @@ class SoakRunner:
 
     def _finalize(self):
         completed = (
-            time.time() >= self._deadline_ts
+            time.monotonic() >= self._deadline_mono
             and not self.stop_requested
             and not self.critical
         )
@@ -1226,8 +1267,18 @@ class SoakRunner:
             # Let disconnected CDP tasks settle after the same empty workload.
             time.sleep(5)
             cooldown = _process_metrics(self._server_observer)
+            trust_warmup = self.state.get("resource_trust_warmup")
             resource_check = {"baseline": self._server_baseline, "cooldown": cooldown,
+                              "baseline_scope": self.state.get("resource_baseline_scope"),
+                              "trust_initialization": trust_warmup,
                               "budget": self.state["resource_budget"], "passed": False}
+            if cooldown and trust_warmup:
+                resource_check["cold_to_cooldown_handles_delta"] = (
+                    cooldown["handles"] - trust_warmup["cold_before_trust"]["handles"]
+                    if type(cooldown.get("handles")) is int else None)
+                resource_check["cold_to_cooldown_scope"] = (
+                    "raw process cold before trust/application imports vs final cooldown; "
+                    "includes documented trust initialization and application startup")
             if cooldown:
                 deltas = {key: cooldown[key] - self._server_baseline[key]
                           for key in ("rss_mb", "handles", "threads")
@@ -1296,7 +1347,7 @@ class SoakRunner:
         artifacts = self._artifact_counts()
         latencies = sorted(self._api_latencies)
         p95 = latencies[int(len(latencies) * 0.95)] if latencies else None
-        duration = time.time() - self._started_ts
+        duration = time.monotonic() - self._started_mono
         planned_seconds = self.hours * 3600
         required_exercises = {
             "tab": planned_seconds > self.args.tab_interval,

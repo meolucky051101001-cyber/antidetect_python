@@ -142,6 +142,7 @@ def test_tab_cycle_records_error_code_after_retry_fails(runner, monkeypatch):
 def finished_runner(runner, monkeypatch):
     runner.hours = 24.0
     runner._deadline_ts = time.time() - 1
+    runner._deadline_mono = time.monotonic() - 1
     runner.profiles[0].update(active=False, starts=2)
     runner._sample_count = 10
     runner._healthy_active_samples = 10
@@ -240,6 +241,22 @@ def test_samples_require_verified_browser_health(runner, monkeypatch, health, ex
 
     assert runner.state["counters"]["samples"] == 1
     assert runner.state["counters"]["healthy_active_samples"] == expected
+
+
+@pytest.mark.parametrize("observation", [None, {"pids": [], "rss_mb": 0.0, "observation_complete": False}])
+def test_unknown_sample_never_claims_browser_absent_or_health_verified(runner, monkeypatch, observation):
+    def fake_http(_base, _method, path, **_kwargs):
+        if path == "/health":
+            return _response(200, {"application": "antidetect-python"})
+        return _response(200, [{"id": "profile-1", "status": "running", "cdp_health": {"state": "healthy"}}])
+
+    monkeypatch.setattr(soak, "_http", fake_http)
+    monkeypatch.setattr(soak, "_chrome_processes", lambda *_a: {} if observation is None else {"profile-1": observation})
+    monkeypatch.setattr(runner, "_available_mb", lambda: 2000)
+    runner._sample()
+    assert runner.critical
+    assert [error["scope"] for error in runner.errors] == ["process_observation"]
+    assert runner.state["counters"]["healthy_active_samples"] == 0
 
 
 def _contract_report(realm="page", profile_id="profile-1"):
@@ -445,7 +462,7 @@ def test_soak_cooldown_requires_predeclared_server_budget(finished_runner, monke
 
 
 def test_unknown_directory_scan_cannot_confirm_profile_idle(runner, monkeypatch):
-    monkeypatch.setattr(soak, "browser_pids_using_dir", lambda directory: None)
+    monkeypatch.setattr(soak, "browser_pids_using_dirs", lambda directories: {key: None for key in directories})
     observation = soak._chrome_processes({"profile-1": "synthetic-directory"})["profile-1"]
     assert observation["observation_complete"] is False
     assert observation["pids"] == []
@@ -465,7 +482,7 @@ def test_partial_directory_scan_prevents_soak_acceptance(finished_runner, monkey
 @pytest.mark.parametrize("boundary", ["process", "children", "memory"])
 def test_browser_resource_access_denied_keeps_observation_incomplete(monkeypatch, boundary):
     from types import SimpleNamespace
-    monkeypatch.setattr(soak, "browser_pids_using_dir", lambda directory: {11})
+    monkeypatch.setattr(soak, "browser_pids_using_dirs", lambda directories: {key: {11} for key in directories})
 
     def denied(*args, **kwargs):
         raise soak.psutil.AccessDenied(pid=11)
@@ -480,7 +497,7 @@ def test_browser_resource_access_denied_keeps_observation_incomplete(monkeypatch
 
 def test_browser_rss_includes_descendants_once_and_omits_unmeasured_cpu(monkeypatch):
     from types import SimpleNamespace
-    monkeypatch.setattr(soak, "browser_pids_using_dir", lambda directory: {11, 12})
+    monkeypatch.setattr(soak, "browser_pids_using_dirs", lambda directories: {key: {11, 12} for key in directories})
     child = SimpleNamespace(pid=12, is_running=lambda: True,
                             children=lambda **kwargs: [], memory_info=lambda: SimpleNamespace(rss=2 * 1048576))
     parent = SimpleNamespace(pid=11, is_running=lambda: True,

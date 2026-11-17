@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from tools.live_test_diagnostics import server_failure_diagnostics
 
 if os.name != "nt" or os.environ.get("ANTIDETECT_RUN_UI_SMOKE") != "1":
     pytest.skip(
@@ -60,7 +61,17 @@ def dashboard(release_browser, live_server, record_property):
 
 
 def _api(page, server, method, path, data=None):
-    response = page.request.fetch(server.base + path, method=method, data=data)
+    try:
+        response = page.request.fetch(server.base + path, method=method, data=data)
+    except Exception:
+        # Do not re-emit Playwright's request dump: it includes session cookies.
+        diagnostics = server_failure_diagnostics(
+            server.proc, (("child stdout/stderr", server.log_path),
+                          ("application log", Path(server.data_dir) / "app.log")),
+            secrets=(server.token,),
+        )
+        pytest.fail(f"Fixture HTTP transport failed for {method} {path.split('?', 1)[0]}.\n" + diagnostics,
+                    pytrace=False)
     assert response.ok, f"{method} {path}: HTTP {response.status}: {response.text()}"
     return response.json()
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -190,6 +191,65 @@ def stage_spec(name, repo, output, options):
             "soak_state": directory / "results/soak_state.json" if name in STAGES[2:] else None}
 
 
+
+def finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def integer_count(value, minimum=0):
+    return type(value) is int and value >= minimum
+
+
+def required_true_checks(value, names):
+    return (isinstance(value, dict) and set(names) <= value.keys()
+            and all(result is True for result in value.values()))
+
+
+def complete_cooldown(report, run_state):
+    """Validate measured cooldown deltas instead of trusting its pass flag."""
+    check = report.get("server_cooldown") or {}
+    baseline, cooldown = check.get("baseline") or {}, check.get("cooldown") or {}
+    deltas, budget = check.get("deltas") or {}, check.get("budget") or {}
+    expected_budget = {"rss_mb_delta": 128, "handles_delta": 128, "threads_delta": 16}
+    pid = run_state.get("server_actual_pid")
+    warmup = run_state.get("resource_trust_warmup") or {}
+    cold, warm = warmup.get("cold_before_trust") or {}, warmup.get("warm_after_trust") or {}
+    browser = warmup.get("browser") or {}
+    baseline_scope = "application ready after offline trust warmup; before profile workload"
+    cold_scope = ("raw process cold before trust/application imports vs final cooldown; "
+                  "includes documented trust initialization and application startup")
+    if (check.get("passed") is not True or type(pid) is not int or pid <= 0
+            or baseline.get("pid") != pid or cooldown.get("pid") != pid
+            or baseline != run_state.get("resource_baseline") or budget != run_state.get("resource_budget")
+            or not warmup or check.get("trust_initialization") != warmup
+            or warmup.get("schema") != 1 or warmup.get("pid") != pid
+            or check.get("baseline_scope") != baseline_scope
+            or run_state.get("resource_baseline_scope") != baseline_scope
+            or check.get("cold_to_cooldown_scope") != cold_scope
+            or any(type(sample.get("pid")) is not int or sample["pid"] != pid
+                   or not integer_count(sample.get("handles")) for sample in (cold, warm, baseline, cooldown))
+            or not integer_count(warmup.get("trust_handles_delta"))
+            or warmup["trust_handles_delta"] != warm["handles"] - cold["handles"]
+            or type(check.get("cold_to_cooldown_handles_delta")) is not int
+            or check["cold_to_cooldown_handles_delta"] != cooldown["handles"] - cold["handles"]
+            or any(not isinstance(browser.get(key), str) or not browser[key].strip()
+                   for key in ("path", "sha256", "version", "publisher"))
+            or len(browser["sha256"]) != 64
+            or any(value not in "0123456789abcdefABCDEF" for value in browser["sha256"])
+            or browser["publisher"] not in ("Google LLC", "Microsoft Corporation")
+            or any(type(budget.get(key)) is not int or budget[key] != value
+                   for key, value in expected_budget.items())):
+        return False
+    for key in ("rss_mb", "handles", "threads"):
+        before, after, delta = baseline.get(key), cooldown.get(key), deltas.get(key)
+        if (not all(finite_number(value) for value in (before, after, delta))
+                or before < 0 or after < 0
+                or not math.isclose(delta, after - before, rel_tol=1e-9, abs_tol=1e-6)
+                or delta > expected_budget[key + "_delta"]):
+            return False
+    return True
+
+
 def require_report(spec):
     try:
         report = json.loads(spec["report"].read_text(encoding="utf-8"))
@@ -220,20 +280,41 @@ def require_report(spec):
                         or not evidence.get("browser_version")):
                     contracts_complete = False
                     continue
+                cleanup = evidence.get("cleanup") or []
+                expected_cleanup = {(mode, index) for mode in ("unique", "authentic") for index in range(4)}
+                rejection = evidence.get("scope_checks", {}).get("strict_rejection") or {}
+                if (len(cleanup) != len(expected_cleanup)
+                        or {(item.get("mode"), item.get("restart_index")) for item in cleanup} != expected_cleanup
+                        or any(item.get("success") is not True or type(item.get("restart_index")) is not int
+                               for item in cleanup)
+                        or evidence.get("scope_checks", {}).get("canvas_realms") != "passed"
+                        or rejection.get("success") is not False
+                        or rejection.get("navigation_allowed") is not False
+                        or type(rejection.get("forbidden_requests")) is not int or rejection["forbidden_requests"] != 0
+                        or rejection.get("process_running") is not False
+                        or rejection.get("cleanup_confirmed") is not True
+                        or (rejection.get("cleanup_failed") is not None and rejection["cleanup_failed"] is not False)):
+                    contracts_complete = False
                 for mode in ("unique", "authentic"):
                     runs = evidence.get("modes", {}).get(mode, {}).get("runs", [])
-                    if len(runs) != 4:
+                    if (len(runs) != 4 or {run.get("restart_index") for run in runs} != set(range(4))
+                            or any(type(run.get("restart_index")) is not int for run in runs)):
                         contracts_complete = False
                         continue
                     for run in runs:
                         realms = run.get("realms", {})
+                        attempts = run.get("cleanup_attempts")
+                        if (not isinstance(attempts, list) or not attempts or attempts[-1].get("success") is not True):
+                            contracts_complete = False
                         if (set(realms) != realm_names or run.get("final_health", {}).get("state") != "healthy" or any(
                                 value.get("readRepetitions") != 10 or value.get("decodedExportMatchesRead") is not True
                                 or value.get("initialRealmRead", {}).get("noisy") != (mode == "unique")
                                 for value in realms.values())):
                             contracts_complete = False
                 native = evidence.get("modes", {}).get("native", {}).get("realms", {})
-                if set(native) != realm_names or any(value.get("readRepetitions") != 10 for value in native.values()):
+                if set(native) != realm_names or any(
+                        value.get("readRepetitions") != 10 or value.get("decodedExportMatchesRead") is not True
+                        for value in native.values()):
                     contracts_complete = False
             if (report.get("status") != "passed" or report.get("exhaustive_gate") != "passed"
                     or report.get("installed_browser_gate") != "passed"
@@ -247,16 +328,26 @@ def require_report(spec):
             requested_hours = {"preflight": .25, "long": 2, "overnight": 24}[spec["name"]]
             if (report.get("passed") is not True or report.get("completed_duration") is not True
                     or report.get("planned_hours") != requested_hours
-                    or report.get("duration_seconds", 0) < requested_hours * 3600
-                    or report.get("errors") != 0 or report.get("orphan_processes") != 0
-                    or not report.get("cleanup_checks") or not all(report["cleanup_checks"].values())
-                    or not report.get("workload_checks") or any(value is False for value in report["workload_checks"].values())
+                    or not finite_number(report.get("duration_seconds"))
+                    or report["duration_seconds"] < requested_hours * 3600
+                    or not integer_count(report.get("errors")) or report["errors"] != 0
+                    or not integer_count(report.get("orphan_processes")) or report["orphan_processes"] != 0
+                    or not required_true_checks(report.get("cleanup_checks"), (
+                        "process_observation_available", "process_observation_complete",
+                        "profile_browsers_exited", "dashboard_exited", "staging_empty"))
+                    or not required_true_checks(report.get("workload_checks"), (
+                        "profile_started", "healthy_active_sample", "tab", "lifecycle", "copy", "canvas_workers"))
+                    or run_state.get("status") != "completed" or run_state.get("summary") != report
+                    or report.get("stop_requested") is not False or report.get("critical_reason") is not None
                     or run_state.get("target_profiles") != 2 or run_state.get("min_active") != 1
                     or run_state.get("hours") != requested_hours or run_state.get("min_lifecycle_cycles") != 2
                     or run_state.get("min_copy_cycles") != 2
-                    or report.get("lifecycle_cycles", 0) < 2 or report.get("copy_cycles", 0) < 2
-                    or report.get("server_cooldown", {}).get("passed") is not True
-                    or report.get("min_available_mb") is None):
+                    or not integer_count(report.get("lifecycle_cycles"), 2)
+                    or not integer_count(report.get("copy_cycles"), 2)
+                    or not integer_count(report.get("samples"), 1)
+                    or not integer_count(report.get("healthy_active_samples"), 1)
+                    or not complete_cooldown(report, run_state)
+                    or not finite_number(report.get("min_available_mb")) or report["min_available_mb"] < 0):
                 raise ValueError()
         return report
     except (OSError, ValueError, TypeError, AttributeError, KeyError, ET.ParseError):

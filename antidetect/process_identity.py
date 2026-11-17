@@ -234,11 +234,21 @@ def terminate_verified_browser(pid, user_data_dir, expected_identity, timeout=8.
         invalidate_identity(pid)
 
 
-def browser_pids_using_dir(user_data_dir, exclude_pids=None):
-    """Return matching PIDs, or None if the scan cannot prove completeness."""
-    if sys.platform != "win32" or not user_data_dir:
-        return None
+def browser_pids_using_dirs(directories, exclude_pids=None):
+    """Map directory keys to PIDs from one fresh read-only CIM snapshot.
+
+    Unknown inventory rows make every directory unknown: they may belong to
+    any requested path. This observation never replaces handle-bound native
+    identity checks for termination, and is not cached across calls.
+    """
+    unknown = {key: None for key in directories}
+    if sys.platform != "win32" or not directories:
+        return unknown
     try:
+        if any(not directory for directory in directories.values()):
+            return unknown
+        expected = {key: os.path.normcase(os.path.realpath(directory))
+                    for key, directory in directories.items()}
         command = (
             "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
             "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR "
@@ -251,21 +261,20 @@ def browser_pids_using_dir(user_data_dir, exclude_pids=None):
             timeout=8, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result.returncode:
-            return None
+            return unknown
         payload = json.loads(result.stdout) if result.stdout.strip() else []
         if isinstance(payload, dict):
             payload = [payload]
         if not isinstance(payload, list):
-            return None
-        expected = os.path.normcase(os.path.realpath(user_data_dir))
+            return unknown
         excluded = {int(pid) for pid in (exclude_pids or [])}
-        pids = set()
+        pids = {key: set() for key in directories}
         for record in payload:
             if not isinstance(record, dict):
-                return None
+                return unknown
             pid = int(record.get("ProcessId"))
             if pid <= 0:
-                return None
+                return unknown
             if pid in excluded:
                 continue
             command_line = record.get("CommandLine")
@@ -273,13 +282,22 @@ def browser_pids_using_dir(user_data_dir, exclude_pids=None):
                 # CIM can retain an exiting process in this snapshot after its
                 # command line has disappeared. Skip it only with fresh native
                 # proof of exit; a live/denied/unknown entry still blocks idle.
-                if read_browser_identity(pid, user_data_dir, fresh=True).get("state") == "absent":
+                probe_directory = next(iter(directories.values()))
+                if read_browser_identity(pid, probe_directory, fresh=True).get("state") == "absent":
                     continue
-                return None
+                return unknown
             options = _options(windows_argv(command_line))
             actual = options.get("user-data-dir")
-            if actual and os.path.normcase(os.path.realpath(actual)) == expected:
-                pids.add(pid)
+            if actual:
+                actual = os.path.normcase(os.path.realpath(actual))
+                for key, directory in expected.items():
+                    if actual == directory:
+                        pids[key].add(pid)
         return pids
     except Exception:
-        return None
+        return unknown
+
+
+def browser_pids_using_dir(user_data_dir, exclude_pids=None):
+    """Return matching PIDs, or None if the scan cannot prove completeness."""
+    return browser_pids_using_dirs({"directory": user_data_dir}, exclude_pids)["directory"]
