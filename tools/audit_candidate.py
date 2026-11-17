@@ -433,7 +433,7 @@ def main(argv=None):
         state = run_candidate(options)
         print(json.dumps({"status": state["status"], "complete": state["complete"],
                           "state": str(options.output_root / STATE_NAME), "failure": state.get("failure")}))
-        return 0 if state["status"] in ("complete", "partial") else 1
+        return 0 if state["status"] == "complete" else 1
     except (CandidateError, OSError, ValueError) as error:
         print(json.dumps({"status": "refused", "error": str(error) if isinstance(error, CandidateError) else type(error).__name__}))
         return 2

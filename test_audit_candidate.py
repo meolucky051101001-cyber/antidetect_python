@@ -127,6 +127,13 @@ def test_omitted_stages_remain_not_run_and_candidate_never_claims_complete(tmp_p
     assert all(state["stages"][name]["status"] == "not_run" for name in candidate.STAGES[1:])
 
 
+def test_partial_candidate_returns_nonzero_cli_status(tmp_path, monkeypatch):
+    browser = browser_fixture(tmp_path)
+    monkeypatch.setattr(candidate, "run_candidate", lambda _options: {"status": "partial", "complete": False})
+    assert candidate.main(["run", "--output-root", str(tmp_path / "output"), "--browser", str(browser),
+                           "--stages", "restore"]) == 1
+
+
 def test_stage_failure_prevents_every_later_soak_stage(tmp_path):
     repo = clean_repo(tmp_path)
     calls = []
