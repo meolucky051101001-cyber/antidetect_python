@@ -170,6 +170,7 @@ class BrowserLauncher:
         )
         self.cdp_health = CdpHealthRegistry(on_change=self._queue_health_change)
         self._health_persist_cond = threading.Condition(threading.Lock())
+        self._health_persist_write_lock = threading.Lock()
         self._health_persist_pending: Dict[str, tuple] = {}
         self._health_persist_thread: Optional[threading.Thread] = None
         self._health_persist_stop = False
@@ -285,6 +286,24 @@ class BrowserLauncher:
     ) -> bool:
         if not launch_id or not snapshot:
             return False
+        # A dequeued callback can be older than a synchronous detach/stop.
+        # Serialize commits and read the current same-generation state inside
+        # that lock so neither queued nor already-in-flight writes can undo it.
+        with self._health_persist_write_lock:
+            current = self.cdp_health.snapshot(profile_id)
+            if current.get("launch_id") != launch_id:
+                return False
+            return self._persist_current_health_now(profile_id, launch_id, current, extra)
+
+    def _persist_current_health_now(
+        self,
+        profile_id: str,
+        launch_id: Optional[str],
+        snapshot: Dict[str, Any],
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if not launch_id or not snapshot:
+            return False
         if snapshot.get("state") == STATE_STOPPED:
             return False
         owner = snapshot.get("owner_instance")
@@ -311,14 +330,14 @@ class BrowserLauncher:
         if extra:
             fields.update(extra)
         try:
-            self._runtime_store.upsert_if_owner(
+            updated = self._runtime_store.upsert_if_owner(
                 str(profile_id),
                 launch_id=launch_id,
                 pid=snapshot.get("pid"),
                 owner_instance=self.instance_id,
                 **fields,
             )
-            return True
+            return updated is not None
         except Exception as exc:
             key = f"{profile_id}:{type(exc).__name__}"
             if key not in self._health_persist_warned:
@@ -578,14 +597,20 @@ class BrowserLauncher:
         """A parent exit alone does not prove Chromium children have stopped."""
         if not user_data_dir:
             return True
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
         while True:
             pids = browser_pids_using_dir(user_data_dir)
             if pids is not None and not pids:
                 return True
             if time.monotonic() >= deadline:
-                log.warning("[Launcher] Directory idle check failed: %s",
-                            "incomplete process scan" if pids is None else "browser processes remain")
+                log.warning(
+                    "[Launcher] Directory idle check failed: %s "
+                    "(directory_state=%s, elapsed_ms=%.3f)",
+                    "incomplete process scan" if pids is None else "browser processes remain",
+                    "unknown" if pids is None else "known_processes_present",
+                    (time.monotonic() - started) * 1000,
+                )
                 return False
             time.sleep(0.1)
 
@@ -772,34 +797,81 @@ class BrowserLauncher:
             raise RuntimeError("PROCESS_STATE_UNVERIFIED: không xác minh được thư mục profile đã rảnh")
         return bool(pids)
 
-    def _cleanup_failed_launch(self, profile_id, proc, launch_id):
-        """Retain recovery state unless this exact launch has definitely exited."""
-        record = self._runtime_store.get(profile_id) or {}
-        if record and (record.get("launch_id") != launch_id or record.get("pid") != proc.pid):
-            return False
-        try:
-            if proc.poll() is None:
-                if self.cdp_health.request_browser_close(profile_id, launch_id):
-                    try:
-                        proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        pass
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait(timeout=5)
-            if proc.poll() is not None and self._clear_process(profile_id, expected_record=record):
-                return True
-        except (OSError, subprocess.SubprocessError):
-            pass
-        self.cdp_health.mark_degraded(profile_id, launch_id, REASON_STOP_FAILED, restart_required=True)
-        try:
-            self._runtime_store.upsert_if_owner(
-                profile_id, launch_id=launch_id, pid=proc.pid,
-                cleanup_failed=True, cdp_health=self.cdp_health.snapshot(profile_id),
+    def _cleanup_failed_launch(self, profile_id, proc, launch_id, *, diagnostics=None):
+        """Run the normal stop protocol only for this exact local launch."""
+        started = time.monotonic()
+        result = {"success": False, "code": "SESSION_CHANGED"}
+
+        def still_owned(record, health):
+            return (
+                self.active_processes.get(profile_id) is proc
+                and health.get("launch_id") == launch_id
+                and health.get("owner_instance") == self.instance_id
+                and health.get("pid") in (None, proc.pid)
+                and (not record or (
+                    record.get("launch_id") == launch_id
+                    and record.get("pid") == proc.pid
+                    and record.get("owner_instance") == self.instance_id
+                ))
             )
+
+        try:
+            with self._lifecycle_locks.acquire(profile_id, timeout=4.0):
+                with self._launch_locks[profile_id]:
+                    record = self._runtime_store.get(profile_id) or {}
+                    if not still_owned(record, self.cdp_health.snapshot(profile_id)):
+                        return False
+                    # Includes STOPPING before Browser.close, the normal native
+                    # fallback, and a directory-idle check even without runtime.
+                    result = self._stop_impl(profile_id)
+                    if result.get("success"):
+                        return True
+                    current = self._runtime_store.get(profile_id) or {}
+                    if still_owned(current, self.cdp_health.snapshot(profile_id)):
+                        self.cdp_health.mark_degraded(
+                            profile_id, launch_id, REASON_STOP_FAILED,
+                            restart_required=True,
+                        )
+                        try:
+                            self._runtime_store.upsert_if_owner(
+                                profile_id, launch_id=launch_id, pid=proc.pid,
+                                owner_instance=self.instance_id, cleanup_failed=True,
+                                cdp_health=self.cdp_health.snapshot(profile_id),
+                            )
+                        except Exception:
+                            pass  # Keep the exact local handle for recovery.
+                    return False
+        except ProfileLockTimeout:
+            result = {"success": False, "code": "PROFILE_BUSY"}
+            return False
         except Exception:
-            pass  # The live Popen handle is still retained in active_processes.
-        return False
+            # Cleanup can already be running from launch's exception handler.
+            # Metadata failures must preserve its boolean contract and handle.
+            result = {"success": False, "code": "CLEANUP_EXCEPTION"}
+            try:
+                with self._launch_locks[profile_id]:
+                    health = self.cdp_health.snapshot(profile_id)
+                    if (self.active_processes.get(profile_id) is proc
+                            and health.get("launch_id") == launch_id
+                            and health.get("owner_instance") == self.instance_id):
+                        self.cdp_health.mark_degraded(
+                            profile_id, launch_id, REASON_STOP_FAILED,
+                            restart_required=True,
+                        )
+                        self._runtime_store.upsert_if_owner(
+                            profile_id, launch_id=launch_id, pid=proc.pid,
+                            owner_instance=self.instance_id, cleanup_failed=True,
+                            cdp_health=self.cdp_health.snapshot(profile_id),
+                        )
+            except Exception:
+                pass
+            return False
+        finally:
+            if diagnostics is not None:
+                diagnostics.update(
+                    protocol="ordinary_stop", code=result.get("code"),
+                    elapsed_ms=round((time.monotonic() - started) * 1000, 3),
+                )
 
     # ------------------------------------------------------------------
     # Lưu & khôi phục các tab đang mở của từng profile qua các lần tắt/bật
@@ -971,6 +1043,9 @@ class BrowserLauncher:
         user-data-dir temp riêng (không chạm data/ của tool), không headless,
         và bị đóng ngay sau khi đo. Trả None nếu bất kỳ bước nào lỗi.
         """
+        probe_started = time.monotonic()
+        diagnostic = {"status": "failed", "stage": "resolve_browser", "error": "NO_BROWSER"}
+        self._native_brand_probe_diagnostic = diagnostic
         browser_path = browser_path or self.browser_path
         if not browser_path:
             return None
@@ -981,6 +1056,7 @@ class BrowserLauncher:
         port = get_free_port()
         proc = None
         try:
+            diagnostic.update(stage="verify_and_spawn", error=None)
             with hold_trusted_browser(browser_path):
                 proc = subprocess.Popen(
                     [
@@ -996,6 +1072,7 @@ class BrowserLauncher:
                     stderr=subprocess.DEVNULL,
                 )
             page_ws = None
+            diagnostic["stage"] = "page_endpoint"
             deadline = time.monotonic() + 10.0
             while time.monotonic() < deadline:
                 try:
@@ -1020,11 +1097,14 @@ class BrowserLauncher:
                 except Exception:
                     time.sleep(0.2)
             if not page_ws:
+                diagnostic["error"] = "PAGE_ENDPOINT_TIMEOUT"
                 return None
 
             async def _probe():
+                diagnostic["stage"] = "websocket_connect"
                 async with connect_loopback(page_ws, open_timeout=2) as ws:
                     try:
+                        diagnostic["stage"] = "navigate"
                         await ws.send(json.dumps({
                             "id": 70001,
                             "method": "Page.navigate",
@@ -1033,9 +1113,12 @@ class BrowserLauncher:
                         # 127.0.0.1 là secure context: userAgentData xuất hiện ở đó
                         # (about:blank thì không).
                         probe_deadline = time.monotonic() + 6.0
+                        diagnostic["read_budget_seconds"] = 6.0
+                        command_id = 70002
                         while time.monotonic() < probe_deadline:
+                            diagnostic["stage"] = "native_read"
                             await ws.send(json.dumps({
-                                "id": 70002,
+                                "id": command_id,
                                 "method": "Runtime.evaluate",
                                 "params": {
                                     "expression": _NATIVE_BRANDS_JS,
@@ -1043,14 +1126,18 @@ class BrowserLauncher:
                                     "returnByValue": True,
                                 },
                             }))
-                            end = min(probe_deadline, time.monotonic() + 2.0)
+                            # The async native read may await browser services
+                            # during first startup. Use the remaining declared
+                            # budget; a shorter per-reply timeout prematurely
+                            # aborted this entire probe after only two seconds.
+                            end = probe_deadline
                             while time.monotonic() < end:
                                 msg = json.loads(
                                     await asyncio.wait_for(
                                         ws.recv(), timeout=max(0.05, end - time.monotonic())
                                     )
                                 )
-                                if msg.get("id") != 70002:
+                                if msg.get("id") != command_id:
                                     continue
                                 value = (
                                     (msg.get("result") or {}).get("result") or {}
@@ -1060,20 +1147,27 @@ class BrowserLauncher:
                                     and isinstance(value.get("brands"), list)
                                     and value["brands"]
                                 ):
+                                    diagnostic.update(status="passed", error=None)
                                     return value
+                                diagnostic["error"] = "EVALUATION_ERROR" if msg.get("error") else "NATIVE_BRANDS_UNAVAILABLE"
                                 break
+                            command_id += 1
                             await asyncio.sleep(0.15)
+                        diagnostic["error"] = diagnostic["error"] or "NATIVE_READ_TIMEOUT"
                         return None
                     finally:
                         # Use the already connected, owned probe socket. Never
                         # reconnect by a port that may belong to a new process.
                         try:
-                            await ws.send(json.dumps({"id": 70003, "method": "Browser.close"}))
+                            await ws.send(json.dumps({"id": 79999, "method": "Browser.close"}))
                         except Exception:
                             pass
 
             return _safe_run_async(_probe())
-        except Exception:
+        except Exception as error:
+            diagnostic["error"] = ("NATIVE_READ_TIMEOUT" if isinstance(error, (asyncio.TimeoutError, TimeoutError))
+                                   else "BROWSER_UNTRUSTED" if isinstance(error, BrowserTrustError)
+                                   else "PROBE_TRANSPORT_OR_RUNTIME_ERROR")
             return None
         finally:
             if proc is not None:
@@ -1088,8 +1182,13 @@ class BrowserLauncher:
                         proc.wait(timeout=5)
             release_port(port)
             if not self._wait_directory_idle(user_data):
+                diagnostic.update(status="failed", stage="cleanup", error="CLEANUP_UNCONFIRMED")
                 raise RuntimeError("Native browser probe cleanup unconfirmed; synthetic directory retained.")
             shutil.rmtree(user_data)
+            diagnostic["elapsed_ms"] = round((time.monotonic() - probe_started) * 1000, 1)
+            if diagnostic["status"] != "passed":
+                log.warning("Native browser probe failed: stage=%s error=%s elapsed_ms=%s",
+                            diagnostic["stage"], diagnostic["error"], diagnostic["elapsed_ms"])
 
     async def _verify_emulation(
         self, port, fp, require_client_hints=False, deadline_seconds=7.0
@@ -2643,12 +2742,16 @@ class BrowserLauncher:
                     launch_id, bool(core_verification.get("ok")) and runtime_persisted)
                 navigation_allowed = core_verified.state == "verified"
                 if fp.verification_mode == "strict" and not navigation_allowed:
-                    cleanup_ok = self._cleanup_failed_launch(profile_id, proc, launch_id)
+                    cleanup_diagnostics = {}
+                    cleanup_ok = self._cleanup_failed_launch(
+                        profile_id, proc, launch_id, diagnostics=cleanup_diagnostics,
+                    )
                     return {
                         "success": False, "code": "CONFIGURATION_UNVERIFIED",
                         "error": "Không xác minh được cấu hình; chưa mở trang đích.",
                         "browser_started": True, "configuration_verified": False,
                         "navigation_allowed": False, "cleanup_failed": not cleanup_ok,
+                        "cleanup_diagnostics": cleanup_diagnostics,
                         "verification": verification, "launched_now": True,
                         "fingerprint_capabilities": get_stealth_capabilities(fp),
                         "cdp_health": self.cdp_health.snapshot(profile_id),
@@ -2767,8 +2870,11 @@ class BrowserLauncher:
                     "warning": "; ".join(warning_parts) if warning_parts else None,
                 }
             except Exception as e:
+                cleanup_diagnostics = {}
                 cleanup_ok = (
-                    self._cleanup_failed_launch(profile_id, proc, launch_id)
+                    self._cleanup_failed_launch(
+                        profile_id, proc, launch_id, diagnostics=cleanup_diagnostics,
+                    )
                     if proc is not None else self._clear_process(profile_id)
                 )
                 self._cdp_ready_events.pop(profile_id, None)
@@ -2777,6 +2883,7 @@ class BrowserLauncher:
                 log.error(f"[Launcher] Lỗi khởi chạy: {type(e).__name__}: {e}")
                 return {
                     "cleanup_failed": not cleanup_ok,
+                    "cleanup_diagnostics": cleanup_diagnostics,
                     "success": False,
                     "code": e.code if isinstance(e, BrowserTrustError) else "LAUNCH_FAILED",
                     "browser_started": proc is not None,

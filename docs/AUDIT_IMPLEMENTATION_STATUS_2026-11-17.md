@@ -45,6 +45,22 @@
 - Soak development sau sửa: **338.6 s PASS**, 2 profile tổng hợp, 4 lifecycle, 3 copy, 126 canvas/worker executions, 0 errors/orphans; cleanup đạt. Baseline app-ready 358 → cooldown 423 handles (**+65**), RAM **+10.7 MB**, threads **+2**. Raw cold before trust/app imports 123 → cooldown 423 (**+300**) được công bố riêng; bao gồm trust initialization **+145** và startup. Không suy từ lượt ngắn này thành nghiệm thu 15 phút/2h/24h.
 - Reports ngoài Git: `%TEMP%/audit-final-resource-regression-20261117.log` và `%TEMP%/antidetect-warm-trust-soak-20261117-202904/results/soak_summary.json`. Browser/runtime/UI/canvas/network cùng source: **8 passed, 0 skipped, 218.82 s**, 4 warning record_property/JUnit không ảnh hưởng assertions; reports tại `%TEMP%/audit-resource-browser-20261117-205117/`. Sau bản chốt warmup evidence, riêng candidate validator **138 passed** và Ruff đạt. Candidate freeze/restore/matrix/preflight/long/overnight còn chờ kết quả thực.
 
+## Lượt nghiệm thu thất bại và bản sửa runtime tiếp theo
+
+Ứng viên `363e7a4db8154e545f83b1d31c2fca8198cdb2ae` đã chạy và **FAILED**, không được đổi nhãn pass:
+
+- Restore DPAPI/SQLite đạt. Matrix Chrome/Edge đạt 5/6 scenario; Chrome seed 0 chặn navigation/0 forbidden requests nhưng strict cleanup chưa được xác nhận tức thời. Log ghi thư mục còn browser processes; cleanup về sau hoàn tất. Preflight/2h/24h **NOT_RUN** vì gate fingerprint fail.
+- Full regression cùng SHA: 1224 passed, 1 failed, 7 skipped, coverage 78.96%. Ca fail tái hiện stale health persistence ghi `healthy` sau detach đã trả `recovery_required`.
+- [CI run 44099556029](https://github.com/meolucky051101001-cyber/antidetect_python/actions/runs/44099556029) đạt unit/dependency nhưng browser 7 passed, 1 failed: native measurement ở startup trả None. Diagnostic bổ sung đã chỉ được stage startup; chưa có căn cứ gán duy nhất lỗi CI cho timeout.
+
+Bản sửa tiếp theo đóng các lỗi mã đã xác nhận:
+
+- Health persist serialize commit và đọc snapshot hiện hành cùng generation dưới khóa ghi; stale callback không thể ghi đè detach. CAS bị từ chối trả False, không báo ghi thành công. Ba ca deterministic trước sửa fail, sau sửa đạt; thêm test replacement ngay trước CAS.
+- Native probe dùng đầy đủ deadline tổng 6 giây đã công bố, thay vì thoát sau một lần chờ 2 giây; mỗi evaluation có request ID riêng, giữ cleanup socket đang sở hữu và báo stage/error enum đã lọc dữ liệu. Không tăng deadline hay thay gate thành retry vô hạn.
+- Failed-launch cleanup kiểm exact Popen/generation/owner và dùng ordinary stop protocol, gồm STOPPING trước Browser.close, native fallback và xác minh directory idle. Missing runtime không được coi thư mục đã rảnh. Lỗi metadata giữ handle/recovery và trả cleanup_failed; log phân biệt unknown với known processes present, kèm elapsed, không in command line/PID.
+- Regression tích hợp mục tiêu: **99 passed, 2 opt-in skipped**, Ruff đạt. Full regression cuối source sửa: **1242 passed, 7 skipped, 1 expected ZIP warning, coverage 79.12%, 133.07 s**. Bộ browser bắt buộc: **8 passed, 0 skipped, 164.53 s**, 4 warning JUnit/record_property; runtime ownership/restart, UI, canvas và local network đều đạt.
+- Bằng chứng ngoài Git: `%TEMP%/audit-final-runtime-races-regression-20261117.log`, `%TEMP%/audit-runtime-races-browser-20261117-215307/`, và `%TEMP%/antidetect-candidate-363e7a4-20261117/` giữ nguyên lượt fail. SHA mới và CI/candidate đầy đủ vẫn phải nghiệm thu riêng.
+
 ## Phần còn chờ nghiệm thu
 
 1. Chốt source và SHA mới. Full regression/coverage, runtime/UI và fingerprint matrix development đã đạt như trên; chạy lại restore và matrix cùng SHA với manifest giữ ngoài Git. Mọi lần sửa runtime sau freeze cần đối chiếu lại bằng chứng.

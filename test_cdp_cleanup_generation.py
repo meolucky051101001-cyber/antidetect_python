@@ -11,6 +11,8 @@ from test_runtime_generation_cleanup import fixture_launcher
 def test_late_devtools_port_write_cannot_resurrect_confirmed_cleanup(tmp_path, monkeypatch):
     launcher = fixture_launcher(tmp_path)
     launcher._native_brands_cache = {}
+    launcher._snapshot_tabs_via_http = lambda *_a: []
+    monkeypatch.setattr(launcher_module, "browser_pids_using_dir", lambda *_a: set())
     profile = Profile(id="profile-1", name="synthetic-cleanup")
     launch_id = launcher.cdp_health.begin_launch(profile.id, launcher.instance_id)
     launcher.cdp_health.set_process(profile.id, launch_id, 424242)
@@ -21,6 +23,7 @@ def test_late_devtools_port_write_cannot_resurrect_confirmed_cleanup(tmp_path, m
     exited = []
     proc = SimpleNamespace(
         pid=424242, poll=lambda: 0 if exited else None,
+        terminate=lambda: exited.append(True),
         kill=lambda: exited.append(True), wait=lambda **kwargs: 0,
     )
     launcher.active_processes[profile.id] = proc

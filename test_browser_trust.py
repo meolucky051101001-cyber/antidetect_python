@@ -355,6 +355,10 @@ def test_native_brand_probe_closes_owned_socket_on_success_or_read_failure_and_r
     if directory_idle:
         assert launcher._measure_native_brands_standalone(str(executable)) == (None if read_fails else brands)
         assert not probe_directory.exists()
+        diagnostic = launcher._native_brand_probe_diagnostic
+        assert diagnostic["status"] == ("failed" if read_fails else "passed")
+        assert diagnostic["stage"] == "native_read"
+        assert diagnostic["error"] == ("PROBE_TRANSPORT_OR_RUNTIME_ERROR" if read_fails else None)
     else:
         with pytest.raises(RuntimeError, match="cleanup unconfirmed"):
             launcher._measure_native_brands_standalone(str(executable))
@@ -366,6 +370,57 @@ def test_native_brand_probe_closes_owned_socket_on_success_or_read_failure_and_r
     proc.terminate.assert_not_called()
     proc.kill.assert_not_called()
     release.assert_called_once_with(9876)
+
+
+def test_native_probe_uses_total_read_budget_and_distinct_evaluation_ids(synthetic_browser, tmp_path, monkeypatch):
+    import asyncio
+    import tempfile
+    import antidetect.launcher as launcher_module
+
+    executable, _metadata = synthetic_browser
+    directory = tmp_path / "synthetic-native-read-budget"
+    directory.mkdir()
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda **kwargs: str(directory))
+    monkeypatch.setattr(launcher_module, "get_free_port", lambda: 9876)
+    monkeypatch.setattr(launcher_module, "release_port", lambda port: None)
+    proc = SimpleNamespace(wait=Mock(), terminate=Mock(), kill=Mock())
+    monkeypatch.setattr(launcher_module.subprocess, "Popen", lambda *a, **k: proc)
+    target = [{"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:9876/devtools/page/synthetic"}]
+    monkeypatch.setattr(launcher_module, "open_loopback", lambda *a, **k: io.BytesIO(json.dumps(target).encode()))
+    messages, timeouts = [], []
+    brands = {"brands": [{"brand": "Chromium", "version": "157"}]}
+
+    class Socket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def send(self, message):
+            messages.append(json.loads(message))
+
+        async def recv(self):
+            command = messages[-1]
+            value = None if command["id"] == 70002 else brands
+            return json.dumps({"id": command["id"], "result": {"result": {"value": value}}})
+
+    original_wait = asyncio.wait_for
+    async def observe_wait(awaitable, timeout):
+        timeouts.append(timeout)
+        return await original_wait(awaitable, timeout)
+
+    monkeypatch.setattr(launcher_module, "connect_loopback", lambda *a, **k: Socket())
+    monkeypatch.setattr(asyncio, "wait_for", observe_wait)
+    launcher = object.__new__(launcher_module.BrowserLauncher)
+    launcher._wait_directory_idle = lambda *_args: True
+
+    assert launcher._measure_native_brands_standalone(str(executable)) == brands
+    evaluations = [message["id"] for message in messages if message["method"] == "Runtime.evaluate"]
+    assert evaluations == [70002, 70003]
+    assert all(2 < timeout <= 6 for timeout in timeouts), "Read must use the unchanged six-second aggregate budget"
+    assert messages[-1] == {"id": 79999, "method": "Browser.close"}
+    assert launcher._native_brand_probe_diagnostic["status"] == "passed"
 
 
 @pytest.mark.skipif(os.name != "nt" or os.environ.get("ANTIDETECT_RUN_BROWSER_TRUST") != "1",

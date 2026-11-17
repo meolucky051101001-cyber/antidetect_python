@@ -151,7 +151,7 @@ def test_failed_launch_cleanup_retains_live_handle_and_runtime(tmp_path):
                                    owner_instance="owner-A", user_data_dir=str(tmp_path))
     def denied():
         raise PermissionError("synthetic")
-    proc = SimpleNamespace(pid=424242, poll=lambda: None, kill=denied)
+    proc = SimpleNamespace(pid=424242, poll=lambda: None, terminate=denied, kill=denied)
     launcher.active_processes["profile-1"] = proc
     assert not launcher._cleanup_failed_launch("profile-1", proc, launch_id)
     assert launcher.active_processes["profile-1"] is proc
