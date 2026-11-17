@@ -1,0 +1,35 @@
+{
+  "started_at": "2026-11-15T16:45:57.721223+00:00",
+  "status": "passed",
+  "application_commit": "793038de34a6fd5aa480b3dd1d1fc638338b795c",
+  "scope": "real uvicorn lifespan and Chrome; fresh temporary data only",
+  "checks": {
+    "initial_healthy_launch": true,
+    "other_server_shutdown_preserves_owner_browser_and_runtime": true,
+    "stale_conditional_stop_preserves_replacement": true,
+    "real_cdp_socket_abort_classified_separately_from_process_liveness": true,
+    "matching_conditional_stop_succeeds": true,
+    "forced_server_exit_and_restart_preserve_browser_with_recovery_required": true,
+    "explicit_recovered_browser_stop_clears_runtime": true,
+    "final_shutdown_removes_own_server_and_auth_records": true
+  },
+  "limitations": [
+    "No production profiles or Facebook sessions used."
+  ],
+  "browser_version": "155.0.8059.84",
+  "last_launch": {
+    "state": "healthy",
+    "reason": null,
+    "restart_required": false
+  },
+  "duration_seconds": 67.97,
+  "cleanup": {
+    "servers_exited": true,
+    "fixture_browsers_remaining": 0,
+    "count_scope": "Chrome/Edge processes whose --user-data-dir is inside the fixture TEMP root; excludes unrelated Chrome sessions and standalone native-brand-probe directories.",
+    "temporary_data_removed": true,
+    "errors": []
+  },
+  "finished_at": "2026-11-15T16:47:13.495398+00:00",
+  "post_run_changes": "Loopback HTTP helper now explicitly disables environment and Windows proxies; lint checked without rerunning Chrome during concurrent canary validation."
+}

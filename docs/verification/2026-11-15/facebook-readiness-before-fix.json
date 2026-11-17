@@ -1,0 +1,47 @@
+{
+  "snapshots": [
+    {
+      "elapsed": 3.5,
+      "logged_out": false,
+      "recognized": false,
+      "loading": false,
+      "pages_count": 0,
+      "body_length": 0,
+      "url_path": "/bookmarks/pages",
+      "login_form": false,
+      "checkpoint_in_url": false,
+      "captcha_in_text": false,
+      "browser_error": false
+    },
+    {
+      "elapsed": 11.0,
+      "logged_out": false,
+      "recognized": true,
+      "loading": false,
+      "pages_count": 8,
+      "body_length": 1024,
+      "url_path": "/bookmarks/pages",
+      "login_form": false,
+      "checkpoint_in_url": false,
+      "captcha_in_text": false,
+      "browser_error": false
+    },
+    {
+      "elapsed": 20.2,
+      "logged_out": false,
+      "recognized": true,
+      "loading": false,
+      "pages_count": 8,
+      "body_length": 1024,
+      "url_path": "/bookmarks/pages",
+      "login_form": false,
+      "checkpoint_in_url": false,
+      "captcha_in_text": false,
+      "browser_error": false
+    }
+  ],
+  "http_status": 200,
+  "application_commit": "793038de34a6fd5aa480b3dd1d1fc638338b795c",
+  "finding": "HTTP200 blank SPA shell became recognized with eight entries after initial DOMContentLoaded. This confirms premature discovery termination.",
+  "limitation": "Counts come from the collector DOM expression; this is readiness evidence, not an independent correctness comparison."
+}

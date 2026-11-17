@@ -778,11 +778,46 @@ def test_fanpage_refresh_keeps_cache_when_live_result_empty():
             )
             assert r2.status_code == 200, r2.text
             data2 = r2.json()
-            assert data2["stale"] is False
-            assert data2["pages"] == []
-        assert app_module.profile_manager.get_profile(profile.id).facebook_pages == []
+            assert data2["stale"] is True
+            assert [p["url"] for p in data2["pages"]] == [old["url"]]
+        assert app_module.profile_manager.get_profile(profile.id).facebook_pages == [old]
     finally:
         app_module.profile_manager.delete_profile(profile.id)
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_fanpage_readiness_timeout_preserves_cache_and_unknown_login(monkeypatch, force):
+    from antidetect.fanpage_scan import evaluate_discovery
+
+    login()
+    manager = app_module.profile_manager
+    profile = manager.create_profile(name="Fanpage delayed SPA")
+    cached = {"id": "123456789", "name": "Cached page",
+              "url": "https://www.facebook.com/123456789"}
+    profile.facebook_pages = [cached]
+    profile.facebook_pages_synced_at = 1700000000
+    manager.update_profile(profile)
+    before = manager.get_profile(profile.id)
+    scan = evaluate_discovery(pages=[], ui_recognized=False, logged_in=None, deadline_hit=True)
+    monkeypatch.setattr(app_module.launcher, "is_running", lambda _: True)
+    monkeypatch.setattr(app_module.launcher, "fetch_facebook_pages", lambda *a, **kw: scan)
+    try:
+        response = client.get(
+            f"/api/profiles/{profile.id}/facebook/pages?refresh=1&force={int(force)}"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["discovery_status"] == "failed" and body["completion_reason"] == "DEADLINE"
+        assert body["logged_in"] is None and body["login_status"] == "unknown"
+        assert body["source"] == "cache" and body["stale"] is True
+        assert body["observed_count"] == 0 and body["retained_count"] == 1
+        assert [page["id"] for page in body["pages"]] == [cached["id"]]
+        after = manager.get_profile(profile.id)
+        assert after.facebook_pages == before.facebook_pages
+        assert after.facebook_pages_synced_at == before.facebook_pages_synced_at
+        assert after.revision == before.revision
+    finally:
+        manager.delete_profile(profile.id)
 
 
 def test_fanpage_partial_scan_keeps_cache_and_reports_counts(monkeypatch):
@@ -947,6 +982,34 @@ def test_fanpage_complete_empty_never_deletes_cache(monkeypatch):
         assert [p["id"] for p in saved.facebook_pages] == ["999999"]
     finally:
         app_module.profile_manager.delete_profile(profile.id)
+
+
+@pytest.mark.parametrize("status,reason,total,clears", [
+    ("complete", "EMPTY_CONFIRMED", None, True),
+    ("complete", "TOTAL_MATCH", 0, True),
+    ("partial", "MAX_SCROLLS", None, False),
+    ("partial", "DEADLINE", None, False),
+    ("complete", "END_MARKER", None, False),
+])
+def test_force_refresh_clears_only_confirmed_empty_listing(monkeypatch, status, reason, total, clears):
+    login()
+    manager = app_module.profile_manager
+    profile = manager.create_profile(name="Fanpage force proof")
+    profile.facebook_pages = [{"id": "987654321", "name": "Keep until empty is proven",
+                               "url": "https://www.facebook.com/987654321"}]
+    manager.update_profile(profile)
+    monkeypatch.setattr(app_module.launcher, "is_running", lambda _: True)
+    monkeypatch.setattr(app_module.launcher, "fetch_facebook_pages", lambda *a, **kw: {
+        "discovery_status": status, "completion_reason": reason, "login_status": True,
+        "pages": [], "observed_count": 0, "total_pages_in_source": total,
+    })
+    try:
+        response = client.get(f"/api/profiles/{profile.id}/facebook/pages?refresh=1&force=1")
+        assert response.status_code == 200
+        assert (response.json()["pages"] == []) is clears
+        assert (manager.get_profile(profile.id).facebook_pages == []) is clears
+    finally:
+        manager.delete_profile(profile.id)
 
 
 def test_delete_fanpage_cache_endpoint(monkeypatch):

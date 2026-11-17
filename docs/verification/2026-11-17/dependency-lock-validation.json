@@ -1,0 +1,67 @@
+{
+  "checkpoint": "2026-11-17 frozen working tree; final local regression passed; commit/remote CI pending",
+  "platform": "Windows x64",
+  "python": "CPython 3.10.11",
+  "source_index": "https://pypi.org/simple",
+  "constraints_pins_changed": false,
+  "clean_install": {
+    "runtime": {
+      "packages": 30,
+      "require_hashes": true,
+      "offline_wheels": true,
+      "pip_check": "passed",
+      "smoke_imports": "passed"
+    },
+    "dev": {
+      "packages": 45,
+      "require_hashes": true,
+      "offline_wheels": true,
+      "pip_check": "passed",
+      "smoke_imports": "passed"
+    },
+    "audit": {
+      "packages": 29,
+      "require_hashes": true,
+      "offline_wheels": true,
+      "pip_check": "passed",
+      "smoke_imports": "passed"
+    }
+  },
+  "locked_environment_targeted_tests": {
+    "passed": 162,
+    "seconds": 9.46,
+    "scope": "auth/import/transport/soak-helper/Node UI slice; not final full suite"
+  },
+  "advisory": {
+    "tool": "pip-audit==2.10.1",
+    "scope": "30 packages in dedicated runtime target; excludes installer/scanner environments",
+    "result": "No known vulnerabilities found",
+    "exit_code": 0,
+    "vulnerabilities": 0,
+    "inventory_packages": 30
+  },
+  "locks": {
+    "requirements-win-py310.lock.txt": "feddac628a0b95f28d14941d7d14690621b349d7a337739c59fb48d9f5762061",
+    "requirements-dev-win-py310.lock.txt": "aff3547d08b1a5697ba24f5fe0ebe3ee6f819015295783e9cb3a4369701eac2d",
+    "requirements-audit-win-py310.lock.txt": "adea0c682d8a72d8e4fe6bb4800e23d7d2add9c52300f0c0d8a8a4485f2b3cc7"
+  },
+  "limitations": [
+    "Hash checks prove reviewed wheel bytes, not upstream package trust or absence of future advisories.",
+    "Only CPython 3.10 Windows x64 is locked.",
+    "Final full regression is recorded in AUDIT_IMPLEMENTATION_STATUS_2026-11-17.md; remote GitHub CI is pending."
+  ],
+  "extras_followup": {
+    "bootstrap_pip": "23.0.1",
+    "old_lock_online_dry_run": "failed on unpinned CacheControl[filecache]>=0.13.0",
+    "explicit_extras_online_dry_run": "passed for audit and dev",
+    "actual_clean_audit_install": "passed",
+    "pip_check": "passed",
+    "runtime_advisory": "No known vulnerabilities found",
+    "package_versions_and_wheel_hashes_changed": false,
+    "runtime_lock_changed": false,
+    "extras": [
+      "cachecontrol[filecache]",
+      "coverage[toml]"
+    ]
+  }
+}

@@ -23,6 +23,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from antidetect.loopback import open_loopback
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -61,7 +62,7 @@ def _http(method, base, path, token=None, timeout=10):
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_loopback(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", "replace")
             return resp.status, (json.loads(body) if body else {})
     except urllib.error.HTTPError as exc:
@@ -173,6 +174,17 @@ def live_server():
 
 
 def _launch_browser(playwright):
+    explicit = os.environ.get("ANTIDETECT_LIVE_BROWSER")
+    required = os.environ.get("ANTIDETECT_REQUIRE_BROWSER_TESTS") == "1"
+    if explicit:
+        if not os.path.isfile(explicit):
+            pytest.fail("Configured UI browser is missing.")
+        try:
+            return playwright.chromium.launch(executable_path=explicit, headless=True)
+        except PlaywrightError:
+            pytest.fail("Configured UI browser could not launch; fallback is disabled.")
+    if required:
+        pytest.fail("Required UI checks need an explicit ANTIDETECT_LIVE_BROWSER.")
     try:
         return playwright.chromium.launch(headless=True)
     except PlaywrightError:

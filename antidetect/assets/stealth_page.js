@@ -1,8 +1,8 @@
 
 (function() {
-    if (globalThis.__adStealth) return;
-    try { Object.defineProperty(globalThis, '__adStealth', { value: true, configurable: true }); } catch(e) {}
+    // The CDP controller owns one installation per execution context.
     const CFG = __CFG__;
+    const CONTRACT_V2 = Number(CFG.algorithmVersion || 1) >= 2;
     const DISABLED = new Set(__DISABLED__);
     const platformStr = (CFG.os === 'macos') ? 'MacIntel' : ((CFG.os === 'linux') ? 'Linux x86_64' : 'Win32');
     const chPlatform = (CFG.os === 'macos') ? 'macOS' : ((CFG.os === 'linux') ? 'Linux' : 'Windows');
@@ -129,45 +129,7 @@
         }
     }
 
-    // ==========================================
-    // Canvas Noise Generator (2D)
-    // Only touch fully opaque pixels: adding +/-1 to a partially transparent
-    // pixel changes its premultiplied round-trip and makes toDataURL() differ
-    // from getImageData() after PNG decode. Opaque text/shape pixels still vary.
-    // ==========================================
-    function canvasIsComplex(data) {
-        // S5: skip trivial solid/simple canvases. CreepJS's rgba-noise probe
-        // uses a simple image; real text/images/gradients still get noise.
-        const pixels = data.length >> 2;
-        if (pixels < 256) return false;
-        const seen = new Set();
-        const stride = Math.max(1, Math.floor(pixels / 4096));
-        for (let p = 0; p < pixels; p += stride) {
-            const i = p * 4;
-            if (data[i + 3] !== 255) continue;
-            const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
-            seen.add(key);
-            if (seen.size >= 64) return true;
-        }
-        return false;
-    }
-
-    function canvasNoise(data, seed, startX, startY, width) {
-        if (!canvasIsComplex(data)) return;
-        for (let i = 0; i < data.length; i += 4) {
-            const pixelIndex = i / 4;
-            const absX = startX + (pixelIndex % width);
-            const absY = startY + Math.floor(pixelIndex / width);
-            const hash = ((absX * 374761393 + absY * 668265263 + seed) ^ (seed >>> 13)) >>> 0;
-            if (data[i + 3] === 255 && (hash % 7) === 0) {
-                const delta = (hash % 2 === 0) ? 1 : -1;
-                const rNoise = ((hash * 1103515245 + 12345) >>> 16) % 3;
-                data[i]     = Math.min(255, Math.max(0, data[i]     + (rNoise >= 1 ? delta : 0)));
-                data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + (rNoise <= 1 ? delta : 0)));
-                data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + (rNoise >= 1 ? -delta : delta)));
-            }
-        }
-    }
+    __CANVAS_RUNTIME__
 
     // Danh sách font đặc thù từng OS để bảo vệ Font Fingerprinting (S11)
     const macFonts = ['sf pro', 'helvetica neue', 'apple-system', 'blinkmacsystemfont', 'geneva', 'menlo', 'monaco'];
@@ -178,13 +140,7 @@
     // ==========================================
     function applyStealth(w) {
         if (!w) return;
-        if (w !== window) {
-            try {
-                if (w.__adStealth) return;
-                installNativeToString(w);
-                Object.defineProperty(w, '__adStealth', { value: true, configurable: true });
-            } catch(e) {}
-        }
+        if (w !== window) installNativeToString(w);
 
         // 1. Chuẩn hóa navigator.webdriver === false theo chuẩn W3C
         if (!DISABLED.has('navigator')) try {
@@ -344,7 +300,7 @@
         // 5b. DOMRect/ClientRects/SVGRect per-profile offsets (nhóm 'canvas' —
         // cùng họ noise nên Authentic tự tắt). Offset NHẤT QUÁN trên mọi
         // element: hash khác nhau giữa các profile, layout tương đối nguyên.
-        if (!DISABLED.has('canvas')) try {
+        if (!CONTRACT_V2 && !DISABLED.has('canvas')) try {
             const DR = CFG.domRect;
             const adjust = (x, y, wd, ht) => [
                 x + DR.dx, y + DR.dy, wd + DR.dw, ht + DR.dh
@@ -411,7 +367,7 @@
         // 1 anti-detection). Chrome thật không trả permission thì deviceId/
         // label/groupId rỗng nhưng COUNT vẫn hiện — nên trả cùng count profile
         // và chỉ ẩn giá trị khi trang chưa có quyền.
-        if (!DISABLED.has('media')) try {
+        if (!CONTRACT_V2 && !DISABLED.has('media')) try {
             if (w.navigator && w.navigator.mediaDevices && w.navigator.mediaDevices.enumerateDevices) {
                 const origEnumerate = w.navigator.mediaDevices.enumerateDevices;
                 w.navigator.mediaDevices.enumerateDevices = markNative(function() {
@@ -430,7 +386,7 @@
         } catch(e) {}
 
         // 7. WebGPU Masking (S5)
-        if (!DISABLED.has('webgpu')) try {
+        if (!CONTRACT_V2 && !DISABLED.has('webgpu')) try {
             if (w.navigator && w.navigator.gpu && w.navigator.gpu.requestAdapter) {
                 const origReqAdapter = w.navigator.gpu.requestAdapter;
                 const renderer = CFG.webglRenderer || '';
@@ -493,7 +449,7 @@
         } catch(e) {}
 
         // 8. SpeechSynthesis Voices (S7: OS matching + cross-OS chuẩn)
-        if (!DISABLED.has('speech')) try {
+        if (!CONTRACT_V2 && !DISABLED.has('speech')) try {
             if (w.speechSynthesis && w.speechSynthesis.getVoices) {
                 const origGetVoices = w.speechSynthesis.getVoices;
                 const VoiceProto = w.SpeechSynthesisVoice
@@ -623,21 +579,11 @@
         } catch(e) {}
 
         // 9. Canvas 2D Spoofing & Font Probing Mask (S11)
-        if (!DISABLED.has('canvas') || !DISABLED.has('fonts')) try {
-            let origCanvasGID = null;
+        if (!CONTRACT_V2 && !DISABLED.has('fonts')) try {
             if (w.CanvasRenderingContext2D && w.CanvasRenderingContext2D.prototype) {
                 const ctxProto = w.CanvasRenderingContext2D.prototype;
-                if (!DISABLED.has('canvas')) {
-                    origCanvasGID = ctxProto.getImageData;
-                    ctxProto.getImageData = markNative(function(sx, sy, sw, sh) {
-                        const imgData = origCanvasGID.apply(this, arguments);
-                        canvasNoise(imgData.data, CFG.canvasSeed || 12345, sx || 0, sy || 0, sw || 1);
-                        return imgData;
-                    }, 'getImageData', 4);
-                }
-
                 // Bảo vệ Font Probing qua measureText (S11 + cross-OS)
-                if (!DISABLED.has('fonts')) {
+                if (!CONTRACT_V2 && !DISABLED.has('fonts')) {
                     const origMeasureText = ctxProto.measureText;
                     ctxProto.measureText = markNative(function(text) {
                         const font = (this.font || '').toLowerCase();
@@ -695,162 +641,6 @@
                 }
             }
 
-            if (!DISABLED.has('canvas') && w.HTMLCanvasElement && w.HTMLCanvasElement.prototype) {
-                const canvasProto = w.HTMLCanvasElement.prototype;
-                const origToDataURL = canvasProto.toDataURL;
-                canvasProto.toDataURL = markNative(function() {
-                    let ctx = null;
-                    let backup = null;
-                    try {
-                        if (this.width > 0 && this.height > 0) {
-                            // A WebGL canvas has no 2D context. Read its pixels,
-                            // add deterministic noise, and encode a 2D copy so
-                            // WebGL toDataURL hashes differ per profile too.
-                            ctx = this.getContext('2d');
-                            if (!ctx) {
-                                let gl = null;
-                                try { gl = this.getContext('webgl2'); } catch(e) {}
-                                if (!gl) {
-                                    try { gl = this.getContext('webgl') || this.getContext('experimental-webgl'); } catch(e) {}
-                                }
-                                if (gl) {
-                                    const dw = gl.drawingBufferWidth || this.width;
-                                    const dh = gl.drawingBufferHeight || this.height;
-                                    if (dw > 0 && dh > 0) {
-                                        const pixels = new Uint8Array(dw * dh * 4);
-                                        gl.readPixels(0, 0, dw, dh, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-                                        const copy = w.document.createElement('canvas');
-                                        copy.width = dw;
-                                        copy.height = dh;
-                                        const cctx = copy.getContext('2d');
-                                        if (cctx) {
-                                            const img = cctx.createImageData(dw, dh);
-                                            for (let y = 0; y < dh; y++) {
-                                                const src = (dh - 1 - y) * dw * 4;
-                                                const dst = y * dw * 4;
-                                                img.data.set(pixels.subarray(src, src + dw * 4), dst);
-                                            }
-                                            canvasNoise(img.data, CFG.canvasSeed || 12345, 0, 0, dw);
-                                            cctx.putImageData(img, 0, 0);
-                                            return origToDataURL.apply(copy, arguments);
-                                        }
-                                    }
-                                }
-                            }
-                            // Read/noise/restore the real canvas instead of drawing
-                            // it onto a helper. drawImage() can color-convert and
-                            // make toDataURL() differ from getImageData() by one.
-                            if (ctx && origCanvasGID) {
-                                const imgData = origCanvasGID.apply(ctx, [0, 0, this.width, this.height]);
-                                backup = new Uint8ClampedArray(imgData.data);
-                                canvasNoise(imgData.data, CFG.canvasSeed || 12345, 0, 0, this.width);
-                                ctx.putImageData(imgData, 0, 0);
-                                return origToDataURL.apply(this, arguments);
-                            }
-                        }
-                    } catch(e) {} finally {
-                        if (ctx && backup) {
-                            try {
-                                const restored = ctx.createImageData(this.width, this.height);
-                                restored.data.set(backup);
-                                ctx.putImageData(restored, 0, 0);
-                            } catch(e) {}
-                        }
-                    }
-                    return origToDataURL.apply(this, arguments);
-                }, 'toDataURL', 0);
-
-                const origToBlob = canvasProto.toBlob;
-                canvasProto.toBlob = markNative(function(callback) {
-                    let restore = null;
-                    try {
-                        if (this.width > 0 && this.height > 0) {
-                            const ctx = this.getContext('2d');
-                            if (ctx && origCanvasGID) {
-                                const imgData = origCanvasGID.apply(ctx, [0, 0, this.width, this.height]);
-                                let backup = new Uint8ClampedArray(imgData.data);
-                                canvasNoise(imgData.data, CFG.canvasSeed || 12345, 0, 0, this.width);
-                                ctx.putImageData(imgData, 0, 0);
-                                const canvas = this;
-                                restore = function() {
-                                    if (!backup) return;
-                                    try {
-                                        const restored = ctx.createImageData(canvas.width, canvas.height);
-                                        restored.data.set(backup);
-                                        ctx.putImageData(restored, 0, 0);
-                                    } catch(e) {}
-                                    backup = null;
-                                };
-                                const args = Array.prototype.slice.call(arguments);
-                                const userCb = args[0];
-                                args[0] = function(blob) {
-                                    restore();
-                                    if (typeof userCb === 'function') userCb(blob);
-                                };
-                                return origToBlob.apply(this, args);
-                            }
-                        }
-                    } catch(e) {
-                        if (restore) restore();
-                    }
-                    return origToBlob.apply(this, arguments);
-                }, 'toBlob', 1);
-            }
-
-            // OffscreenCanvas hooks
-            if (!DISABLED.has('canvas') && typeof w.OffscreenCanvas !== 'undefined') {
-                let origOffGID = null;
-                if (typeof w.OffscreenCanvasRenderingContext2D !== 'undefined') {
-                    const offCtxProto = w.OffscreenCanvasRenderingContext2D.prototype;
-                    origOffGID = offCtxProto.getImageData;
-                    offCtxProto.getImageData = markNative(function(sx, sy, sw, sh) {
-                        const imgData = origOffGID.apply(this, arguments);
-                        canvasNoise(imgData.data, CFG.canvasSeed || 12345, sx || 0, sy || 0, sw || 1);
-                        return imgData;
-                    }, 'getImageData', 4);
-
-                    const origOffMT = offCtxProto.measureText;
-                    if (origOffMT) {
-                        offCtxProto.measureText = markNative(function(text) {
-                            return origOffMT.apply(this, arguments);
-                        }, 'measureText', 1);
-                    }
-                }
-                const origConvertToBlob = w.OffscreenCanvas.prototype.convertToBlob;
-                if (origConvertToBlob) {
-                    w.OffscreenCanvas.prototype.convertToBlob = markNative(function(options) {
-                        try {
-                            if (this.width > 0 && this.height > 0) {
-                                const ctx = this.getContext('2d');
-                                if (ctx) {
-                                    const imgData = origOffGID
-                                        ? origOffGID.apply(ctx, [0, 0, this.width, this.height])
-                                        : ctx.getImageData(0, 0, this.width, this.height);
-                                    const backup = new Uint8ClampedArray(imgData.data);
-                                    canvasNoise(imgData.data, CFG.canvasSeed || 12345, 0, 0, this.width);
-                                    ctx.putImageData(imgData, 0, 0);
-                                    const canvas = this;
-                                    const restore = function() {
-                                        try {
-                                            const restored = ctx.createImageData(canvas.width, canvas.height);
-                                            restored.data.set(backup);
-                                            ctx.putImageData(restored, 0, 0);
-                                        } catch(e) {}
-                                    };
-                                    const result = origConvertToBlob.apply(this, arguments);
-                                    if (result && typeof result.finally === 'function') {
-                                        return result.finally(restore);
-                                    }
-                                    restore();
-                                    return result;
-                                }
-                            }
-                        } catch(e) {}
-                        return origConvertToBlob.apply(this, arguments);
-                    }, 'convertToBlob', 0);
-                }
-            }
-
             // document.fonts.check Font Masking (S11 + cross-OS đầy đủ)
             if (!DISABLED.has('fonts') && w.document && w.document.fonts && w.document.fonts.check) {
                 const origFontsCheck = w.document.fonts.check;
@@ -871,6 +661,7 @@
                 }, 'check', 1);
             }
         } catch(e) {}
+        installCanvas(w);
 
         // 10. WebGL Vendor & Renderer & Extensions & readPixels (S12) & ShaderPrecision (S6)
         // S1: only UNMASKED_VENDOR/RENDERER are spoofed for same-OS profiles.
@@ -978,7 +769,7 @@
             }
         }
 
-        if (!DISABLED.has('webgl')) try {
+        if (!CONTRACT_V2 && !DISABLED.has('webgl')) try {
             if (w.WebGLRenderingContext) hookWebGL(w.WebGLRenderingContext.prototype);
             if (w.WebGL2RenderingContext) hookWebGL(w.WebGL2RenderingContext.prototype);
         } catch(e) {}
@@ -987,7 +778,7 @@
         // tuần hoàn. Pattern chu kỳ (mỗi 100/13 mẫu) tạo artifact phổ định kỳ
         // mà phân tích thống kê phát hiện được; hash theo (seed, channel,
         // index) cho phổ phẳng như nhiễu analog thật.
-        if (!DISABLED.has('audio')) try {
+        if (!CONTRACT_V2 && !DISABLED.has('audio')) try {
             const audioNoiseAt = (seed, channel, index) => {
                 let h = (seed ^ (channel * 0x9E3779B1) ^ (index * 0x85EBCA6B)) >>> 0;
                 h = Math.imul(h ^ (h >>> 13), 0xC2B2AE35) >>> 0;
@@ -1046,41 +837,11 @@
             }
         } catch(e) {}
 
-        // 12. Web Worker Hook (S3 & S14)
-        if (!DISABLED.has('worker')) try {
-            if (w.Worker) {
-                const origWorker = w.Worker;
-                const workerHookCode = __WORKER_JS__;
-                w.Worker = markNative(function(scriptURL, options) {
-                    if (options && options.type === 'module') {
-                        // Module workers are covered by the CDP worker target hook.
-                        return new origWorker(scriptURL, options);
-                    }
-                    try {
-                        const absoluteURL = new w.URL(String(scriptURL), w.location.href).href;
-                        const xhr = new w.XMLHttpRequest();
-                        xhr.open('GET', absoluteURL, false);
-                        xhr.send();
-                        if (xhr.status === 200) {
-                            const baseLine = 'self.__adWorkerBase = ' + JSON.stringify(absoluteURL) + ';\n';
-                            const wrappedCode = baseLine + workerHookCode + '\n' + xhr.responseText;
-                            const blob = new w.Blob([wrappedCode], { type: 'application/javascript' });
-                            const blobURL = w.URL.createObjectURL(blob);
-                            return new origWorker(blobURL, options);
-                        }
-                    } catch(e) {}
-                    return new origWorker(scriptURL, options);
-                }, 'Worker', 1, true);
-                w.Worker.prototype = origWorker.prototype;
-                // Keep the constructor link consistent with the wrapper;
-                // anti-detect scripts commonly compare Worker.prototype.constructor.
-                try {
-                    Object.defineProperty(origWorker.prototype, 'constructor', {
-                        value: w.Worker, writable: true, configurable: true
-                    });
-                } catch(e) {}
-            }
-        } catch(e) {}
+        // 12. Workers keep their native constructor, URL, CSP and imports.
+        // The launcher pauses worker targets and installs their dedicated payload.
+        // Retain the rendered worker source in this closure for template compatibility.
+        const workerHookCode = __WORKER_JS__;
+        void workerHookCode;
 
         // 13. WebRTC: no JS hook.
         // S8: SDP from Chrome already uses mDNS and does not contain LAN IPs.
@@ -1092,47 +853,6 @@
     // Áp dụng stealth cho realm chính (window)
     applyStealth(window);
 
-    // ==========================================
-    // C4+C5+S2: iframe Prototype Borrowing Protection
-    // WeakSet tracker thay vì window property để tránh lộ qua Object.keys()
-    // ==========================================
-    const _patchedWindows = new WeakSet();
-    _patchedWindows.add(window);
-
-    if (!DISABLED.has('iframe')) try {
-        const iframeProto = HTMLIFrameElement.prototype;
-        const origContentWindowDesc = Object.getOwnPropertyDescriptor(iframeProto, 'contentWindow');
-        const origContentDocDesc = Object.getOwnPropertyDescriptor(iframeProto, 'contentDocument');
-
-        if (origContentWindowDesc && origContentWindowDesc.get) {
-            const origCWGetter = origContentWindowDesc.get;
-            Object.defineProperty(iframeProto, 'contentWindow', {
-                get: markNative(function() {
-                    const win = origCWGetter.call(this);
-                    if (win && !_patchedWindows.has(win)) {
-                        try {
-                            _patchedWindows.add(win);
-                            applyStealth(win);
-                        } catch(e) {}
-                    }
-                    return win;
-                }, 'get contentWindow', 0),
-                enumerable: true,
-                configurable: true
-            });
-        }
-
-        if (origContentDocDesc && origContentDocDesc.get) {
-            const origCDGetter = origContentDocDesc.get;
-            Object.defineProperty(iframeProto, 'contentDocument', {
-                get: markNative(function() {
-                    try { this.contentWindow; } catch(e) {}
-                    return origCDGetter.call(this);
-                }, 'get contentDocument', 0),
-                enumerable: true,
-                configurable: true
-            });
-        }
-    } catch(e) {}
-
+    // Same-origin/OOPIF documents are installed by the CDP pre-document
+    // registration. No contentWindow getter installs a second wrapper layer.
 })();

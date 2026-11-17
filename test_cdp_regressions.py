@@ -68,16 +68,17 @@ def test_r4_handshake_waits_for_core_verification_before_navigation():
     )
     # cdp_ready is only set after the initial document is resumed...
     resume_pos = configure.index('"Runtime.runIfWaitingForDebugger"')
-    ready_pos = configure.index("self._cdp_ready_events[profile.id].set()")
+    ready_pos = configure.index("ready_event.set()")
     assert ready_pos > resume_pos
     # ...and navigation waits for the main thread to verify core values on
     # about:blank first, so a slow page cannot invalidate verification.
     core_wait_pos = configure.index("core_event.wait")
     navigate_pos = configure.index('"Page.navigate"')
     assert core_wait_pos < navigate_pos
-    # addScriptToEvaluateOnNewDocument only covers future documents; the
-    # initial about:blank needs an explicit Runtime.evaluate.
-    assert '"Runtime.evaluate"' in configure
+    # A single registration covers existing and future contexts.
+    assert '"runImmediately": True' in configure
+    assert '"expression": stealth_js' not in configure
+    assert "not allowed" in configure
 
 
 def test_r4_load_event_dispatch_feeds_navigation_wait():
@@ -118,14 +119,15 @@ def _js_function_block(html, name):
 def test_r3_ui_shows_warnings_even_when_cdp_ready(fn):
     js = _read(DASHBOARD_JS_SRC)
     block = _js_function_block(js, fn)
-    # R3: warnings must surface on a successful launch too. They are an
-    # else-if chain after the cdp_ready === false branch, not part of the
-    # error path, and the success toast comes last.
-    not_ready_pos = block.index("data.cdp_ready === false")
-    warnings_pos = block.index("else if (data.warnings && data.warnings.length)")
-    warning_pos = block.index("else if (data.warning)")
-    success_pos = block.index("'success'")
-    assert not_ready_pos < warnings_pos < warning_pos < success_pos
+    # Both success callers delegate to the same outcome policy. Its behavior
+    # (including simultaneous gate/runtime/capability warnings) is executed by
+    # test_dashboard_fingerprint_contract.py, rather than inferred from branches.
+    success_branch = block[block.index("if (res.ok && data.success)"):block.index("refreshProfiles();")]
+    notice_pos = success_branch.index("launchOutcomeNotice(data,")
+    toast_pos = success_branch.index("showToast(notice.message, notice.type)")
+    assert notice_pos < toast_pos
+    assert "'success'" not in success_branch
+    assert "launchOutcomeNotice(data," in block[block.index("} else {"):]
 
 
 def test_session_tabs_restore_occurs_after_r4_core_verification():
@@ -178,9 +180,8 @@ def test_session_tabs_save_load_and_filtering(tmp_path):
 
 
 def test_snapshot_tabs_via_http_ignores_transient_scan_tabs(tmp_path, monkeypatch):
-    import io
     import json
-    import urllib.request
+    import antidetect.launcher as launcher_module
     from antidetect.facebook import TRANSIENT_TARGET_IDS
     from antidetect.launcher import BrowserLauncher
 
@@ -221,7 +222,7 @@ def test_snapshot_tabs_via_http_ignores_transient_scan_tabs(tmp_path, monkeypatc
         def read(self):
             return json.dumps(fake_targets).encode("utf-8")
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+    monkeypatch.setattr(launcher_module, "open_loopback", lambda *a, **kw: _FakeResp())
     TRANSIENT_TARGET_IDS.add("scan-temp-tab")
     try:
         saved = launcher._snapshot_tabs_via_http(9222, user_data_dir)

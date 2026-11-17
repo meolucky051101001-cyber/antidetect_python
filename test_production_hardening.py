@@ -235,55 +235,53 @@ def test_runtime_store_long_lived_instance_sees_other_process_writes():
 
 
 def test_identity_unknown_is_not_cached(monkeypatch):
-    """Timeout CIM chỉ là lỗi tạm; cache nó làm stop chờ hết TTL vô ích."""
+    """A transient CIM failure must not prevent the next fresh ownership query."""
     if sys.platform != "win32":
         pytest.skip("Windows process identity")
 
     class FakeKernel32:
         def OpenProcess(self, *_args):
-            return 12345
+            return 0x100000001
+
+        def GetExitCodeProcess(self, handle, status):
+            assert handle == 0x100000001
+            status._obj.value = 259
+            return 1
 
         def QueryFullProcessImageNameW(self, _handle, _flags, buf, _size):
-            buf.value = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+            buf.value = r"C:\\fixture\\chrome.exe"
+            return 1
+
+        def GetProcessTimes(self, _handle, birth, *_rest):
+            birth._obj.dwLowDateTime = 10
             return 1
 
         def CloseHandle(self, _handle):
             return 1
 
-    class FakeWindll:
-        kernel32 = FakeKernel32()
-
     user_data_dir = os.path.join(TEST_DATA_DIR, "identity-profile", "user_data")
-    record = {
-        "Name": "chrome.exe",
-        "CommandLine": (
-            f'"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" '
-            f'--user-data-dir="{user_data_dir}" --remote-debugging-port=9333'
-        ),
-        "CreationDate": "20261025000000",
-    }
+    record = {"Name": "chrome.exe", "CommandLine": "synthetic", "CreationDate": "birth-A"}
+    process_identity.invalidate_identity()
+    monkeypatch.setattr(process_identity, "_kernel32", FakeKernel32)
+    monkeypatch.setattr(process_identity, "windows_argv", lambda _: [
+        "chrome.exe", "--user-data-dir=" + user_data_dir, "--remote-debugging-port=9333",
+    ])
 
-    process_identity._identity_cache.clear()
-    monkeypatch.setattr(process_identity.ctypes, "windll", FakeWindll())
+    def timeout_query(_pid):
+        raise subprocess.TimeoutExpired(cmd="synthetic", timeout=5)
 
-    def timeout_run(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired(cmd="powershell", timeout=5)
-
-    monkeypatch.setattr(process_identity.subprocess, "run", timeout_run)
+    monkeypatch.setattr(process_identity, "_query_record", timeout_query)
     first = process_identity.read_browser_identity(424242, user_data_dir)
     assert first["state"] == "unknown"
-    assert 424242 not in process_identity._identity_cache
-
-    monkeypatch.setattr(
-        process_identity.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0], 0, stdout=json.dumps(record), stderr=""
-        ),
-    )
-    second = process_identity.read_browser_identity(424242, user_data_dir)
-    assert second["state"] == "owned"
-    assert second["port"] == 9333
+    assert not any(key[0] == 424242 for key in process_identity._identity_cache)
+    monkeypatch.setattr(process_identity, "_query_record", lambda _pid: record)
+    try:
+        second = process_identity.read_browser_identity(424242, user_data_dir)
+        assert second["state"] == "owned"
+        assert second["port"] == 9333
+        assert second["birth_ticks"] == 10
+    finally:
+        process_identity.invalidate_identity()
 
 
 def test_conditional_stop_cannot_stop_replacement_session(monkeypatch):
@@ -301,6 +299,7 @@ def test_conditional_stop_cannot_stop_replacement_session(monkeypatch):
 
 
 def test_stop_retries_transient_unknown_identity(monkeypatch):
+    monkeypatch.setattr(launcher_module, "browser_pids_using_dir", lambda *_a, **_k: set())
     m = ProfileManager()
     launcher = BrowserLauncher(m)
     p = m.create_profile("stop-retry-identity")
@@ -329,94 +328,70 @@ def test_stop_retries_transient_unknown_identity(monkeypatch):
         launcher.unregister_cleanup()
 
 
-def test_stop_does_not_report_stale_graceful_taskkill_error(monkeypatch):
-    m = ProfileManager()
-    launcher = BrowserLauncher(m)
-    p = m.create_profile("stop-force-stderr")
-    user_data_dir = os.path.join(storage_module.DATA_DIR, "profiles", p.id, "user_data")
+@pytest.mark.parametrize("outcome", ["refused", "unconfirmed", "confirmed"])
+def test_stop_retains_runtime_until_native_handle_exit_is_confirmed(monkeypatch, outcome):
+    """TerminateProcess success alone is not proof of exit; never use taskkill."""
+    monkeypatch.setattr(launcher_module, "browser_pids_using_dir", lambda *_a, **_k: set())
+    manager = ProfileManager()
+    launcher = BrowserLauncher(manager)
+    profile = manager.create_profile("native-handle-stop-" + outcome)
+    directory = os.path.join(storage_module.DATA_DIR, "profiles", profile.id, "user_data")
     launcher._runtime_store.upsert(
-        p.id, pid=424242, port=9333, user_data_dir=user_data_dir
+        profile.id, pid=424242, port=9333, user_data_dir=directory, created="birth-A",
     )
+    identity = {"state": "owned", "port": 9333, "created": "birth-A", "birth_ticks": 10}
+    monkeypatch.setattr(launcher_module, "read_browser_identity", lambda *_a, **_k: dict(identity))
+    calls = []
 
+    class FakeKernel32:
+        def OpenProcess(self, access, inherit, pid):
+            calls.append(("open", access, pid))
+            return 0x100000001
+
+        def TerminateProcess(self, handle, code):
+            calls.append(("terminate", handle))
+            return int(outcome != "refused")
+
+        def CloseHandle(self, handle):
+            calls.append(("close", handle))
+            return 1
+
+    monkeypatch.setattr(process_identity, "_kernel32", FakeKernel32)
+    monkeypatch.setattr(process_identity, "_identity_on_handle", lambda *_a: dict(identity))
+    monkeypatch.setattr(process_identity, "_handle_snapshot", lambda *_a: {
+        "state": "absent" if outcome == "confirmed" else "candidate",
+        "birth_ticks": 10,
+    })
     monkeypatch.setattr(
-        launcher_module,
-        "read_browser_identity",
-        lambda _pid, _udd: {"state": "owned", "port": 9333, "created": "c1"},
+        launcher_module, "terminate_verified_browser",
+        lambda pid, user_dir, expected: process_identity.terminate_verified_browser(
+            pid, user_dir, expected, timeout=0,
+        ),
     )
-    # Browser vẫn còn sống sau /F để buộc stop trả 409 và lộ message.
-    monkeypatch.setattr(launcher, "_wait_identity_gone", lambda *_a, **_k: "owned")
-    taskkills = []
-
-    def fake_run(args, **_kwargs):
-        taskkills.append(args)
-        if "/F" in args:
-            return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
-        return subprocess.CompletedProcess(
-            args,
-            1,
-            stdout=b"",
-            stderr=(
-                b"ERROR: child process could not be terminated. Reason: This "
-                b"process can only be terminated forcefully (with /F option)."
-            ),
-        )
-
-    monkeypatch.setattr(launcher_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        launcher_module.subprocess, "run",
+        lambda *_a, **_k: pytest.fail("native handle termination must not spawn taskkill"),
+    )
     try:
-        result = launcher.stop(p.id)
-        assert result["success"] is False
-        assert result["code"] == "STOP_FAILED"
-        assert any("/F" in args for args in taskkills)
-        # Lỗi WM_CLOSE của lượt graceful không được dính vào kết quả /F.
-        assert "can only be terminated forcefully" not in result["error"]
-        assert "xác minh cuối: owned" in result["error"]
-    finally:
-        launcher.unregister_cleanup()
-        launcher._runtime_store.remove(p.id)
-        m.delete_profile(p.id)
-
-
-def test_stop_confirms_exit_after_transient_final_identity(monkeypatch):
-    m = ProfileManager()
-    launcher = BrowserLauncher(m)
-    p = m.create_profile("stop-final-rescue")
-    user_data_dir = os.path.join(storage_module.DATA_DIR, "profiles", p.id, "user_data")
-    launcher._runtime_store.upsert(
-        p.id, pid=424242, port=9333, user_data_dir=user_data_dir
-    )
-    identities = iter(
-        [
-            {"state": "owned", "port": 9333, "created": "c1"},
-            {"state": "owned", "port": 9333, "created": "c1"},
-            {"state": "owned", "port": 9333, "created": "c1"},
-            {"state": "absent", "port": None, "created": None},
+        result = launcher.stop(profile.id)
+        assert calls == [
+            ("open", process_identity._QUERY | process_identity._TERMINATE, 424242),
+            ("terminate", 0x100000001),
+            ("close", 0x100000001),
         ]
-    )
-    monkeypatch.setattr(
-        launcher_module,
-        "read_browser_identity",
-        lambda _pid, _udd: next(
-            identities, {"state": "absent", "port": None, "created": None}
-        ),
-    )
-    # Các vòng chờ sau taskkill đều thấy owned (Windows reap chậm); lần hỏi
-    # quyết định cuối cùng mới thấy absent — stop phải báo thành công.
-    monkeypatch.setattr(launcher, "_wait_identity_gone", lambda *_a, **_k: "owned")
-    monkeypatch.setattr(
-        launcher_module.subprocess,
-        "run",
-        lambda args, **_kwargs: subprocess.CompletedProcess(
-            args, 0, stdout=b"", stderr=b""
-        ),
-    )
-    try:
-        result = launcher.stop(p.id)
-        assert result["success"] is True
-        assert launcher._runtime_store.get(p.id) is None
+        if outcome == "confirmed":
+            assert result["success"] is True
+            assert launcher._runtime_store.get(profile.id) is None
+        else:
+            assert result["success"] is False
+            assert result["code"] == "STOP_FAILED"
+            remaining = launcher._runtime_store.get(profile.id)
+            assert remaining["pid"] == 424242
+            assert remaining["user_data_dir"] == directory
     finally:
         launcher.unregister_cleanup()
-        launcher._runtime_store.remove(p.id)
-        m.delete_profile(p.id)
+        launcher._runtime_store.remove(profile.id)
+        manager.delete_profile(profile.id)
 
 
 def test_wait_identity_gone_retries_unknown_without_failing(monkeypatch):
@@ -444,6 +419,7 @@ def test_wait_identity_gone_retries_unknown_without_failing(monkeypatch):
 
 @pytest.mark.parametrize("recovered_state", ["owned", "unknown"])
 def test_recovered_runtime_requires_stop_before_reuse(monkeypatch, recovered_state):
+    monkeypatch.setattr(launcher_module, "browser_pids_using_dir", lambda *_a, **_k: set())
     m = ProfileManager()
     launcher = BrowserLauncher(m)
     p = m.create_profile(f"recover-to-stop-{recovered_state}")
@@ -470,7 +446,7 @@ def test_recovered_runtime_requires_stop_before_reuse(monkeypatch, recovered_sta
     monkeypatch.setattr(launcher_module, "read_browser_identity", fake_identity)
     monkeypatch.setattr(launcher, "_resolve_browser_path", lambda _profile: sys.executable)
     monkeypatch.setattr(launcher_module.subprocess, "Popen", unexpected_call)
-    monkeypatch.setattr(launcher_module.urllib.request, "urlopen", unexpected_call)
+    monkeypatch.setattr(launcher_module, "open_loopback", unexpected_call)
     try:
         assert launcher.is_running(p.id) is True
         assert p.id in launcher._recovery_required
@@ -1176,7 +1152,10 @@ def test_browser_resolution_order(monkeypatch, tmp_path):
             exe_dir.mkdir(parents=True)
             (exe_dir / "chrome.exe").write_text("fake")
         monkeypatch.setattr(L, "BROWSERS_DIR", str(browsers_dir))
-        monkeypatch.setattr(launcher, "browser_path", r"C:\installed\chrome.exe")
+        installed_exe = tmp_path / "installed" / "chrome.exe"
+        installed_exe.parent.mkdir()
+        installed_exe.write_bytes(b"synthetic browser fixture")
+        monkeypatch.setattr(launcher, "browser_path", str(installed_exe))
 
         # 1. Không per-profile, không env → pin mới nhất.
         monkeypatch.delenv("ANTIDETECT_BROWSER_PATH", raising=False)
@@ -1216,7 +1195,7 @@ def test_browser_resolution_order(monkeypatch, tmp_path):
         # 7. Không per-profile, không env, pin không khớp → fallback installed.
         monkeypatch.delenv("ANTIDETECT_BROWSER_PATH", raising=False)
         monkeypatch.setattr(L, "BROWSERS_DIR", str(tmp_path / "browsers-empty"))
-        assert launcher._resolve_browser_path(p) == r"C:\installed\chrome.exe"
+        assert launcher._resolve_browser_path(p) == str(installed_exe)
     finally:
         m.delete_profile(p.id)
     launcher.unregister_cleanup()
@@ -2298,7 +2277,6 @@ def test_fetch_facebook_pages_passes_scan_context_and_gates_deep(monkeypatch):
 def test_verify_emulation_skips_webgl_when_spoof_disabled(monkeypatch):
     """Authentic tắt WebGL hook: GPU thật của host không được làm fail verify."""
     import asyncio
-    import types
 
     import antidetect.launcher as launcher_mod
     from antidetect.models import FingerprintConfig
@@ -2340,7 +2318,7 @@ def test_verify_emulation_skips_webgl_when_spoof_disabled(monkeypatch):
 
         def read(self):
             return json.dumps([
-                {"type": "page", "webSocketDebuggerUrl": "ws://fake"}
+                {"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/fixture"}
             ]).encode()
 
     class _WebSocket:
@@ -2359,14 +2337,8 @@ def test_verify_emulation_skips_webgl_when_spoof_disabled(monkeypatch):
                 "result": {"result": {"value": actual}},
             })
 
-    websockets = types.ModuleType("websockets")
-    websockets.connect = lambda *args, **kwargs: _WebSocket()
-    monkeypatch.setitem(sys.modules, "websockets", websockets)
-    monkeypatch.setattr(
-        launcher_mod.urllib.request,
-        "urlopen",
-        lambda url, timeout=1: _Response(),
-    )
+    monkeypatch.setattr(launcher_mod, "connect_loopback", lambda *a, **kw: _WebSocket())
+    monkeypatch.setattr(launcher_mod, "open_loopback", lambda *a, **kw: _Response())
 
     result = asyncio.run(
         launcher_mod.BrowserLauncher._verify_emulation(None, 9222, fp)
@@ -2377,6 +2349,7 @@ def test_verify_emulation_skips_webgl_when_spoof_disabled(monkeypatch):
     assert "webgl_max_texture" not in result["checks"]
 
     unique = FingerprintConfig(
+        fingerprint_algorithm_version=1,
         webgl_vendor="Google Inc. (Intel)",
         webgl_renderer="STORED-RENDERER",
     )

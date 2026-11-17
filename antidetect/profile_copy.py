@@ -6,6 +6,7 @@ Storage sẽ orchestrate các bước này ở M2.
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -353,6 +354,7 @@ def operation_paths(
 def remove_operation_target(profiles_dir: str, target_id: str) -> bool:
     target_id = validate_profile_id(target_id)
     target_dir = os.path.join(os.path.abspath(profiles_dir), target_id)
+    _require_no_reparse(target_dir)
     if os.path.normcase(os.path.dirname(os.path.realpath(target_dir))) != os.path.normcase(
         os.path.realpath(profiles_dir)
     ):
@@ -363,7 +365,7 @@ def remove_operation_target(profiles_dir: str, target_id: str) -> bool:
     if not os.path.isdir(target_dir) or os.path.islink(target_dir):
         raise ProfileCopyError("Đích cần dọn không phải thư mục hợp lệ",
                                code="COPY_CLEANUP_UNSAFE")
-    shutil.rmtree(target_dir)
+    _remove_tree_checked(target_dir)
     return True
 
 
@@ -383,7 +385,41 @@ def _entry_is_reparse(entry: os.DirEntry) -> bool:
     return _is_reparse_stat(entry.stat(follow_symlinks=False))
 
 
+def _require_no_reparse(path: str) -> None:
+    """Validate lexical ancestors before reads, promotion or cleanup.
+
+    This closes prepared junction paths; same-user path replacement races are
+    outside a filesystem snapshot's isolation guarantee.
+    """
+    current = os.path.abspath(path)
+    ancestors = []
+    while True:
+        ancestors.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    for component in reversed(ancestors):
+        try:
+            value = os.lstat(component)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(value.st_mode) or _is_reparse_stat(value):
+            raise CopyReparsePointError("Reparse point/symlink trong đường dữ liệu")
+
+
+def _remove_tree_checked(path: str) -> None:
+    _require_no_reparse(path)
+    for directory, dirs, files in os.walk(path, followlinks=False):
+        _require_no_reparse(directory)
+        for name in dirs + files:
+            _require_no_reparse(os.path.join(directory, name))
+    _require_no_reparse(path)
+    shutil.rmtree(path)
+
+
 def _require_real_dir(path: str, label: str) -> None:
+    _require_no_reparse(path)
     if not os.path.isdir(path):
         raise ProfileCopyError(f"{label} không tồn tại hoặc không phải thư mục")
     st = os.lstat(path)
@@ -441,12 +477,14 @@ def prepare_staging(profiles_dir: str, operation_id: str) -> str:
     staging_root = os.path.join(
         os.path.abspath(profiles_dir), ".staging", operation_id
     )
+    _require_no_reparse(staging_root)
     if os.path.exists(staging_root):
         if not os.path.isdir(staging_root):
             raise CopyTargetExistsError("Đường dẫn staging đã tồn tại và không phải thư mục")
         if os.listdir(staging_root):
             raise CopyTargetExistsError("Staging của operation đã có dữ liệu")
     os.makedirs(staging_root, exist_ok=True)
+    _require_no_reparse(staging_root)
     return os.path.join(staging_root, "user_data")
 
 
@@ -472,55 +510,117 @@ def _copy_dir_contents(source: str, target: str, stats: CopyStats) -> None:
                 raise ProfileCopyError(f"Loại entry không hỗ trợ: {entry.path}")
 
 
-def _inventory(root: str) -> Dict[str, int]:
+@dataclass(frozen=True)
+class _CopyEntry:
+    kind: str
+    size: int
+    sha256: str
+    identity: Tuple[int, int, int, int, int]
+
+
+def _stat_identity(value: os.stat_result) -> Tuple[int, int, int, int, int]:
+    # atime changes when we read; inode, size and write times must remain stable.
+    return (value.st_dev, value.st_ino, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _hash_stable_file(path: str, before: os.stat_result) -> str:
+    digest = hashlib.sha256()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags), "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if _stat_identity(opened) != _stat_identity(before):
+            raise CopyVerificationError("File nguồn thay đổi trước khi đọc")
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+        if _stat_identity(os.fstat(handle.fileno())) != _stat_identity(before):
+            raise CopyVerificationError("File nguồn thay đổi trong khi đọc")
+    after = os.lstat(path)
+    if stat.S_ISLNK(after.st_mode) or _is_reparse_stat(after):
+        raise CopyReparsePointError("File bị thay bằng reparse point khi đọc")
+    if _stat_identity(after) != _stat_identity(before):
+        raise CopyVerificationError("File nguồn bị thay trong khi đọc")
+    return digest.hexdigest()
+
+
+def _inventory(root: str) -> Dict[str, _CopyEntry]:
+    """Hash copied entries, including empty directories, without storing secrets.
+
+    Callers must already hold the lifecycle lock and prove the source is idle.
+    Snapshots detect observed changes; they cannot lock out an external writer.
+    """
     _require_real_dir(root, "Thư mục")
-    inventory: Dict[str, int] = {}
+    inventory: Dict[str, _CopyEntry] = {}
 
     def walk(path: str) -> None:
+        before_dir = os.lstat(path)
+        if stat.S_ISLNK(before_dir.st_mode) or _is_reparse_stat(before_dir):
+            raise CopyReparsePointError("Reparse point trong cây dữ liệu")
         with os.scandir(path) as entries:
             for entry in entries:
                 if entry.name in IGNORE_NAMES:
                     continue
-                if _entry_is_reparse(entry):
-                    raise CopyReparsePointError(
-                        f"Reparse point trong cây dữ liệu: {entry.path}"
-                    )
-                if entry.is_dir(follow_symlinks=False):
+                before = os.lstat(entry.path)
+                if stat.S_ISLNK(before.st_mode) or _is_reparse_stat(before):
+                    raise CopyReparsePointError("Reparse point trong cây dữ liệu")
+                rel = os.path.relpath(entry.path, root)
+                if stat.S_ISDIR(before.st_mode):
                     walk(entry.path)
-                elif entry.is_file(follow_symlinks=False):
-                    rel = os.path.relpath(entry.path, root)
-                    inventory[rel] = entry.stat(follow_symlinks=False).st_size
+                elif stat.S_ISREG(before.st_mode):
+                    inventory[rel] = _CopyEntry(
+                        "file", before.st_size, _hash_stable_file(entry.path, before),
+                        _stat_identity(before),
+                    )
                 else:
-                    raise ProfileCopyError(f"Loại entry không hỗ trợ: {entry.path}")
+                    raise ProfileCopyError("Loại entry không hỗ trợ")
+        after_dir = os.lstat(path)
+        if _stat_identity(before_dir) != _stat_identity(after_dir):
+            raise CopyVerificationError("Cây thư mục thay đổi trong khi kiểm tra")
+        inventory[os.path.relpath(path, root)] = _CopyEntry(
+            "directory", 0, "", _stat_identity(after_dir),
+        )
 
     walk(root)
     return inventory
 
 
-def verify_copy(source_user_data: str, staging_user_data: str) -> CopyStats:
+def verify_copy(
+    source_user_data: str,
+    staging_user_data: str,
+    *,
+    expected_source: Optional[Dict[str, _CopyEntry]] = None,
+) -> CopyStats:
     source = _inventory(source_user_data)
+    if expected_source is not None and source != expected_source:
+        raise CopyVerificationError("Nguồn thay đổi trong quá trình sao chép")
     staged = _inventory(staging_user_data)
     missing = len(set(source) - set(staged))
     extra = len(set(staged) - set(source))
     if missing or extra:
         raise CopyVerificationError(
-            f"Cây dữ liệu không khớp: thiếu {missing} file, thừa {extra} file"
+            f"Cây dữ liệu không khớp: thiếu {missing} entry, thừa {extra} entry"
         )
-    mismatched = sum(1 for rel, size in source.items() if staged[rel] != size)
-    if mismatched:
-        raise CopyVerificationError(f"{mismatched} file sai kích thước")
-    return CopyStats(
-        total_files=len(source),
-        total_bytes=sum(source.values()),
+    mismatched = sum(
+        1 for rel, entry in source.items()
+        if (entry.kind, entry.size, entry.sha256) !=
+           (staged[rel].kind, staged[rel].size, staged[rel].sha256)
     )
+    if mismatched:
+        raise CopyVerificationError(f"{mismatched} entry sai loại/kích thước/SHA-256")
+    if _inventory(source_user_data) != source:
+        raise CopyVerificationError("Nguồn thay đổi trong quá trình xác minh")
+    files = [entry for entry in source.values() if entry.kind == "file"]
+    return CopyStats(total_files=len(files), total_bytes=sum(entry.size for entry in files))
 
 
 def copy_user_data(source_user_data: str, staging_user_data: str) -> CopyStats:
     _require_real_dir(source_user_data, "Nguồn user_data")
+    _require_no_reparse(staging_user_data)
     if os.path.exists(staging_user_data):
         raise CopyTargetExistsError("Đích staging đã tồn tại")
     parent = os.path.dirname(os.path.abspath(staging_user_data))
     os.makedirs(parent, exist_ok=True)
+    _require_no_reparse(staging_user_data)
     try:
         os.mkdir(staging_user_data)
     except FileExistsError as exc:
@@ -530,15 +630,22 @@ def copy_user_data(source_user_data: str, staging_user_data: str) -> CopyStats:
 
     stats = CopyStats()
     try:
+        source_snapshot = _inventory(source_user_data)
         _copy_dir_contents(source_user_data, staging_user_data, stats)
-        verify_copy(source_user_data, staging_user_data)
+        verify_copy(source_user_data, staging_user_data, expected_source=source_snapshot)
     except BaseException:
-        shutil.rmtree(staging_user_data, ignore_errors=True)
+        try:
+            _remove_tree_checked(staging_user_data)
+        except (OSError, ProfileCopyError):
+            # Storage's operation recovery reports retained staging separately.
+            pass
         raise
     return stats
 
 
 def promote_staging(staging_user_data: str, target_user_data: str) -> None:
+    _require_no_reparse(staging_user_data)
+    _require_no_reparse(target_user_data)
     if not os.path.isdir(staging_user_data):
         raise ProfileCopyError("Staging không tồn tại để promote")
     if os.path.exists(target_user_data):
@@ -548,6 +655,8 @@ def promote_staging(staging_user_data: str, target_user_data: str) -> None:
     delay = 0.05
     for attempt in range(3):
         try:
+            _require_no_reparse(staging_user_data)
+            _require_no_reparse(target_user_data)
             os.rename(staging_user_data, target_user_data)
             return
         except OSError as exc:
@@ -562,9 +671,9 @@ def promote_staging(staging_user_data: str, target_user_data: str) -> None:
 
 def cleanup_staging(operation_dir: str, profiles_dir: str) -> bool:
     base = os.path.normcase(
-        os.path.realpath(os.path.join(profiles_dir, ".staging"))
+        os.path.abspath(os.path.join(profiles_dir, ".staging"))
     )
-    target = os.path.normcase(os.path.realpath(operation_dir))
+    target = os.path.normcase(os.path.abspath(operation_dir))
     try:
         inside = os.path.commonpath([base, target]) == base
     except ValueError:
@@ -574,11 +683,12 @@ def cleanup_staging(operation_dir: str, profiles_dir: str) -> bool:
             "Đường dẫn cleanup không thuộc .staging/<operation>",
             code="COPY_CLEANUP_UNSAFE",
         )
+    _require_no_reparse(target)
     if not os.path.exists(target):
         return False
     if not os.path.isdir(target):
         raise ProfileCopyError("Đường dẫn cleanup không phải thư mục")
-    shutil.rmtree(target)
+    _remove_tree_checked(target)
     return True
 
 

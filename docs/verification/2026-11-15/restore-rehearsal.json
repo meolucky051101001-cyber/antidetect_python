@@ -1,0 +1,96 @@
+{
+  "recorded_at_utc": "2026-11-15T16:45:09+00:00",
+  "status": "passed",
+  "duration_seconds": 5.625,
+  "test": "test_release_restore.py::test_offline_v1_v3_backup_restore_round_trip",
+  "test_file_sha256": "bae259fda868b685c2db2694bebeaaed6d57c0b0cc780f2ce0de25920e24906d",
+  "python_version": "3.10.11",
+  "data": "synthetic fixture only; all data directories inside pytest temporary directory",
+  "dpapi": "real Windows CryptProtectData/CryptUnprotectData; same current Windows user",
+  "snapshot": "offline after fixture child exit; sqlite3.Connection.backup plus SHA-256 manifest",
+  "migration": {
+    "from": 1,
+    "to": 3,
+    "runs": 2,
+    "idempotent": true,
+    "all_original_columns_and_rows_preserved": true
+  },
+  "restored": {
+    "before_upgrade": {
+      "api_token_hash_resolved": true,
+      "browser_sentinels": 6,
+      "history_sha256": "bd32cd0aab8bedefea462f5b89f8caf593ffbae58686f56761f4f14bc3f02d4c",
+      "job_items": 2,
+      "jobs": 1,
+      "metadata_sha256": "e7c9c2c8d3138c4c9781033d5b6fed14908a766df1703f6d5fd159bc3a031238",
+      "metric_history_rows": 2,
+      "pages": 1,
+      "profiles": 2,
+      "proxy_credentials_resolved": 2,
+      "run_history_events": 2,
+      "schedule_sha256": "8db99a8a5344682b69ccd9fbc6f1d7b0d34731ea2eb5541e6de250b6a8c99a1d",
+      "schedules": 2,
+      "schema_version": 1,
+      "sqlite_logical_sha256": "455895ee8a0374abbc63dec71adb5ca018925a18aaf8e5674ffe2a573c7f082a"
+    },
+    "after_upgrade": {
+      "api_token_hash_resolved": true,
+      "browser_sentinels": 6,
+      "history_sha256": "bd32cd0aab8bedefea462f5b89f8caf593ffbae58686f56761f4f14bc3f02d4c",
+      "job_items": 2,
+      "jobs": 1,
+      "metadata_sha256": "e7c9c2c8d3138c4c9781033d5b6fed14908a766df1703f6d5fd159bc3a031238",
+      "metric_history_rows": 2,
+      "pages": 1,
+      "profiles": 2,
+      "proxy_credentials_resolved": 2,
+      "run_history_events": 2,
+      "schedule_sha256": "8db99a8a5344682b69ccd9fbc6f1d7b0d34731ea2eb5541e6de250b6a8c99a1d",
+      "schedules": 2,
+      "schema_version": 3,
+      "sqlite_logical_sha256": "9ca8e0f37a5928f236c8ec992e4a949008cceeee55bc4861ddb7c7a5099c978e"
+    }
+  },
+  "source_fixture_unchanged": true,
+  "runtime_files_excluded": [
+    "runtime.dpapi",
+    "browser_runtime.json",
+    "server_info.json"
+  ],
+  "limitations": [
+    "No production data or actual user credentials were accessed.",
+    "Browser files are byte sentinels, not real Chrome cookies, sessions, or multi-GB profiles.",
+    "Same-user DPAPI restore only; cross-user/machine/Windows-account recovery is not certified.",
+    "Offline fixture has no concurrent writers; live coordinated backup was not exercised.",
+    "Pre-upgrade restore uses legacy v1 SQL shape and compatible JSON/DPAPI readers, not an old full application binary.",
+    "Manifest checks accidental corruption; it is not a signed or authenticated backup format.",
+    "Historical backup archives, active copy journals and production-sized disk/antivirus failure cases are outside this fixture."
+  ],
+  "base_head": "793038de34a6fd5aa480b3dd1d1fc638338b795c",
+  "validation": {
+    "pytest": {
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "duration_seconds": 6.44
+    },
+    "ruff": "passed",
+    "py_compile": "passed",
+    "negative_controls": [
+      "modified profiles.json",
+      "modified secrets.dpapi",
+      "modified fanpages.sqlite",
+      "modified browser sentinel"
+    ],
+    "negative_control_result": "all four rejected before restore destination was created"
+  },
+  "snapshot_scope": [
+    "profiles.json",
+    "secrets.dpapi",
+    "api_token.dpapi",
+    "schedules.json",
+    "schedule_runs.json",
+    "fanpages.sqlite",
+    "profiles/** sentinel files"
+  ]
+}

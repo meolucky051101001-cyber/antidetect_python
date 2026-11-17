@@ -310,3 +310,128 @@ def test_journal_read_rejects_corrupt_file(tmp_path):
 
     with pytest.raises(CopyJournalError):
         journal.read()
+
+
+def test_verify_copy_rejects_same_size_corruption(source_tree, tmp_path):
+    staging = _copy_into_staging(tmp_path, source_tree)
+    (staging / "Default" / "Cookies").write_bytes(b"x" * 60)
+    with pytest.raises(CopyVerificationError):
+        verify_copy(str(source_tree), str(staging))
+
+
+def test_copy_rejects_source_changed_before_first_copy(source_tree, tmp_path, monkeypatch):
+    staging = Path(prepare_staging(str(tmp_path / "profiles"), "source-change"))
+    original = profile_copy._copy_dir_contents
+    changed = False
+
+    def mutate_then_copy(source, target, stats):
+        nonlocal changed
+        if not changed:
+            changed = True
+            (source_tree / "Local State").write_bytes(b"[]")
+        return original(source, target, stats)
+
+    monkeypatch.setattr(profile_copy, "_copy_dir_contents", mutate_then_copy)
+    with pytest.raises(CopyVerificationError):
+        copy_user_data(str(source_tree), str(staging))
+    assert changed
+    assert not staging.exists()
+
+
+def test_verify_copy_rejects_missing_empty_directory(source_tree, tmp_path):
+    (source_tree / "Empty").mkdir()
+    staging = _copy_into_staging(tmp_path, source_tree)
+    (staging / "Empty").rmdir()
+    with pytest.raises(CopyVerificationError):
+        verify_copy(str(source_tree), str(staging))
+
+
+
+def test_verify_copy_rechecks_source_after_staging_hash(source_tree, tmp_path, monkeypatch):
+    staging = _copy_into_staging(tmp_path, source_tree)
+    original = profile_copy._inventory
+
+    def inventory_then_mutate(root):
+        result = original(root)
+        if os.path.normcase(os.path.abspath(root)) == os.path.normcase(str(staging)):
+            source_file = source_tree / "Local State"
+            before = source_file.stat()
+            source_file.write_bytes(b"[]")
+            os.utime(source_file, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return result
+
+    monkeypatch.setattr(profile_copy, "_inventory", inventory_then_mutate)
+    with pytest.raises(CopyVerificationError):
+        verify_copy(str(source_tree), str(staging))
+
+
+def test_copy_preserves_quiescent_sqlite_wal_snapshot(tmp_path):
+    import sqlite3
+
+    source = tmp_path / "source"
+    source.mkdir()
+    db_path = source / "fixture.sqlite"
+    # An idle writer keeps the WAL present, but performs no work during copy.
+    # This is synthetic SQLite data, not a browser cookie database.
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA wal_autocheckpoint=0")
+        connection.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT)")
+        connection.execute("INSERT INTO sample(value) VALUES ('synthetic sentinel')")
+        connection.commit()
+        assert Path(str(db_path) + "-wal").exists()
+        staging = _copy_into_staging(tmp_path, source, "sqlite-wal")
+        with sqlite3.connect(staging / "fixture.sqlite") as restored:
+            assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+            assert restored.execute("SELECT value FROM sample").fetchall() == [
+                ("synthetic sentinel",)
+            ]
+
+
+
+def test_cleanup_staging_rejects_junction_alias_to_another_operation(tmp_path):
+    profiles = tmp_path / "profiles"
+    other = profiles / ".staging" / "other-operation"
+    other.mkdir(parents=True)
+    sentinel = other / "keep"
+    sentinel.write_bytes(b"keep")
+    link = profiles / ".staging" / "alias-operation"
+    _make_directory_link(link, other)
+    try:
+        with pytest.raises(ProfileCopyError):
+            cleanup_staging(str(link), str(profiles))
+        assert sentinel.read_bytes() == b"keep"
+    finally:
+        if os.path.lexists(link):
+            _remove_directory_link(link)
+
+
+def test_prepare_staging_rejects_junction_parent(tmp_path):
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = profiles / ".staging"
+    _make_directory_link(link, outside)
+    try:
+        with pytest.raises(CopyReparsePointError):
+            prepare_staging(str(profiles), "new-operation")
+        assert list(outside.iterdir()) == []
+    finally:
+        _remove_directory_link(link)
+
+
+def test_promote_staging_rejects_junction_target_parent(source_tree, tmp_path):
+    staging = _copy_into_staging(tmp_path, source_tree)
+    profiles = tmp_path / "profiles"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = profiles / "target"
+    _make_directory_link(link, outside)
+    try:
+        with pytest.raises(CopyReparsePointError):
+            promote_staging(str(staging), str(link / "user_data"))
+        assert staging.is_dir()
+        assert list(outside.iterdir()) == []
+    finally:
+        _remove_directory_link(link)

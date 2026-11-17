@@ -199,8 +199,8 @@ class _OkResponse:
 
 def test_check_server_health_success_and_failure(monkeypatch):
     monkeypatch.setattr(
-        sc.urllib.request,
-        "urlopen",
+        sc,
+        "open_loopback",
         lambda req, timeout: _OkResponse({"application": "antidetect-python"}),
     )
     assert sc.check_server_health(8766) == {"application": "antidetect-python"}
@@ -208,7 +208,7 @@ def test_check_server_health_success_and_failure(monkeypatch):
     def fail(req, timeout):
         raise OSError("offline")
 
-    monkeypatch.setattr(sc.urllib.request, "urlopen", fail)
+    monkeypatch.setattr(sc, "open_loopback", fail)
     assert sc.check_server_health(8766) is None
 
 
@@ -276,7 +276,7 @@ def test_stop_server_shutdown_api_success(pid_file, monkeypatch):
         lambda port: {"application": "antidetect-python", "instance_id": "A"},
     )
     monkeypatch.setattr(
-        sc.urllib.request, "urlopen", lambda req, timeout: _OkResponse({})
+        sc, "open_loopback", lambda req, timeout: _OkResponse({})
     )
     import antidetect.runtime_auth as runtime_auth
 
@@ -305,7 +305,7 @@ def test_stop_server_refuses_409_without_kill(pid_file, monkeypatch):
     def conflict(req, timeout):
         raise urllib.error.HTTPError("http://127.0.0.1:8766", 409, "Conflict", {}, None)
 
-    monkeypatch.setattr(sc.urllib.request, "urlopen", conflict)
+    monkeypatch.setattr(sc, "open_loopback", conflict)
     monkeypatch.setattr(
         sc, "remove_server_info", lambda **kwargs: pytest.fail("must not remove")
     )
@@ -335,7 +335,7 @@ def test_stop_server_falls_back_to_verified_kill(pid_file, monkeypatch):
     def offline(req, timeout):
         raise OSError("control path dead")
 
-    monkeypatch.setattr(sc.urllib.request, "urlopen", offline)
+    monkeypatch.setattr(sc, "open_loopback", offline)
     monkeypatch.setattr(
         sc.subprocess, "run", lambda *a, **k: killed.append(a[0] if a else None)
     )

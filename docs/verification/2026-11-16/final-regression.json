@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-16",
+  "timezone": "Asia/Bangkok",
+  "application_commit": "3a86887ea84f54311611edc045247be153351953",
+  "base_commit": "793038de34a6fd5aa480b3dd1d1fc638338b795c",
+  "tested_state": "application commit plus test_review_fanpage_scheduler.py fixture correction in this commit",
+  "python": "3.10.11",
+  "platform": "Windows",
+  "pytest": {
+    "command": "python -m pytest -q --cov=antidetect --cov=web --cov-report=term --cov-fail-under=58",
+    "passed": 728,
+    "skipped": 3,
+    "failed": 0,
+    "warnings": 2,
+    "duration_seconds": 51.28,
+    "coverage_percent": 77.28,
+    "coverage_gate_percent": 58,
+    "skip_scope": [
+      "opt-in live runtime",
+      "opt-in UI smoke",
+      "opt-in UI release errors"
+    ],
+    "execution": "outside Windows sandbox; conftest isolates all data in TEMP"
+  },
+  "checks": {
+    "ruff": "passed",
+    "python_compileall": "passed",
+    "dashboard_js_syntax": "passed",
+    "fanpages_js_syntax": "passed",
+    "git_diff_check": "passed"
+  },
+  "ci_fixture_correction": {
+    "initial_run": "https://github.com/meolucky051101001-cyber/antidetect_python/actions/runs/43808919516",
+    "failure": "8 fanpage job outcome tests returned queued/running after the shared fixture's 150 ms lease expired on the Windows runner",
+    "reproduction": "200 ms delay after create_sync_job returned queued with the old fixture; completed with a 90 second lease",
+    "change": "Use production lease defaults for outcome tests; heartbeat test observes a successful real renewal event and increasing expiry instead of sleeping across a 150 ms lease",
+    "production_code_changed": false
+  },
+  "scope": {
+    "real_profiles_opened_or_printed": false,
+    "real_cookies_opened_or_printed": false,
+    "live_facebook_access": false,
+    "production_data_migration_or_deployment": false,
+    "short_soak": "Prior evidence only: docs/verification/2026-11-15/soak-preflight.json; 2 lifecycle and 2 copy cycles, before final parser correction",
+    "long_soak": "pending"
+  },
+  "pull_request": "https://github.com/meolucky051101001-cyber/antidetect_python/pull/3"
+}

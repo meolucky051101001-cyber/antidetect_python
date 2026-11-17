@@ -1,0 +1,93 @@
+{
+  "application_base_commit": "793038de34a6fd5aa480b3dd1d1fc638338b795c",
+  "application_source_sha256": {
+    "antidetect\\facebook.py": "22219f83e1a6bcf674c793382b077939523df131a79f7fbb165e8425efd24bdc",
+    "antidetect\\fanpage_scan.py": "2d001319bd76a92dae72f64c35dc97e93c4e84b4a005b134b927ad201f53f7ee",
+    "web\\app.py": "a147ea877e80fb0d6985e905eeb2e1ddfaefd3e64f27d2960a147b939323cfdb"
+  },
+  "started_at": "2026-11-15T17:14:07.407956+00:00",
+  "mode": "temporary_copies_read_only_facebook",
+  "concurrency": 1,
+  "profile_count": 3,
+  "profiles": [
+    {
+      "label": "Canary 1",
+      "proxy_enabled": false,
+      "stage": "collected",
+      "launch_success": true,
+      "launch_degraded": false,
+      "launch_code": null,
+      "logged_in": true,
+      "discovery_status": "partial",
+      "completion_reason": "NO_END_SIGNAL",
+      "observed_count": 7,
+      "collected_count": 7,
+      "details_synced": 0,
+      "followers_observed": 0,
+      "likes_observed": 0,
+      "creation_observed": 0,
+      "activity_observed": 0,
+      "independent_dom_comparison": "not_performed",
+      "exact_generation_cleanup_success": true,
+      "duration_seconds": 21.0
+    },
+    {
+      "label": "Canary 2",
+      "proxy_enabled": false,
+      "stage": "collected",
+      "launch_success": true,
+      "launch_degraded": false,
+      "launch_code": null,
+      "logged_in": true,
+      "discovery_status": "partial",
+      "completion_reason": "NO_END_SIGNAL",
+      "observed_count": 8,
+      "collected_count": 8,
+      "details_synced": 0,
+      "followers_observed": 0,
+      "likes_observed": 0,
+      "creation_observed": 0,
+      "activity_observed": 0,
+      "independent_dom_comparison": "not_performed",
+      "exact_generation_cleanup_success": true,
+      "duration_seconds": 20.2
+    },
+    {
+      "label": "Canary 3",
+      "proxy_enabled": false,
+      "stage": "collected",
+      "launch_success": true,
+      "launch_degraded": false,
+      "launch_code": null,
+      "logged_in": true,
+      "discovery_status": "partial",
+      "completion_reason": "NO_END_SIGNAL",
+      "observed_count": 6,
+      "collected_count": 6,
+      "details_synced": 0,
+      "followers_observed": 0,
+      "likes_observed": 0,
+      "creation_observed": 0,
+      "activity_observed": 0,
+      "independent_dom_comparison": "not_performed",
+      "exact_generation_cleanup_success": true,
+      "duration_seconds": 20.1
+    }
+  ],
+  "proxy": {
+    "configured_enabled_count": 0,
+    "stored_candidate_count": 0
+  },
+  "status": "completed",
+  "fixture_browsers_remaining": 0,
+  "original_durable_hashes_unchanged": true,
+  "finished_at": "2026-11-15T17:15:11.250632+00:00",
+  "acceptance": "discovery_readable_but_deep_scan_failed",
+  "limitations": [
+    "This intermediate application source preceded loading-skeleton and force-refresh hardening.",
+    "All discovery results remain partial/NO_END_SIGNAL; a complete page inventory is not certified.",
+    "Deep scan swallowed TimeoutError. A direct one-page probe confirmed timeout on transparency navigation.",
+    "No independent detail/DOM comparison was completed."
+  ],
+  "direct_deployment": true
+}

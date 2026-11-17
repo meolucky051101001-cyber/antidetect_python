@@ -84,6 +84,55 @@ def test_relative_labels_do_not_become_exact_timestamps():
     assert page["status"] == "active"
 
 
+@pytest.mark.parametrize("label,timezone,expected_min,expected_max", [
+    ("Thứ Hai, 29 Tháng 6, 2026 lúc 23:46", VN,
+     "2026-06-29T16:46:00Z", "2026-06-29T16:47:00Z"),
+    ("June 29, 2026 at 11:46 PM", VN,
+     "2026-06-29T16:46:00Z", "2026-06-29T16:47:00Z"),
+    ("Monday, 29 June 2026 at 11:46 PM", VN,
+     "2026-06-29T16:46:00Z", "2026-06-29T16:47:00Z"),
+    ("2026-06-29 at 23:46", VN,
+     "2026-06-29T16:46:00Z", "2026-06-29T16:47:00Z"),
+    ("November 1, 2026 at 1:30 AM", "America/New_York",
+     "2026-11-01T05:30:00Z", "2026-11-01T06:31:00Z"),
+])
+def test_absolute_anchor_time_preserves_clock_precision(label, timezone, expected_min, expected_max):
+    page = {"url": "https://www.facebook.com/fixture"}
+    merge_page_details({"pages": [page]}, {
+        page["url"]: {"times": [{"raw": label, "own": True}],
+                      "observed_at": _iso(NOW), "completed": True}
+    }, display_tz=timezone, clock=lambda: NOW)
+    assert page["last_post_at_min"] == expected_min
+    assert page["last_post_at_max"] == expected_max
+    assert page["last_post_precision"] == "approximate"
+    assert "last_post_at" not in page
+
+
+@pytest.mark.parametrize("label,timezone", [
+    ("29 Tháng 6 lúc 23:46", VN),
+    ("29 Tháng 6, 2026", VN),
+    ("29 Tháng 6, 2026 lúc 24:46", VN),
+    ("29 Tháng 6, 2026 lúc 23:61", VN),
+    ("June 29, 2026 at 11:46:30 PM", VN),
+    ("June 29, 2026 at 11:46:30 AM", VN),
+    ("June 29, 2026 at 11:46 PM UTC", VN),
+    ("June 29, 2026 at 11:46 PM +07:00", VN),
+    ("06/07/2026 at 11:46 PM", VN),
+    ("06-07-2026 at 11:46 PM", VN),
+    ("06.07.2026 at 11:46 PM", VN),
+    ("29/06/2026 at 11:46 PM", VN),
+    ("March 8, 2026 at 2:30 AM", "America/New_York"),
+])
+def test_incomplete_or_invalid_absolute_anchor_time_is_unknown(label, timezone):
+    page = {"url": "https://www.facebook.com/fixture"}
+    merge_page_details({"pages": [page]}, {
+        page["url"]: {"times": [{"raw": label, "own": True}],
+                      "observed_at": _iso(NOW), "completed": True}
+    }, display_tz=timezone, clock=lambda: NOW)
+    assert page["last_post_precision"] == "unknown"
+    assert "last_post_at_min" not in page
+
+
 def test_midnight_boundary_follows_display_timezone():
     day = datetime.date(2026, 1, 1)
     start, end = absolute_day_interval(day, VN)

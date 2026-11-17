@@ -40,6 +40,7 @@ if sys.stderr is None:
 from antidetect.launcher import find_browser_executable
 from antidetect.server_control import write_server_info, remove_server_info
 from antidetect.applog import setup_logging
+from antidetect.loopback import open_loopback
 
 setup_logging(LOG_FILE, console=_HAS_CONSOLE)
 
@@ -70,7 +71,7 @@ def is_server_running(port: int = 8000) -> bool:
             f"http://127.0.0.1:{port}/health",
             headers={"User-Agent": "AntidetectHealthCheck"},
         )
-        with urllib.request.urlopen(req, timeout=0.8) as resp:
+        with open_loopback(req, timeout=0.8) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data.get("application") == "antidetect-python"
@@ -107,7 +108,7 @@ def request_unlock_code_from_server(port: int = 8000) -> Optional[str]:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=1.0) as resp:
+        with open_loopback(req, timeout=1.0) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
                 code = data.get("unlock_code")

@@ -173,7 +173,7 @@ class BrowserRuntimeStore:
             current = self._states.get(key)
             if not current:
                 return True
-            identity_fields = ("launch_id", "owner_instance", "pid", "created", "user_data_dir")
+            identity_fields = ("launch_id", "owner_instance", "pid", "created", "birth_ticks", "user_data_dir")
             if not expected or any(current.get(field) != expected.get(field) for field in identity_fields):
                 return False
             self._states.pop(key)

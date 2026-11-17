@@ -31,6 +31,7 @@ import math
 import random
 import time
 import urllib.request
+from .loopback import connect_loopback, open_loopback
 from typing import List, Optional, Tuple
 
 
@@ -168,7 +169,7 @@ class HumanInput:
 
     def _find_page_ws(self) -> Optional[str]:
         try:
-            with urllib.request.urlopen(
+            with open_loopback(
                 f"http://127.0.0.1:{self.port}/json/list", timeout=2
             ) as resp:
                 targets = json.loads(resp.read().decode())
@@ -191,7 +192,7 @@ class HumanInput:
             raise RuntimeError(
                 f"Không tìm thấy tab nào trên CDP port {self.port} — profile có đang chạy?"
             )
-        return websockets.connect(ws_url, max_size=10 * 1024 * 1024)
+        return connect_loopback(ws_url, max_size=10 * 1024 * 1024)
 
     # ---------------------------- actions ------------------------------
 

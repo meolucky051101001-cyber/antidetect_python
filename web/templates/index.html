@@ -169,7 +169,7 @@
                     <button data-filter-chip="running" onclick="setFilter('running')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Đang chạy</button>
                     <button data-filter-chip="stopped" onclick="setFilter('stopped')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Đã dừng</button>
                     <button data-filter-chip="proxy" onclick="setFilter('proxy')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Có proxy</button>
-                    <button data-filter-chip="authentic" onclick="setFilter('authentic')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition" title="Chế độ Authentic: không noise, trùng Chrome thật">Authentic</button>
+                    <button data-filter-chip="authentic" onclick="setFilter('authentic')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition" title="Chế độ Authentic: tắt các hook đã chọn, có thể chia sẻ đặc điểm máy">Authentic</button>
                     <select id="tag-filter" onchange="filterProfiles()" class="bg-slate-900 border border-borderBg rounded-lg px-2 py-1 text-[11px] text-slate-300">
                         <option value="">Tag: tất cả</option>
                     </select>
@@ -761,14 +761,33 @@
                             </button>
                         </div>
 
+                        <div class="p-3 bg-slate-900/90 rounded-xl border border-borderBg space-y-2">
+                            <div class="grid grid-cols-2 gap-3">
+                                <label class="text-xs text-slate-300" for="edit-fp-algorithm">Thuật toán fingerprint
+                                    <select id="edit-fp-algorithm" class="mt-1 w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5">
+                                        <option value="1">V1 — legacy</option>
+                                        <option value="2">V2 — canvas 2D</option>
+                                    </select>
+                                </label>
+                                <label class="text-xs text-slate-300" for="edit-fp-verification">Kiểm chứng khi mở
+                                    <select id="edit-fp-verification" class="mt-1 w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5">
+                                        <option value="strict">Strict — dừng khi chưa xác minh</option>
+                                        <option value="compatibility">Compatibility — giữ trang trắng khi chưa xác minh</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <p class="text-[10px] text-amber-300">Đổi phiên bản có thể đổi kết quả canvas dù giữ cùng seed. Profile cũ giữ phiên bản và chế độ hiện tại cho đến khi bạn chọn rồi lưu; không tự nâng cấp hàng loạt.</p>
+                            <p class="text-[10px] text-slate-400">Kiểm chứng kiểm tra cấu hình và kết nối, không chứng nhận ẩn danh. V2 không mô phỏng render của hệ điều hành khác; GPU, audio và font vẫn có thể liên kết các profile trên cùng máy.</p>
+                        </div>
+
                         <!-- Chế độ Stealth: tắt noise per-profile -->
                         <div class="p-3 bg-slate-900/90 rounded-xl border border-borderBg space-y-2">
                             <div class="flex items-center justify-between">
                                 <label class="block font-semibold text-emerald-400 flex items-center space-x-1.5">
                                     <i data-lucide="shield" class="w-3.5 h-3.5"></i>
-                                    <span>Noise Fingerprint (Canvas / WebGL / Audio)</span>
+                                    <span>Tắt hook theo nhóm</span>
                                 </label>
-                                <span class="text-[10px] text-slate-400">Khuyến nghị production: tắt cả 3</span>
+                                <span class="text-[10px] text-slate-400">Tick = tắt hook</span>
                             </div>
                             <div class="grid grid-cols-5 gap-2">
                                 <label class="flex items-center space-x-1.5 text-xs text-slate-300"><input type="checkbox" id="edit-stealth-canvas" class="accent-emerald-500"> <span>Canvas</span></label>
@@ -777,7 +796,7 @@
                                 <label class="flex items-center space-x-1.5 text-xs text-slate-300"><input type="checkbox" id="edit-stealth-media" class="accent-emerald-500"> <span>Media</span></label>
                                 <label class="flex items-center space-x-1.5 text-xs text-slate-300"><input type="checkbox" id="edit-stealth-worker" class="accent-emerald-500"> <span>Worker</span></label>
                             </div>
-                            <p class="text-[10px] text-slate-500">Tick = TẮT hook tương ứng. Bật đủ noise (mặc định): mỗi profile có hash riêng nhưng Pixelscan chấm "masking detected". Chế độ "authentic" (khuyến nghị tài khoản giá trị cao): tick cả 5 — fingerprint trùng Chrome thật trên máy, Pixelscan không còn masking; đổi lại các profile cùng máy chia sẻ hash canvas/WebGL/audio và cần khai báo GPU khớp máy thật.</p>
+                            <p class="text-[10px] text-slate-400">V2 chỉ áp dụng nhiễu cho một số canvas 2D. WebGL, WebGPU, audio, font và các bề mặt khác giữ hành vi của máy thật; các lựa chọn legacy tương ứng không tạo khác biệt trên V2. Authentic tắt các hook đã chọn, nên các profile có thể chia sẻ dấu vân tay của máy. Không bảo đảm vượt công cụ phát hiện.</p>
                         </div>
 
                         <div>
@@ -786,7 +805,7 @@
                                 <span class="text-[10px] text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20">Khóa tự động chuẩn hóa</span>
                             </div>
                             <input type="text" id="edit-fp-ua" readonly class="w-full bg-slate-950/80 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-400 cursor-not-allowed" title="User-Agent được đồng bộ tự động theo OS và phiên bản Chrome để tránh lỗi Frankenstein">
-                            <p class="text-[10px] text-slate-500 mt-1">Được đồng bộ tự động theo hệ điều hành và phiên bản Chrome để tránh bị nhận diện giả mạo.</p>
+                            <p class="text-[10px] text-slate-500 mt-1">Được chuẩn hóa theo cấu hình và phiên bản browser để giảm bất nhất; không chứng nhận tránh phát hiện.</p>
                         </div>
                     </div>
                 </div>
@@ -1038,8 +1057,8 @@
                     <div>
                         <label class="block text-[11px] text-slate-400 mb-1">Chế độ stealth</label>
                         <select id="wizard-mode" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
-                            <option value="unique">Unique (noise riêng)</option>
-                            <option value="authentic">Authentic (khuyến nghị)</option>
+                            <option value="unique">Canvas 2D theo seed</option>
+                            <option value="authentic">Authentic (bề mặt native)</option>
                         </select>
                     </div>
                     <div>

@@ -1,0 +1,150 @@
+{
+  "application_base_commit": "793038de34a6fd5aa480b3dd1d1fc638338b795c",
+  "application_source_sha256": {
+    "antidetect\\facebook.py": "8ae1711f7b6ea90d4f749f0f77d9e313233112fae1ce4f9ef8292165c09983cc",
+    "antidetect\\fanpage_scan.py": "2d001319bd76a92dae72f64c35dc97e93c4e84b4a005b134b927ad201f53f7ee",
+    "web\\app.py": "073c313a3332da9d37f4c7a0a03d41544bc03c18f161ca07008c34a21ab6ddc5"
+  },
+  "started_at": "2026-11-16T03:42:06.471944+00:00",
+  "mode": "temporary_copies_read_only_facebook",
+  "concurrency": 1,
+  "profile_count": 3,
+  "profiles": [
+    {
+      "label": "Canary 1",
+      "proxy_enabled": false,
+      "stage": "collected",
+      "launch_success": true,
+      "launch_degraded": false,
+      "launch_code": null,
+      "blocked_detail_access_count": 0,
+      "activity_complete_count": 0,
+      "logged_in": true,
+      "discovery_status": "partial",
+      "completion_reason": "NO_END_SIGNAL",
+      "observed_count": 7,
+      "collected_count": 7,
+      "details_synced": 5,
+      "followers_observed": 5,
+      "likes_observed": 0,
+      "creation_observed": 0,
+      "activity_observed": 0,
+      "independent_dom_comparison": "not_performed",
+      "exact_generation_cleanup_success": true,
+      "duration_seconds": 90.8
+    },
+    {
+      "label": "Canary 2",
+      "proxy_enabled": false,
+      "stage": "collected",
+      "launch_success": true,
+      "launch_degraded": false,
+      "launch_code": null,
+      "blocked_detail_access_count": 0,
+      "activity_complete_count": 0,
+      "logged_in": true,
+      "discovery_status": "partial",
+      "completion_reason": "NO_END_SIGNAL",
+      "observed_count": 8,
+      "collected_count": 8,
+      "details_synced": 4,
+      "followers_observed": 4,
+      "likes_observed": 0,
+      "creation_observed": 0,
+      "activity_observed": 0,
+      "independent_dom_comparison": "not_performed",
+      "exact_generation_cleanup_success": true,
+      "duration_seconds": 101.3
+    },
+    {
+      "label": "Canary 3",
+      "proxy_enabled": false,
+      "stage": "collected",
+      "launch_success": true,
+      "launch_degraded": false,
+      "launch_code": null,
+      "blocked_detail_access_count": 0,
+      "activity_complete_count": 0,
+      "logged_in": true,
+      "discovery_status": "partial",
+      "completion_reason": "NO_END_SIGNAL",
+      "observed_count": 6,
+      "collected_count": 6,
+      "details_synced": 5,
+      "followers_observed": 5,
+      "likes_observed": 0,
+      "creation_observed": 1,
+      "activity_observed": 0,
+      "independent_dom_comparison": "not_performed",
+      "exact_generation_cleanup_success": true,
+      "duration_seconds": 77.8
+    }
+  ],
+  "proxy": {
+    "configured_enabled_count": 0,
+    "stored_candidate_count": 0
+  },
+  "status": "completed",
+  "fixture_browsers_remaining": 0,
+  "original_durable_hashes_unchanged": false,
+  "finished_at": "2026-11-16T03:46:40.147060+00:00",
+  "acceptance": "partial_discovery_and_detail_observations",
+  "independent_dom_spot_check": {
+    "healthy_launch": true,
+    "main": {
+      "access": "ok",
+      "heading_visible": false,
+      "heading_line_has_digit": false,
+      "next_line_has_digit": false,
+      "embedded_creation_marker": false,
+      "visible_text": true,
+      "article_count": 2,
+      "time_element_count": 0,
+      "transparency_link_visible": false,
+      "expected_view": true,
+      "facebook_host": true
+    },
+    "transparency": {
+      "access": "ok",
+      "heading_visible": false,
+      "heading_line_has_digit": false,
+      "next_line_has_digit": false,
+      "embedded_creation_marker": false,
+      "visible_text": true,
+      "article_count": 0,
+      "time_element_count": 0,
+      "transparency_link_visible": false,
+      "expected_view": true,
+      "facebook_host": true
+    },
+    "cleanup_success": true
+  },
+  "original_hash_baseline": {
+    "source": "manifest from prior session",
+    "tracked_files": 17,
+    "matched": 13,
+    "mismatched_with_mtime_before_this_run": 3,
+    "missing_at_comparison": 1,
+    "fresh_pre_run_hashes": false
+  },
+  "local_regression": {
+    "passed": 684,
+    "skipped": 3
+  },
+  "local_real_browser_verification": {
+    "ui_passed": 4,
+    "ui_duration_seconds": 76.29,
+    "runtime_passed": 1,
+    "runtime_checks_passed": 8,
+    "runtime_duration_seconds": 89.91,
+    "runtime_chrome_version": "157.0.8103.51",
+    "runtime_fixture_browsers_remaining": 0
+  },
+  "limitations": [
+    "Reused three existing temporary copies in direct mode.",
+    "No scan showed an explicit end signal.",
+    "Independent DOM spot check covered one page and did not certify metric values or inventory completeness.",
+    "Stale hash baseline does not establish an unchanged original dataset across this run.",
+    "No release SHA or 24-hour soak was started."
+  ]
+}
