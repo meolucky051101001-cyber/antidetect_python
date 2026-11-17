@@ -14,6 +14,7 @@ Ví dụ:
 import argparse
 import ctypes
 import json
+import math
 import os
 import subprocess
 import sys
@@ -54,6 +55,8 @@ CONTRACT_CHECKS = (
 )
 WORKLOAD_MAX_BYTES = 4096
 WORKLOAD_STALE_SECONDS = 120.0
+RECOVERY_STABLE_SAMPLES = 3
+RECOVERY_COOLDOWN_SECONDS = 60.0
 
 
 class _WorkloadCollector:
@@ -446,6 +449,10 @@ class SoakRunner:
         self._tabs_closed = 0
         self._shed_count = 0
         self._shed_blocked_logged = False
+        self._last_memory_shed_monotonic = None
+        self._last_ramp_pause_monotonic = None
+        self._last_resource_recovery_monotonic = None
+        self._recovery_healthy_samples = 0
         self._cycle_index = 0
         self._copy_index = 0
         self._api_latencies = []
@@ -716,10 +723,30 @@ class SoakRunner:
             return None
         return psutil.virtual_memory().available / (1024 * 1024)
 
-    def _start_profile(self, profile):
-        if self._available_mb() is not None and self._available_mb() < self.args.min_free_mb:
-            self._event("ramp_paused", profile=profile["name"], available_mb=round(self._available_mb(), 1))
+    def _start_profile(self, profile, *, require_resources=False):
+        if require_resources:
+            self._check_stop_requested()
+            if (self.stop_requested or self.critical or profile["active"]
+                    or profile.get("stop_unconfirmed")):
+                return False
+        available = self._available_mb()
+        if require_resources and (
+            isinstance(available, bool)
+            or not isinstance(available, (int, float))
+            or not math.isfinite(available)
+            or available < self.args.min_free_mb
+        ):
+            self._event("recovery_paused", profile=profile["name"])
             return False
+        if available is not None and available < self.args.min_free_mb:
+            self._last_ramp_pause_monotonic = time.monotonic()
+            self._event("ramp_paused", profile=profile["name"], available_mb=round(available, 1))
+            return False
+        if require_resources:
+            self._check_stop_requested()
+            if (self.stop_requested or self.critical or profile["active"]
+                    or profile.get("stop_unconfirmed")):
+                return False
         status, body, _latency, error = _http(
             self.base,
             "POST",
@@ -946,7 +973,7 @@ class SoakRunner:
             "canvas_worker_workload": workload,
         }
         minimum_running = max(1, self.min_active)
-        if (
+        recovery_sample_healthy = (
             health_status == 200
             and health_body.get("application") == "antidetect-python"
             and list_status == 200
@@ -954,8 +981,14 @@ class SoakRunner:
             and cdp_states.get("healthy", 0) >= minimum_running
             and degraded == 0
             and observation_complete
-        ):
+        )
+        if recovery_sample_healthy:
             self._healthy_active_samples += 1
+        recovery_sample_healthy = recovery_sample_healthy and all(
+            by_id.get(profile["id"], {}).get("status") == "running"
+            and (by_id[profile["id"]].get("cdp_health") or {}).get("state") == "healthy"
+            for profile in self.profiles if profile["active"]
+        )
         self._sample_count += 1
         self.state["counters"]["samples"] = self._sample_count
         self.state["counters"]["healthy_active_samples"] = self._healthy_active_samples
@@ -963,6 +996,12 @@ class SoakRunner:
         _append_jsonl(self.metrics_path, sample)
         if self._low_memory_samples >= 3:
             self._shed_one()
+        self._consider_resource_recovery(
+            healthy_sample=recovery_sample_healthy,
+            available_mb=available,
+            api_profiles=by_id,
+            process_observations=chrome,
+        )
         self._save()
         if time.monotonic() - sample_started > 20:
             self._log(f"sample chậm: {time.monotonic() - sample_started:.1f}s")
@@ -1029,7 +1068,67 @@ class SoakRunner:
             profile=victim["name"],
             available_mb=round(self._available_mb() or 0, 1),
         )
-        self._stop_profile(victim, "memory_shed")
+        if self._stop_profile(victim, "memory_shed"):
+            self._last_memory_shed_monotonic = time.monotonic()
+            self._recovery_healthy_samples = 0
+
+    def _consider_resource_recovery(
+        self, *, healthy_sample, available_mb, api_profiles, process_observations
+    ):
+        """Restore at most one resource-paused profile after verified headroom."""
+        active_count = sum(1 for profile in self.profiles if profile["active"])
+        pauses = [value for value in (self._last_memory_shed_monotonic, self._last_ramp_pause_monotonic)
+                  if value is not None]
+        if (self.stop_requested or self.critical or not pauses
+                or active_count >= self.target_profiles or active_count < self.min_active):
+            self._recovery_healthy_samples = 0
+            return False
+        if any(profile.get("stop_unconfirmed") for profile in self.profiles):
+            self._recovery_healthy_samples = 0
+            return False
+
+        if (
+            not healthy_sample
+            or isinstance(available_mb, bool)
+            or not isinstance(available_mb, (int, float))
+            or not math.isfinite(available_mb)
+            or available_mb < self.args.min_free_mb
+            or time.monotonic() - max(pauses) < RECOVERY_COOLDOWN_SECONDS
+            or (self._last_resource_recovery_monotonic is not None
+                and time.monotonic() - self._last_resource_recovery_monotonic < RECOVERY_COOLDOWN_SECONDS)
+        ):
+            self._recovery_healthy_samples = 0
+            return False
+
+        candidate = next((
+            profile for profile in self.profiles
+            if not profile["active"]
+            and not profile.get("stop_unconfirmed")
+            and api_profiles.get(profile["id"], {}).get("status") == "stopped"
+            and isinstance(process_observations.get(profile["id"]), dict)
+            and process_observations[profile["id"]].get("observation_complete") is True
+            and process_observations[profile["id"]].get("pids") == []
+        ), None)
+        if candidate is None:
+            self._recovery_healthy_samples = 0
+            return False
+
+        self._recovery_healthy_samples += 1
+        if self._recovery_healthy_samples < RECOVERY_STABLE_SAMPLES:
+            return False
+
+        self._recovery_healthy_samples = 0
+        started = self._start_profile(candidate, require_resources=True)
+        self._last_resource_recovery_monotonic = time.monotonic()
+        if started:
+            self._event(
+                "memory_recovered",
+                profile=candidate["name"],
+                active=sum(1 for profile in self.profiles if profile["active"]),
+                available_mb=round(available_mb, 1),
+            )
+            return True
+        return False
 
     def _open_soak_tab(self, profile, url):
         """POST start?url, retry once on a transient CDP conflict."""
@@ -1240,6 +1339,8 @@ class SoakRunner:
             if now >= next_sample:
                 self._sample()
                 next_sample = max(next_sample + self.args.sample_interval, now + 1)
+                if self.stop_requested or self.critical:
+                    break
             if now >= next_tab:
                 self._tab_cycle()
                 next_tab = max(next_tab + self.args.tab_interval, now + 1)
