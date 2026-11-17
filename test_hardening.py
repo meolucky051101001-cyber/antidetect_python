@@ -101,18 +101,15 @@ def test_proxy_password_is_bound_to_identity():
     manager.delete_profile(p.id)
 
 
-def test_delete_failure_preserves_metadata_and_secret(monkeypatch):
+def test_delete_quarantine_failure_preserves_metadata_and_secret(monkeypatch):
     p = manager.create_profile("delete-locked", proxy=_proxy())
     assert get_proxy_password(p.id, identity=p.proxy.identity_key()) == "secret"
 
-    original_rmtree = storage_module.shutil.rmtree
-    monkeypatch.setattr(storage_module.shutil, "rmtree", lambda *a, **k: (_ for _ in ()).throw(PermissionError("locked")))
-    monkeypatch.setattr(storage_module.time, "sleep", lambda *_: None)
-    try:
+    from antidetect import profile_delete
+    with monkeypatch.context() as patch:
+        patch.setattr(profile_delete, "quarantine", lambda *a, **k: (_ for _ in ()).throw(PermissionError("locked")))
         with pytest.raises(ProfileDeletionError):
             manager.delete_profile(p.id)
-    finally:
-        monkeypatch.setattr(storage_module.shutil, "rmtree", original_rmtree)
 
     assert manager.get_profile(p.id) is not None
     assert get_proxy_password(p.id, identity=p.proxy.identity_key()) == "secret"

@@ -36,6 +36,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 from antidetect.loopback import open_loopback
+from antidetect.process_identity import browser_pids_using_dir
 REAL_DATA_DIR = os.path.realpath(os.path.join(BASE_DIR, "data"))
 STATE_FILENAME = "soak_state.json"
 EVENTS_FILENAME = "soak_events.jsonl"
@@ -222,7 +223,9 @@ def _process_metrics(pid):
     if psutil is None or not pid:
         return None
     try:
-        proc = psutil.Process(int(pid))
+        proc = pid if hasattr(pid, "memory_info") else psutil.Process(int(pid))
+        if not proc.is_running():
+            return None
         with proc.oneshot():
             handles = None
             try:
@@ -230,7 +233,7 @@ def _process_metrics(pid):
             except Exception:
                 pass
             return {
-                "pid": int(pid),
+                "pid": proc.pid,
                 "rss_mb": round(proc.memory_info().rss / (1024 * 1024), 1),
                 "cpu_percent": round(proc.cpu_percent(interval=None), 1),
                 "threads": proc.num_threads(),
@@ -243,40 +246,30 @@ def _process_metrics(pid):
 def _chrome_processes(dirs):
     if psutil is None:
         return {}
-    result = {
-        profile_id: {"pids": [], "rss_mb": 0.0, "cpu_percent": 0.0}
-        for profile_id in dirs
-    }
-    normalized = {
-        profile_id: os.path.normcase(os.path.realpath(path))
-        for profile_id, path in dirs.items()
-    }
-    for proc in psutil.process_iter(["pid", "name", "cmdline", "memory_info"]):
-        try:
-            name = (proc.info.get("name") or "").lower()
-            if name not in ("chrome.exe", "msedge.exe", "chromium.exe"):
+    result = {}
+    for profile_id, directory in dirs.items():
+        pids = browser_pids_using_dir(directory)
+        entry = {"pids": [], "rss_mb": 0.0, "cpu_percent": None,
+                 "observation_complete": pids is not None,
+                 "rss_scope": "summed matching processes and descendants; shared pages may be counted twice"}
+        result[profile_id] = entry
+        seen = set()
+        for pid in pids or ():
+            try:
+                process = psutil.Process(pid)
+                tree = [process, *process.children(recursive=True)]
+                for child in tree:
+                    if child.pid in seen or not child.is_running():
+                        continue
+                    seen.add(child.pid)
+                    entry["pids"].append(child.pid)
+                    entry["rss_mb"] += child.memory_info().rss / (1024 * 1024)
+            except psutil.NoSuchProcess:
                 continue
-            cmdline = proc.info.get("cmdline") or []
-            joined = os.path.normcase(" ".join(cmdline))
-            if not joined:
-                continue
-            for profile_id, path in normalized.items():
-                if path and path in joined:
-                    mem = proc.info.get("memory_info")
-                    entry = result[profile_id]
-                    entry["pids"].append(int(proc.info["pid"]))
-                    if mem:
-                        entry["rss_mb"] += mem.rss / (1024 * 1024)
-                    try:
-                        entry["cpu_percent"] += proc.cpu_percent(interval=None)
-                    except Exception:
-                        pass
-                    break
-        except Exception:
-            continue
-    for entry in result.values():
+            except psutil.Error:
+                entry["observation_complete"] = False
+        entry["pids"].sort()
         entry["rss_mb"] = round(entry["rss_mb"], 1)
-        entry["cpu_percent"] = round(entry["cpu_percent"], 1)
     return result
 
 
@@ -430,6 +423,8 @@ class SoakRunner:
         self.stop_path = os.path.join(self.results_dir, STOP_FILENAME)
         self.log_path = os.path.join(self.results_dir, "soak.log")
         self.server = None
+        self._server_observer = None
+        self._server_baseline = None
         self.server_log = None
         self.local_server = None
         self.local_thread = None
@@ -597,6 +592,25 @@ class SoakRunner:
             )
             if status == 200 and body.get("application") == "antidetect-python":
                 self.state["server_pid"] = self.server.pid
+                # Windows venv python.exe can be a small forwarding process.
+                # Bind measurement to the real server PID, verified as part of
+                # this spawned tree and to the health instance, never a random
+                # Python process or unrelated dashboard.
+                with open(os.path.join(self.data_dir, "server.pid"), encoding="utf-8") as fh:
+                    server_info = json.load(fh)
+                parent = psutil.Process(self.server.pid)
+                descendants = {proc.pid: proc for proc in [parent, *parent.children(recursive=True)]}
+                actual = descendants.get(server_info.get("pid"))
+                if actual is None or server_info.get("instance_id") != body.get("instance_id"):
+                    raise SoakFailure("Không xác minh được process server để đo tài nguyên.")
+                self._server_observer = actual
+                self._server_baseline = _process_metrics(actual)
+                if not self._server_baseline:
+                    raise SoakFailure("Không đo được tài nguyên server baseline.")
+                self.state["server_actual_pid"] = actual.pid
+                self.state["resource_baseline"] = self._server_baseline
+                self.state["resource_budget"] = {"rss_mb_delta": 128, "handles_delta": 128, "threads_delta": 16,
+                                                 "scope": "idle server before profiles vs after browser cleanup; not Chrome peak leak proof"}
                 self._event("server_ready", pid=self.server.pid, port=self.port)
                 return
             if self.server.poll() is not None:
@@ -712,7 +726,8 @@ class SoakRunner:
         deadline = time.time() + timeout
         while time.time() < deadline:
             entry = _chrome_processes({profile["id"]: self._profile_dir(profile)}).get(profile["id"])
-            if not isinstance(entry, dict) or not isinstance(entry.get("pids"), list):
+            if (not isinstance(entry, dict) or not isinstance(entry.get("pids"), list)
+                    or entry.get("observation_complete") is not True):
                 return False
             profile["last_observed_pids"] = list(entry["pids"])
             if not entry["pids"]:
@@ -823,7 +838,11 @@ class SoakRunner:
                     f"{profile['name']}: active nhưng API status={status_text}",
                     critical=True,
                 )
-        server_metrics = _process_metrics(self.server.pid if self.server else None)
+        server_metrics = _process_metrics(self._server_observer)
+        if self._server_observer is not None and server_metrics is None:
+            self._error("server_metrics", "Bound server process measurement unavailable.", critical=True)
+        if any(entry.get("observation_complete") is not True for entry in chrome.values()):
+            self._error("process_observation", "Profile process scan incomplete; cannot certify resources or idle.", critical=True)
         chrome_total = sum(entry["rss_mb"] for entry in chrome.values())
         chrome_count = sum(len(entry["pids"]) for entry in chrome.values())
         self._chrome_peak["rss_mb"] = max(self._chrome_peak["rss_mb"], chrome_total)
@@ -1202,7 +1221,23 @@ class SoakRunner:
         for profile in self.profiles:
             if profile["active"]:
                 self._stop_profile(profile, "finalize")
-        if self.server and self.server.poll() is None:
+        resource_check = None
+        if self._server_baseline:
+            # Let disconnected CDP tasks settle after the same empty workload.
+            time.sleep(5)
+            cooldown = _process_metrics(self._server_observer)
+            resource_check = {"baseline": self._server_baseline, "cooldown": cooldown,
+                              "budget": self.state["resource_budget"], "passed": False}
+            if cooldown:
+                deltas = {key: cooldown[key] - self._server_baseline[key]
+                          for key in ("rss_mb", "handles", "threads")
+                          if cooldown.get(key) is not None and self._server_baseline.get(key) is not None}
+                resource_check["deltas"] = deltas
+                resource_check["passed"] = (len(deltas) == 3 and all(
+                    value <= self.state["resource_budget"][key + "_delta"] for key, value in deltas.items()))
+            if not resource_check["passed"]:
+                self._error("server_resource_budget", "Server cooldown vượt budget hoặc thiếu phép đo.", critical=True)
+        if self.server and (self.server.poll() is None or not self._dashboard_exited()):
             status, _body, _latency, _error = _http(
                 self.base,
                 "POST",
@@ -1222,6 +1257,21 @@ class SoakRunner:
                         self.server.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         self._error("server_cleanup", "Dashboard chưa thoát sau kill", critical=True)
+            if self._server_observer is not None:
+                try:
+                    try:
+                        self._server_observer.wait(timeout=30)
+                    except psutil.TimeoutExpired:
+                        self._server_observer.terminate()
+                        try:
+                            self._server_observer.wait(timeout=10)
+                        except psutil.TimeoutExpired:
+                            self._server_observer.kill()
+                            self._server_observer.wait(timeout=10)
+                except psutil.NoSuchProcess:
+                    pass
+                except psutil.Error:
+                    self._error("server_cleanup", "Bound server exit unverified.", critical=True)
         if self.local_server:
             self.local_server.shutdown()
             self.local_server.server_close()
@@ -1241,6 +1291,8 @@ class SoakRunner:
                     f"{profile['name']}: còn {len(pids)} process sau finalize",
                     critical=True,
                 )
+        process_observation_complete = (set(chrome) == set(self._chrome_map()) and all(
+            entry.get("observation_complete") is True for entry in chrome.values()))
         artifacts = self._artifact_counts()
         latencies = sorted(self._api_latencies)
         p95 = latencies[int(len(latencies) * 0.95)] if latencies else None
@@ -1265,8 +1317,9 @@ class SoakRunner:
         }
         cleanup_checks = {
             "process_observation_available": psutil is not None,
+            "process_observation_complete": process_observation_complete,
             "profile_browsers_exited": orphan_count == 0,
-            "dashboard_exited": self.server is None or self.server.poll() is not None,
+            "dashboard_exited": self._dashboard_exited(),
             "staging_empty": artifacts["staging_files"] == 0,
         }
         passed = (
@@ -1307,6 +1360,7 @@ class SoakRunner:
             "api_latency_p95_ms": round(p95, 1) if p95 is not None else None,
             "chrome_peak": self._chrome_peak,
             "server_peak": self._server_peak,
+            "server_cooldown": resource_check,
             "min_available_mb": round(self._min_available_mb, 1)
             if self._min_available_mb is not None
             else None,
@@ -1321,6 +1375,16 @@ class SoakRunner:
             duration_seconds=round(duration, 1),
         )
         return 0 if passed else 1
+
+    def _dashboard_exited(self):
+        if self.server is not None and self.server.poll() is None:
+            return False
+        if self._server_observer is not None:
+            try:
+                return not self._server_observer.is_running()
+            except psutil.Error:
+                return False
+        return True
 
     def run(self):
         self._validate_dirs()

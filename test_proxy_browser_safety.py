@@ -84,6 +84,51 @@ def test_raw_proxy_fields_are_not_percent_decoded_and_ipv6_is_bracketed():
     assert parse_proxy_line(proxy.to_url()).host == "::1"
 
 
+@pytest.mark.parametrize("protocol", ["socks4", "socks5"])
+@pytest.mark.parametrize("credentials", [{"username": "fixture"}, {"username": ""}, {"password": "fixture"}])
+def test_browser_rejects_socks_auth_before_spawn(tmp_path, monkeypatch, protocol, credentials):
+    profile = Profile(proxy=ProxyConfig(enabled=True, protocol=protocol, host="127.0.0.1", port=8000, **credentials))
+    launcher = BrowserLauncher.__new__(BrowserLauncher)
+    launcher._lifecycle_locks = ProfileLocks(str(tmp_path))
+    launcher._launch_locks = collections.defaultdict(threading.RLock)
+    launcher.manager = SimpleNamespace(get_profile=lambda _: profile, get_profile_dir=Mock())
+    launcher._resolve_browser_path = lambda _: __file__
+    launcher.is_running = lambda _: False
+    spawn = Mock(side_effect=AssertionError("Must not spawn"))
+    monkeypatch.setattr("antidetect.launcher.subprocess.Popen", spawn)
+    result = launcher.launch(profile.id)
+    assert result["code"] == "INVALID_PROXY_CONFIG"
+    assert "SOCKS" in result["error"]
+    spawn.assert_not_called()
+    launcher.manager.get_profile_dir.assert_not_called()
+    assert profile.proxy.configuration_error() is None
+
+
+def test_browser_socks5_scheme_is_explicit():
+    proxy = ProxyConfig(enabled=True, protocol="socks5", host="127.0.0.1", port=8000)
+    assert proxy.to_server_arg() == "socks5://127.0.0.1:8000"
+
+
+def test_proxy_auth_reject_is_cancelled_without_sending_credentials_to_origin():
+    from antidetect.proxy_auth import ProxyAuthAttempts
+    attempts = ProxyAuthAttempts()
+    credentials = ("fixture-user", "fixture-password")
+    assert attempts.response("page", "1", {"source": "Server"}, credentials) == {"response": "CancelAuth"}
+    assert attempts.response("page", "1", {"source": "Proxy"}, credentials)["response"] == "ProvideCredentials"
+    assert attempts.response("page", "1", {"source": "Proxy"}, credentials) == {"response": "CancelAuth"}
+    assert attempts.response("other-page", "1", {"source": "Proxy"}, credentials)["response"] == "ProvideCredentials"
+    attempts.discard_session("page")
+    assert attempts.response("page", "1", {"source": "Proxy"}, credentials)["response"] == "ProvideCredentials"
+
+
+def test_auth_attempt_limit_fails_closed_without_eviction_retry():
+    from antidetect.proxy_auth import ProxyAuthAttempts
+    attempts = ProxyAuthAttempts(capacity=1)
+    assert attempts.response("page", "1", {"source": "Proxy"}, ("u", "p"))["response"] == "ProvideCredentials"
+    assert attempts.response("page", "2", {"source": "Proxy"}, ("u", "p")) == {"response": "CancelAuth"}
+    assert attempts.response("page", "1", {"source": "Proxy"}, ("u", "p")) == {"response": "CancelAuth"}
+
+
 @pytest.mark.parametrize("port", [-1, 65536, True, "private-secret"])
 def test_proxy_input_validation_errors_hide_model_input(port):
     with pytest.raises(ValueError) as exc:

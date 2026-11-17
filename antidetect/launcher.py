@@ -52,6 +52,8 @@ from .process_identity import (
 from .loopback import open_loopback, connect_loopback
 from .launch_verification import LaunchVerification, verification_origin
 from .profile_locks import ProfileLockTimeout, ProfileLocks
+from .proxy_auth import ProxyAuthAttempts
+from .browser_trust import BrowserTrustError, hold_trusted_browser, verify_browser_executable
 from .applog import get_logger
 from . import metrics
 from .fingerprint import (
@@ -979,8 +981,9 @@ class BrowserLauncher:
         port = get_free_port()
         proc = None
         try:
-            proc = subprocess.Popen(
-                [
+            with hold_trusted_browser(browser_path):
+                proc = subprocess.Popen(
+                    [
                     browser_path,
                     f"--user-data-dir={user_data}",
                     "--remote-debugging-address=127.0.0.1",
@@ -988,10 +991,10 @@ class BrowserLauncher:
                     "--no-first-run",
                     "--no-default-browser-check",
                     "about:blank",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             page_ws = None
             deadline = time.monotonic() + 10.0
             while time.monotonic() < deadline:
@@ -1021,45 +1024,53 @@ class BrowserLauncher:
 
             async def _probe():
                 async with connect_loopback(page_ws, open_timeout=2) as ws:
-                    await ws.send(json.dumps({
-                        "id": 70001,
-                        "method": "Page.navigate",
-                        "params": {"url": f"http://127.0.0.1:{port}/json/version"},
-                    }))
-                    # 127.0.0.1 là secure context: userAgentData xuất hiện ở đó
-                    # (about:blank thì không).
-                    probe_deadline = time.monotonic() + 6.0
-                    while time.monotonic() < probe_deadline:
+                    try:
                         await ws.send(json.dumps({
-                            "id": 70002,
-                            "method": "Runtime.evaluate",
-                            "params": {
-                                "expression": _NATIVE_BRANDS_JS,
-                                "awaitPromise": True,
-                                "returnByValue": True,
-                            },
+                            "id": 70001,
+                            "method": "Page.navigate",
+                            "params": {"url": f"http://127.0.0.1:{port}/json/version"},
                         }))
-                        end = min(probe_deadline, time.monotonic() + 2.0)
-                        while time.monotonic() < end:
-                            msg = json.loads(
-                                await asyncio.wait_for(
-                                    ws.recv(), timeout=max(0.05, end - time.monotonic())
+                        # 127.0.0.1 là secure context: userAgentData xuất hiện ở đó
+                        # (about:blank thì không).
+                        probe_deadline = time.monotonic() + 6.0
+                        while time.monotonic() < probe_deadline:
+                            await ws.send(json.dumps({
+                                "id": 70002,
+                                "method": "Runtime.evaluate",
+                                "params": {
+                                    "expression": _NATIVE_BRANDS_JS,
+                                    "awaitPromise": True,
+                                    "returnByValue": True,
+                                },
+                            }))
+                            end = min(probe_deadline, time.monotonic() + 2.0)
+                            while time.monotonic() < end:
+                                msg = json.loads(
+                                    await asyncio.wait_for(
+                                        ws.recv(), timeout=max(0.05, end - time.monotonic())
+                                    )
                                 )
-                            )
-                            if msg.get("id") != 70002:
-                                continue
-                            value = (
-                                (msg.get("result") or {}).get("result") or {}
-                            ).get("value")
-                            if (
-                                isinstance(value, dict)
-                                and isinstance(value.get("brands"), list)
-                                and value["brands"]
-                            ):
-                                return value
-                            break
-                        await asyncio.sleep(0.15)
-                    return None
+                                if msg.get("id") != 70002:
+                                    continue
+                                value = (
+                                    (msg.get("result") or {}).get("result") or {}
+                                ).get("value")
+                                if (
+                                    isinstance(value, dict)
+                                    and isinstance(value.get("brands"), list)
+                                    and value["brands"]
+                                ):
+                                    return value
+                                break
+                            await asyncio.sleep(0.15)
+                        return None
+                    finally:
+                        # Use the already connected, owned probe socket. Never
+                        # reconnect by a port that may belong to a new process.
+                        try:
+                            await ws.send(json.dumps({"id": 70003, "method": "Browser.close"}))
+                        except Exception:
+                            pass
 
             return _safe_run_async(_probe())
         except Exception:
@@ -1067,15 +1078,18 @@ class BrowserLauncher:
         finally:
             if proc is not None:
                 try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
                     proc.terminate()
-                    proc.wait(timeout=3)
-                except Exception:
                     try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
                         proc.kill()
-                    except Exception:
-                        pass
+                        proc.wait(timeout=5)
             release_port(port)
-            shutil.rmtree(user_data, ignore_errors=True)
+            if not self._wait_directory_idle(user_data):
+                raise RuntimeError("Native browser probe cleanup unconfirmed; synthetic directory retained.")
+            shutil.rmtree(user_data)
 
     async def _verify_emulation(
         self, port, fp, require_client_hints=False, deadline_seconds=7.0
@@ -1447,6 +1461,7 @@ class BrowserLauncher:
                 attached_sessions: Set[str] = set()
                 target_owners = {}
                 worker_pauses = {}
+                proxy_auth_attempts = ProxyAuthAttempts()
 
                 async def send(method, params=None, session_id=None, sent_event=None):
                     nonlocal msg_id
@@ -1936,6 +1951,7 @@ class BrowserLauncher:
                         detached = params.get("sessionId")
                         attached_sessions.discard(detached)
                         worker_pauses.pop(detached, None)
+                        proxy_auth_attempts.discard_session(detached)
                         for target_id, owner in list(target_owners.items()):
                             if owner == detached:
                                 target_owners.pop(target_id, None)
@@ -1991,32 +2007,15 @@ class BrowserLauncher:
                     elif method == "Fetch.authRequired":
                         request_id = params.get("requestId")
                         challenge = params.get("authChallenge", {})
-                        if (
-                            request_id
-                            and proxy_auth
-                            and challenge.get("source") == "Proxy"
-                        ):
+                        if request_id:
                             asyncio.create_task(
                                 send(
                                     "Fetch.continueWithAuth",
                                     {
                                         "requestId": request_id,
-                                        "authChallengeResponse": {
-                                            "response": "ProvideCredentials",
-                                            "username": proxy_auth[0],
-                                            "password": proxy_auth[1],
-                                        },
-                                    },
-                                    session_id=session_id,
-                                )
-                            )
-                        elif request_id:
-                            asyncio.create_task(
-                                send(
-                                    "Fetch.continueWithAuth",
-                                    {
-                                        "requestId": request_id,
-                                        "authChallengeResponse": {"response": "CancelAuth"},
+                                        "authChallengeResponse": proxy_auth_attempts.response(
+                                            session_id, request_id, challenge, proxy_auth
+                                        ),
                                     },
                                     session_id=session_id,
                                 )
@@ -2395,9 +2394,15 @@ class BrowserLauncher:
 
             # This is a configuration invariant, independent of the optional
             # fingerprint gate/force policy in API and background callers.
-            proxy_error = profile.proxy.configuration_error() if profile.proxy else None
+            proxy_error = profile.proxy.browser_configuration_error() if profile.proxy else None
             if proxy_error:
                 return {"success": False, "code": "INVALID_PROXY_CONFIG", "error": proxy_error}
+
+            try:
+                verify_browser_executable(browser_path)
+            except BrowserTrustError as exc:
+                return {"success": False, "code": exc.code, "error": str(exc),
+                        "browser_started": False, "navigation_allowed": False}
 
             profile_dir = self.manager.get_profile_dir(profile_id)
             user_data_dir = os.path.join(profile_dir, "user_data")
@@ -2517,11 +2522,6 @@ class BrowserLauncher:
                         "[Launcher] Xác thực proxy qua CDP "
                         f"({profile.proxy.host}:{profile.proxy.port}, {profile.proxy.protocol})."
                     )
-                    if profile.proxy.protocol in ("socks5", "socks4"):
-                        log.warning(
-                            "[Launcher] Lưu ý: Chrome có thể không hỗ trợ xác thực "
-                            "SOCKS5; nên dùng HTTP/HTTPS proxy nếu proxy yêu cầu auth."
-                        )
 
             # Mở trang trắng theo mặc định; chỉ điều hướng ra ngoài khi người dùng chỉ định URL.
             target_url = open_url or "about:blank"
@@ -2534,11 +2534,12 @@ class BrowserLauncher:
             # Khởi chạy tiến trình Browser
             proc = None
             try:
-                proc = subprocess.Popen(
-                    args,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                with hold_trusted_browser(browser_path):
+                    proc = subprocess.Popen(
+                        args,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                 self.active_processes[profile_id] = proc
                 self.active_ports[profile_id] = port
                 self.cdp_health.set_process(profile_id, launch_id, proc.pid)
@@ -2777,7 +2778,10 @@ class BrowserLauncher:
                 return {
                     "cleanup_failed": not cleanup_ok,
                     "success": False,
-                    "error": "Lỗi khởi chạy trình duyệt. Vui lòng thử lại.",
+                    "code": e.code if isinstance(e, BrowserTrustError) else "LAUNCH_FAILED",
+                    "browser_started": proc is not None,
+                    "navigation_allowed": False,
+                    "error": str(e) if isinstance(e, BrowserTrustError) else "Lỗi khởi chạy trình duyệt. Vui lòng thử lại.",
                 }
 
     def stop(self, profile_id: str, *, expected_launch_id: Optional[str] = None, expected_owner_instance: Optional[str] = None) -> Dict[str, Any]:

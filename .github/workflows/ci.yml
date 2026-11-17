@@ -60,9 +60,11 @@ jobs:
       ANTIDETECT_RUN_LIVE_RELEASE: "1"
       ANTIDETECT_RUN_UI_SMOKE: "1"
       ANTIDETECT_RUN_LIVE_FINGERPRINT: "1"
+      ANTIDETECT_RUN_LIVE_NETWORK: "1"
       ANTIDETECT_REQUIRE_BROWSER_TESTS: "1"
       ANTIDETECT_LIVE_RUNTIME_REPORT: "${{ github.workspace }}/reports/live-runtime.json"
       ANTIDETECT_LIVE_FINGERPRINT_REPORT: "${{ github.workspace }}/reports/live-fingerprint.json"
+      ANTIDETECT_LIVE_NETWORK_REPORT: "${{ github.workspace }}/reports/live-network.json"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -96,10 +98,10 @@ jobs:
             renderer_scope = 'Synthetic localhost runtime/UI/fingerprint contracts; hardware diversity validation is separate'
           } | ConvertTo-Json | Set-Content reports/browser-environment.json -Encoding utf8
       - name: Run isolated runtime, UI and fingerprint checks
-        run: python -m pytest -q test_live_release_runtime.py test_ui_smoke.py test_ui_release_errors.py test_live_fingerprint_contracts.py --junitxml=reports/browser.xml
+        run: python -m pytest -q test_live_release_runtime.py test_ui_smoke.py test_ui_release_errors.py test_live_fingerprint_contracts.py test_live_browser_network.py --junitxml=reports/browser.xml
       - name: Reject skipped or missing required browser checks
         run: |
-          python -c "import xml.etree.ElementTree as E; cases=E.parse('reports/browser.xml').findall('.//testcase'); required={'test_real_ownership_replacement_disconnect_and_restart','test_dashboard_ui_smoke','test_malformed_batch_import_has_no_partial_profiles','test_stale_edit_shows_conflict_and_preserves_newer_data','test_real_scheduler_failure_and_accepted_job_are_distinct','test_fingerprint_revision_and_verification_controls_preserve_then_migrate','test_browserlauncher_canvas_contracts'}; assert required <= {c.get('name') for c in cases}, 'Required browser checks did not run'; assert not any(c.find(tag) is not None for c in cases for tag in ('skipped','failure','error')), 'Browser checks were skipped or failed'"
+          python -c "import xml.etree.ElementTree as E; cases=E.parse('reports/browser.xml').findall('.//testcase'); required={'test_real_ownership_replacement_disconnect_and_restart','test_dashboard_ui_smoke','test_malformed_batch_import_has_no_partial_profiles','test_stale_edit_shows_conflict_and_preserves_newer_data','test_real_scheduler_failure_and_accepted_job_are_distinct','test_fingerprint_revision_and_verification_controls_preserve_then_migrate','test_browserlauncher_canvas_contracts','test_browserlauncher_local_proxy_and_stun_contracts'}; assert required <= {c.get('name') for c in cases}, 'Required browser checks did not run'; assert not any(c.find(tag) is not None for c in cases for tag in ('skipped','failure','error')), 'Browser checks were skipped or failed'"
       - name: Upload synthetic browser evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -1108,20 +1108,100 @@ def _pending_path(updates_path: str, state_file: str) -> str:
     return path
 
 
+# Executed using -I -S: no site hooks, PYTHONPATH, or target installation imports.
+# Hash the exact bytes before compile/exec. The journal never selects code.
+_RECOVERY_LOADER = (
+    "import hashlib,pathlib,sys;"
+    "p=pathlib.Path(sys.argv[1]);b=p.read_bytes();"
+    "ok=hashlib.sha256(b).hexdigest()==sys.argv[2];"
+    "ok or sys.exit('Recovery bootstrap digest mismatch');"
+    "sys.argv=[str(p),*sys.argv[3:]];"
+    "exec(compile(b,str(p),'exec'),{'__name__':'__main__','__file__':str(p)})"
+)
+
+
+def _stage_recovery_bootstrap(
+    root: str, updates_path: str, state_file: str, pending: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist an independent, hash-bound recovery command before install writes.
+
+    The bootstrap is trusted installed release code, copied outside the install
+    so overwriting updater/storage/applog cannot break the recovery entrypoint.
+    Like the updater, this does not defend against hostile same-user tampering.
+    """
+    canonical = lambda path: os.path.realpath(_assert_no_reparse(path))
+    root, updates_path, state_file = map(canonical, (root, updates_path, state_file))
+    backup_dir = canonical(pending["backup_dir"])
+    lock_path = canonical(os.path.join(updates_path, "update.lock"))
+    journal_path = canonical(_pending_path(updates_path, state_file))
+    if (os.path.normcase(state_file) == os.path.normcase(lock_path)
+            or os.path.commonpath([backup_dir, state_file]) == backup_dir):
+        raise UpdateError("Recovery metadata paths collide")
+    backup = _read_backup_manifest(backup_dir, root)
+    metadata_paths = {os.path.normcase(path) for path in (state_file, journal_path, lock_path)}
+    for group in ("files", "delete", "added"):
+        for entry in backup[group]:
+            destination = canonical(_safe_install_path(root, entry["path"]))
+            if os.path.normcase(destination) in metadata_paths:
+                raise UpdateError("Recovery metadata collides with an install file")
+    root_id = sha256_bytes(os.path.normcase(root).encode("utf-8"))[:12]
+    capsule_dir = canonical(os.path.join(
+        os.path.dirname(root), ".antidetect-recovery-" + root_id, pending["operation_id"]
+    ))
+    if os.path.commonpath([root, capsule_dir]) == root:
+        raise UpdateError("Recovery bootstrap must be outside the installation")
+    _mkdir_checked(os.path.dirname(capsule_dir))
+    os.mkdir(capsule_dir)  # Never overwrite an old capsule or command.
+    _assert_no_reparse(capsule_dir)
+    source = canonical(os.path.join(os.path.dirname(__file__), "recovery_bootstrap.py"))
+    source_sha = sha256_file(source)
+    bootstrap = os.path.join(capsule_dir, "bootstrap.py")
+    _copy_verified(source, bootstrap, source_sha)
+    capsule = os.path.join(capsule_dir, "capsule.json")
+    _write_json_atomic(capsule, {
+        "schema": 1, "pending": pending, "install_root": root,
+        "updates_path": updates_path, "state_file": state_file,
+        "backup_dir": backup_dir, "pid_file": canonical(os.path.join(_data_root(root), "server.pid")),
+        "capsule_dir": capsule_dir,
+    })
+    capsule_sha = sha256_file(capsule)
+    command = [sys.executable, "-I", "-S", "-c", _RECOVERY_LOADER,
+               bootstrap, source_sha, capsule, capsule_sha]
+    # Single-quote every PowerShell token, doubling literal quote characters.
+    powershell = "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in command)
+    instructions = os.path.join(capsule_dir, "RECOVER.txt")
+    with open(instructions, "x", encoding="utf-8") as stream:
+        stream.write("Stop the application server, then paste this command into PowerShell.\n")
+        stream.write("Keep this command from before the update; do not trust replacement digests.\n\n")
+        stream.write(powershell + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return {"capsule_dir": capsule_dir, "capsule_sha256": capsule_sha,
+            "command_argv": command, "command_powershell": powershell,
+            "instructions_path": instructions}
+
+
 def _begin_pending(
     root: str, updates_path: str, state_file: str, backup_dir: str,
     action: str, operation_id: str, state_after: Optional[Dict[str, Any]] = None,
-) -> None:
+    recovery_notify: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
     path = _pending_path(updates_path, state_file)
     if os.path.exists(path):
         raise UpdateError("Còn cập nhật chưa phục hồi; không ghi đè journal")
-    _write_json_atomic(path, {
+    pending = {
         "schema": 1, "operation_id": operation_id, "action": action,
         "install_root": os.path.abspath(root), "state_file": os.path.abspath(state_file),
         "backup_dir": os.path.abspath(backup_dir),
         "backup_manifest_sha256": sha256_file(os.path.join(backup_dir, "backup.json")),
         "state_after": state_after,
-    })
+    }
+    bootstrap = _stage_recovery_bootstrap(root, updates_path, state_file, pending)
+    if recovery_notify is not None:
+        recovery_notify(bootstrap)
+    pending["bootstrap"] = {key: bootstrap[key] for key in ("capsule_dir", "capsule_sha256")}
+    _write_json_atomic(path, pending)
+    return bootstrap
 
 
 def _read_pending(root: str, updates_path: str, state_file: str) -> Optional[Dict[str, Any]]:
@@ -1307,6 +1387,7 @@ def apply_update(
     stop_server_fn: Optional[Callable[[], Dict[str, Any]]] = None,
     dry_run: bool = False,
     backup_keep: int = BACKUP_KEEP,
+    recovery_notify: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     from .storage import InterProcessLock
 
@@ -1432,7 +1513,10 @@ def apply_update(
                 )
 
                 operation_id = uuid.uuid4().hex
-                _begin_pending(root, updates_path, state_file, backup_dir, "apply", operation_id)
+                recovery_bootstrap = _begin_pending(
+                    root, updates_path, state_file, backup_dir, "apply", operation_id,
+                    recovery_notify=recovery_notify,
+                )
                 written = []
                 try:
                     for entry in manifest["files"]:
@@ -1504,6 +1588,7 @@ def apply_update(
             return {
                 "success": True,
                 "recovery": recovery,
+                "recovery_bootstrap": recovery_bootstrap,
                 "from_version": current_version,
                 "to_version": target_version,
                 "signature": signature_state,
@@ -1544,6 +1629,7 @@ def rollback_update(
     stop_server: bool = False,
     stop_server_fn: Optional[Callable[[], Dict[str, Any]]] = None,
     force: bool = False,
+    recovery_notify: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     from .storage import InterProcessLock
 
@@ -1637,9 +1723,9 @@ def rollback_update(
                 "rollback": None,
                 "history": history,
             }
-            _begin_pending(
+            recovery_bootstrap = _begin_pending(
                 root, updates_path, state_file, chosen, "rollback", operation_id,
-                state_after=new_state,
+                state_after=new_state, recovery_notify=recovery_notify,
             )
             result = _apply_from_backup(chosen, root)
             _write_json_atomic(state_file, new_state)
@@ -1647,6 +1733,7 @@ def rollback_update(
             return {
                 "success": True,
                 "recovery": recovery,
+                "recovery_bootstrap": recovery_bootstrap,
                 "from_version": current_version,
                 "to_version": from_version,
                 "backup_dir": chosen,

@@ -10,7 +10,10 @@ globalThis.canvasContract = async function(offscreen, suppliedCanvas) {
     ctx.putImageData(new ImageData(expected,32,32),0,0);
     const read=()=>Array.from(ctx.getImageData(0,0,32,32).data);
     const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
-    const before=read(), readStable=same(before,read()), tile=[];
+    const before=read(), tile=[];
+    const readRepetitions=globalThis.fixtureReadRepetitions || 2;
+    let readStable=true;
+    for(let repeat=1;repeat<readRepetitions;repeat++)readStable=readStable&&same(before,read());
     for(let y=0;y<32;y++)for(let x=0;x<32;x++)tile.push(...ctx.getImageData(x,y,1,1).data);
     const negative=Array.from(ctx.getImageData(32,32,-32,-32).data);
     const blob=()=>offscreen?c.convertToBlob({type:'image/png'}):new Promise(resolve=>c.toBlob(resolve,'image/png'));
@@ -25,12 +28,13 @@ globalThis.canvasContract = async function(offscreen, suppliedCanvas) {
     const drawn=read();await pending;
     return {
         fullTileEqual:same(before,tile),negativeCropEqual:same(before,negative),
-        readStable,
+        readStable,readRepetitions,
         noisy:!same(before,Array.from(expected)),
         unchangedWhilePending,unchangedAfterExport,drawPreserved:same(drawn,read()),
         repeatedExportsEqual:same(firstBytes,secondBytes),
         pixels:before,png:firstBytes,
         initialWorkerRead:typeof document==='undefined'?globalThis.fixtureFirstRead:null,
+        initialRealmRead:globalThis.fixtureFirstRead || null,
         marker:['__adStealth','__adWorkerStealth','__adWorkerBase'].some(k=>k in globalThis)
     };
 };

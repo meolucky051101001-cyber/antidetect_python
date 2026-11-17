@@ -155,7 +155,10 @@ def finished_runner(runner, monkeypatch):
                 "profile_id": "profile-1", "realm": realm,
                 "checks": {name: True for name in soak.CONTRACT_CHECKS},
             })
-    monkeypatch.setattr(soak, "_chrome_processes", lambda *_a: {})
+    monkeypatch.setattr(soak, "_chrome_processes", lambda directories: {
+        profile_id: {"pids": [], "rss_mb": 0.0, "observation_complete": True}
+        for profile_id in directories
+    })
     return runner
 
 
@@ -229,7 +232,7 @@ def test_samples_require_verified_browser_health(runner, monkeypatch, health, ex
 
     monkeypatch.setattr(soak, "_http", fake_http)
     monkeypatch.setattr(soak, "_chrome_processes", lambda *_a: {
-        "profile-1": {"pids": [123], "rss_mb": 10.0},
+        "profile-1": {"pids": [123], "rss_mb": 10.0, "observation_complete": True},
     })
     monkeypatch.setattr(runner, "_available_mb", lambda: 2000)
 
@@ -403,3 +406,163 @@ def test_missing_process_observer_cannot_confirm_stop(runner, monkeypatch):
     profile = runner.profiles[0]
     assert not runner._wait_no_chrome(profile)
     assert profile["last_observed_pids"] is None
+
+
+def test_samples_measure_bound_server_instead_of_venv_launcher(runner, monkeypatch):
+    from types import SimpleNamespace
+    runner.server = SimpleNamespace(pid=100)
+    runner._server_observer = object()
+    measured = []
+    def metrics(process):
+        measured.append(process)
+        return {"pid": 101, "rss_mb": 80, "handles": 45, "threads": 8}
+    monkeypatch.setattr(soak, "_process_metrics", metrics)
+    monkeypatch.setattr(soak, "_http", lambda *a, **k: _response(200, {"application": "antidetect-python"}))
+    monkeypatch.setattr(soak, "_chrome_processes", lambda directories: {
+        profile_id: {"pids": [], "rss_mb": 0.0, "observation_complete": True}
+        for profile_id in directories
+    })
+    monkeypatch.setattr(runner, "_available_mb", lambda: 2000)
+    runner._sample()
+    assert measured == [runner._server_observer]
+    assert runner.state["last_sample"]["server"]["pid"] == 101
+
+
+@pytest.mark.parametrize("cooldown,passed", [
+    ({"rss_mb": 90, "handles": 55, "threads": 10}, True),
+    ({"rss_mb": 900, "handles": 55, "threads": 10}, False),
+    ({"rss_mb": 90, "handles": 900, "threads": 10}, False),
+    ({"rss_mb": 90, "handles": 55, "threads": 90}, False),
+    (None, False),
+])
+def test_soak_cooldown_requires_predeclared_server_budget(finished_runner, monkeypatch, cooldown, passed):
+    finished_runner._server_baseline = {"rss_mb": 70, "handles": 40, "threads": 8}
+    finished_runner.state["resource_budget"] = {"rss_mb_delta": 128, "handles_delta": 128, "threads_delta": 16}
+    monkeypatch.setattr(soak, "_process_metrics", lambda *a: cooldown)
+    monkeypatch.setattr(soak.time, "sleep", lambda *a: None)
+    assert finished_runner._finalize() == (0 if passed else 1)
+    assert finished_runner.state["summary"]["server_cooldown"]["passed"] == passed
+
+
+def test_unknown_directory_scan_cannot_confirm_profile_idle(runner, monkeypatch):
+    monkeypatch.setattr(soak, "browser_pids_using_dir", lambda directory: None)
+    observation = soak._chrome_processes({"profile-1": "synthetic-directory"})["profile-1"]
+    assert observation["observation_complete"] is False
+    assert observation["pids"] == []
+    assert not runner._wait_no_chrome(runner.profiles[0])
+    assert runner.profiles[0]["last_observed_pids"] is None
+
+
+def test_partial_directory_scan_prevents_soak_acceptance(finished_runner, monkeypatch):
+    monkeypatch.setattr(soak, "_chrome_processes", lambda directories: {
+        profile_id: {"pids": [], "rss_mb": 0.0, "observation_complete": False}
+        for profile_id in directories
+    })
+    assert finished_runner._finalize() == 1
+    assert finished_runner.state["summary"]["cleanup_checks"]["process_observation_complete"] is False
+
+
+@pytest.mark.parametrize("boundary", ["process", "children", "memory"])
+def test_browser_resource_access_denied_keeps_observation_incomplete(monkeypatch, boundary):
+    from types import SimpleNamespace
+    monkeypatch.setattr(soak, "browser_pids_using_dir", lambda directory: {11})
+
+    def denied(*args, **kwargs):
+        raise soak.psutil.AccessDenied(pid=11)
+
+    process = SimpleNamespace(pid=11, is_running=lambda: True,
+                              children=denied if boundary == "children" else lambda **kwargs: [],
+                              memory_info=denied if boundary == "memory" else lambda: SimpleNamespace(rss=1048576))
+    monkeypatch.setattr(soak.psutil, "Process", denied if boundary == "process" else lambda pid: process)
+    observation = soak._chrome_processes({"profile-1": "synthetic-directory"})["profile-1"]
+    assert observation["observation_complete"] is False
+
+
+def test_browser_rss_includes_descendants_once_and_omits_unmeasured_cpu(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(soak, "browser_pids_using_dir", lambda directory: {11, 12})
+    child = SimpleNamespace(pid=12, is_running=lambda: True,
+                            children=lambda **kwargs: [], memory_info=lambda: SimpleNamespace(rss=2 * 1048576))
+    parent = SimpleNamespace(pid=11, is_running=lambda: True,
+                             children=lambda **kwargs: [child], memory_info=lambda: SimpleNamespace(rss=3 * 1048576))
+    monkeypatch.setattr(soak.psutil, "Process", lambda pid: {11: parent, 12: child}[pid])
+    observation = soak._chrome_processes({"profile-1": "synthetic-directory"})["profile-1"]
+    assert observation["observation_complete"] is True
+    assert observation["pids"] == [11, 12]
+    assert observation["rss_mb"] == 5
+    assert observation["cpu_percent"] is None
+
+
+def test_bound_process_pid_reuse_never_reads_replacement_metrics():
+    from types import SimpleNamespace
+
+    def must_not_measure():
+        pytest.fail("Reused PID must not be read as the original bound process")
+
+    process = SimpleNamespace(pid=11, is_running=lambda: False, memory_info=must_not_measure)
+    assert soak._process_metrics(process) is None
+
+
+def test_dashboard_exit_requires_real_server_after_wrapper_exits(runner):
+    from types import SimpleNamespace
+    runner.server = SimpleNamespace(poll=lambda: 0)
+    runner._server_observer = SimpleNamespace(is_running=lambda: True)
+    assert runner._dashboard_exited() is False
+    runner._server_observer = SimpleNamespace(is_running=lambda: False)
+    assert runner._dashboard_exited() is True
+
+
+def test_dashboard_unknown_bound_process_is_not_stopped(runner):
+    from types import SimpleNamespace
+
+    def denied():
+        raise soak.psutil.AccessDenied(pid=11)
+
+    runner.server = SimpleNamespace(poll=lambda: 0)
+    runner._server_observer = SimpleNamespace(is_running=denied)
+    assert runner._dashboard_exited() is False
+
+
+def test_finalize_shuts_down_real_server_when_wrapper_already_exited(finished_runner, monkeypatch):
+    from types import SimpleNamespace
+    state = {"running": True, "shutdowns": 0, "waited": False}
+
+    def shutdown(base, method, path, **kwargs):
+        assert path == "/api/system/shutdown"
+        state["shutdowns"] += 1
+        state["running"] = False
+        return _response(200, {"success": True})
+
+    def observed_wait(timeout):
+        state["waited"] = True
+        assert state["running"] is False
+
+    finished_runner.server = SimpleNamespace(poll=lambda: 0, wait=lambda timeout: 0)
+    finished_runner._server_observer = SimpleNamespace(is_running=lambda: state["running"], wait=observed_wait)
+    monkeypatch.setattr(soak, "_http", shutdown)
+    assert finished_runner._finalize() == 0
+    assert state["shutdowns"] == 1 and state["waited"] is True
+    assert finished_runner.state["summary"]["cleanup_checks"]["dashboard_exited"] is True
+
+
+def test_missing_profile_observation_never_passes_complete_cleanup(finished_runner, monkeypatch):
+    monkeypatch.setattr(soak, "_chrome_processes", lambda directories: {})
+    assert finished_runner._finalize() == 1
+    assert finished_runner.state["summary"]["cleanup_checks"]["process_observation_complete"] is False
+
+
+def test_bound_server_cleanup_denied_preserves_failed_summary(finished_runner, monkeypatch):
+    from types import SimpleNamespace
+
+    def wait(timeout):
+        raise soak.psutil.TimeoutExpired(timeout, pid=11)
+
+    def terminate():
+        raise soak.psutil.AccessDenied(pid=11)
+
+    finished_runner.server = SimpleNamespace(poll=lambda: 0, wait=lambda timeout: 0)
+    finished_runner._server_observer = SimpleNamespace(is_running=lambda: True, wait=wait, terminate=terminate)
+    monkeypatch.setattr(soak, "_http", lambda *args, **kwargs: _response(200, {"success": True}))
+    assert finished_runner._finalize() == 1
+    assert finished_runner.state["summary"]["cleanup_checks"]["dashboard_exited"] is False
+    assert any(record["scope"] == "server_cleanup" for record in finished_runner.errors)
