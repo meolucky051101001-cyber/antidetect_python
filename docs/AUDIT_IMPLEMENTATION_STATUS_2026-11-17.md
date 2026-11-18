@@ -92,7 +92,20 @@ Bản sửa đóng race mà không hạ bất kỳ gate fail-closed nào:
 
 - Nâng mặc định `BrowserLauncher._wait_directory_idle` từ `5.0 s` lên `15.0 s` (khi thư mục đã rảnh vẫn thoát ngay ở lần quét đầu tiên, không tăng độ trễ đường thường; scan `unknown` hoặc còn tiến trình quá `15.0 s` vẫn trả `False` và giữ nguyên recovery/thư mục).
 - Thêm `--disable-background-networking`, `--disable-component-update`, `--disable-domain-reliability`, `--disable-sync` vào `_measure_native_brands_standalone`, đồng bộ với phiên Chrome chính.
-- Bổ sung kiểm thử đơn vị trong `test_launcher_directory_quiescence.py` và `test_browser_trust.py`. Kiểm chứng lại trên diff cuối tại `%TEMP%/antidetect-idle-fix-validation-20261118/`: **1275 passed, 7 skipped, coverage 79.15%, 152.26 s** (1 expected ZIP warning); Ruff, `compileall`, `lock_dependencies.py check`, `pip check` sạch; bộ browser bắt buộc **8 passed, 0 skipped, 172.29 s**. SHA mới vẫn phải xác nhận CI và chạy lại trọn bộ candidate `restore → fingerprint → preflight → long → overnight` từ đầu.
+- Bổ sung kiểm thử đơn vị trong `test_launcher_directory_quiescence.py` và `test_browser_trust.py`. Kiểm chứng lại trên diff cuối tại `%TEMP%/antidetect-idle-fix-validation-20261118/`: **1275 passed, 7 skipped, coverage 79.15%, 152.26 s** (1 expected ZIP warning); Ruff, `compileall`, `lock_dependencies.py check`, `pip check` sạch; bộ browser bắt buộc **8 passed, 0 skipped, 172.29 s**.
+
+## Ứng viên ee20882 và thu hồi tiến trình con giữ handle crashpad (18/11/2026)
+
+Commit `ee20882ee1b0084ecf802619638aaed600ff35bf` đã push và vượt [CI run 44216299661](https://github.com/meolucky051101001-cyber/antidetect_python/actions/runs/44216299661) xanh cả ba job (`test-windows`, `dependency-audit`, `browser-windows`). Lượt candidate `%TEMP%/antidetect-candidate-ee20882-20261118/` đạt `restore` và 5/6 kịch bản `fingerprint` (gồm toàn bộ 3 kịch bản Chrome), nhưng `edge-seed-987654321` ở bước `strict_rejection` chạm `elapsed_ms=15281.000` trên ngưỡng `15.0 s` trước khi thoát sạch (`process_running=false`, `0` orphan), đồng thời bốn lần dừng ở `chrome-seed-12345` mất `17.7–26.4 s`. Lượt này giữ nguyên nhãn **FAILED**.
+
+Thực nghiệm độc lập trên máy trạm (`Windows-10-10.0.26300-SP0`, khi `new_chrome.exe` đang chờ cập nhật song song) xác nhận: nếu không đóng qua `Browser.close` mà dùng `TerminateProcess` lên tiến trình cha, tiến trình phụ `crashpad-handler` giữ handle cha ở trạng thái `STILL_ACTIVE` khoảng `21.2 s` (tới `>30 s` dưới tải cao) trong lúc tạo minidump; ngay khi thu hồi các tiến trình con có `--user-data-dir` khớp chính xác thông qua Win32 handle đã xác minh `birth_ticks` và image name, toàn bộ cụm thoát dứt điểm trong `~7.5 s`.
+
+Bản sửa hoàn chỉnh đồng bộ trần `30.0 s` của `soak_test.py` và đóng đường treo `crashpad-handler`:
+
+- Nâng `BrowserLauncher._wait_directory_idle` và `terminate_verified_browser` lên `30.0 s`; nâng bước chờ sau `proc.kill()` lên `25.0 s` (`5 s + 25 s = 30 s`).
+- Khi rơi vào đường dừng cưỡng bức (`proc.terminate()` hoặc `terminate_verified_browser` giữ `STILL_ACTIVE` quá `1.0 s`), quét và thu hồi các tiến trình con thuộc đúng `user_data_dir` bằng Win32 handle đã xác minh (`read_browser_identity(..., fresh=True)` + `terminate_verified_browser`), không dùng `taskkill` hay kill theo tên; các mục `unknown`/`mismatch` không đụng tới và vẫn fail-closed ở `_wait_directory_idle`.
+- Sửa một chỗ đọc lại `proc.cmdline()` bị `NoSuchProcess` trên tiến trình tự thoát sớm trong `test_live_release_runtime.py` sang dùng `proc.info["cmdline"]`.
+- Kiểm chứng cuối tại `%TEMP%/antidetect-crashpad-sweep-final-20261118/`: **1277 passed, 7 skipped, coverage 79.09%, 198.22 s** (1 expected ZIP warning); Ruff, `compileall`, `lock_dependencies.py check`, `pip check` sạch; bộ browser bắt buộc **8 passed, 0 skipped, 246.53 s**. SHA mới tiếp tục cần CI xanh và chạy lại trọn bộ candidate `restore → fingerprint → preflight → long → overnight` từ đầu.
 
 ## Phần còn chờ nghiệm thu
 

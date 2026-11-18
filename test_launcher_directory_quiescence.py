@@ -142,18 +142,18 @@ def test_graceful_close_waits_and_skips_native_termination(directory_launcher, m
     assert sentinel.exists()
 
 
-def test_default_directory_idle_tolerates_six_second_child_exit_and_fails_past_budget(tmp_path, monkeypatch):
+def test_default_directory_idle_tolerates_kernel_rundown_and_fails_past_thirty_second_budget(tmp_path, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(launcher_module.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(launcher_module.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
 
     def delayed_exit(_directory):
-        clock[0] += 2.8
-        return {424243} if clock[0] < 106.0 else set()
+        clock[0] += 3.2
+        return {424243} if clock[0] < 122.0 else set()
 
     monkeypatch.setattr(launcher_module, "browser_pids_using_dir", delayed_exit)
     assert BrowserLauncher._wait_directory_idle(str(tmp_path)) is True
-    assert 106.0 <= clock[0] < 115.0
+    assert 122.0 <= clock[0] < 130.0
 
     clock[0] = 200.0
 
@@ -163,4 +163,54 @@ def test_default_directory_idle_tolerates_six_second_child_exit_and_fails_past_b
 
     monkeypatch.setattr(launcher_module, "browser_pids_using_dir", stuck_child)
     assert BrowserLauncher._wait_directory_idle(str(tmp_path)) is False
-    assert clock[0] >= 215.0
+    assert clock[0] >= 230.0
+
+
+def test_stop_fallback_waits_twenty_five_seconds_after_kill_for_windows_rundown(directory_launcher, monkeypatch):
+    import subprocess
+    launcher, profile_id, _launch_id, sentinel = directory_launcher
+    monkeypatch.setattr(launcher_module.sys, "platform", "win32")
+    monkeypatch.setattr(launcher_module, "browser_pids_using_dir", lambda *_a, **_k: set())
+    waits, actions, killed = [], [], []
+
+    def wait(*, timeout):
+        waits.append(timeout)
+        if not killed:
+            raise subprocess.TimeoutExpired("chrome.exe", timeout)
+        return 1
+
+    proc = SimpleNamespace(
+        pid=424242,
+        poll=lambda: 1 if killed else None,
+        wait=wait,
+        terminate=lambda: actions.append("terminate"),
+        kill=lambda: (actions.append("kill"), killed.append(True)),
+    )
+    launcher.active_processes[profile_id] = proc
+    assert launcher.stop(profile_id)["success"] is True
+    assert actions == ["terminate", "kill"]
+    assert waits == [5, 25]
+    assert sentinel.exists()
+
+
+def test_terminate_owned_children_only_terminates_handle_verified_directory_matches(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        launcher_module, "browser_pids_using_dir",
+        lambda _directory: {101, 102, 103},
+    )
+    identities = {
+        102: {"state": "owned", "created": "t1", "birth_ticks": 2},
+        103: {"state": "unknown", "reason": "incomplete_process_query"},
+    }
+    monkeypatch.setattr(
+        launcher_module, "read_browser_identity",
+        lambda pid, directory, fresh=False: identities[pid],
+    )
+    terminated = []
+    monkeypatch.setattr(
+        launcher_module, "terminate_verified_browser",
+        lambda pid, directory, expected: terminated.append((pid, directory, expected)) or {"state": "absent"},
+    )
+    BrowserLauncher._terminate_owned_children(str(tmp_path), exclude_pid=101)
+    assert terminated == [(102, str(tmp_path), identities[102])]

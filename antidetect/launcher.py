@@ -593,7 +593,19 @@ class BrowserLauncher:
             return self._clear_process_locked(profile_id, expected_record=expected_record)
 
     @staticmethod
-    def _wait_directory_idle(user_data_dir, timeout=15.0):
+    def _terminate_owned_children(user_data_dir, *, exclude_pid=None):
+        """Terminate handle-verified Chromium helper processes after parent kill."""
+        if sys.platform != "win32" or not user_data_dir:
+            return
+        excluded = {int(exclude_pid)} if exclude_pid is not None else set()
+        found = set(browser_pids_using_dir(user_data_dir) or ()) - excluded
+        for child_pid in sorted(found):
+            identity = read_browser_identity(child_pid, user_data_dir, fresh=True)
+            if identity.get("state") == "owned":
+                terminate_verified_browser(child_pid, user_data_dir, identity)
+
+    @staticmethod
+    def _wait_directory_idle(user_data_dir, timeout=30.0):
         """A parent exit alone does not prove Chromium children have stopped."""
         if not user_data_dir:
             return True
@@ -1182,8 +1194,13 @@ class BrowserLauncher:
                     try:
                         proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
+                        self._terminate_owned_children(user_data, exclude_pid=proc.pid)
                         proc.kill()
-                        proc.wait(timeout=5)
+                        try:
+                            proc.wait(timeout=25)
+                        except subprocess.TimeoutExpired:
+                            pass
+                    self._terminate_owned_children(user_data, exclude_pid=proc.pid)
             release_port(port)
             if not self._wait_directory_idle(user_data):
                 diagnostic.update(status="failed", stage="cleanup", error="CLEANUP_UNCONFIRMED")
@@ -3012,8 +3029,10 @@ class BrowserLauncher:
                             try:
                                 proc.wait(timeout=5)
                             except subprocess.TimeoutExpired:
+                                self._terminate_owned_children(user_data_dir, exclude_pid=proc.pid)
                                 proc.kill()
-                                proc.wait(timeout=5)
+                                proc.wait(timeout=25)
+                            self._terminate_owned_children(user_data_dir, exclude_pid=proc.pid)
                         exited = proc.poll() is not None
                     else:
                         if record.get("created") and record["created"] != identity.get("created"):
@@ -3025,13 +3044,14 @@ class BrowserLauncher:
                         exited = outcome.get("state") == "absent"
                         if not exited:
                             return _stop_failed("Chưa xác nhận được tiến trình đã dừng; dữ liệu trạng thái được giữ nguyên.")
+                        self._terminate_owned_children(user_data_dir, exclude_pid=pid)
                 elif proc:
                     proc.terminate()
                     try:
                         proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         proc.kill()
-                        proc.wait(timeout=5)
+                        proc.wait(timeout=25)
                     exited = proc.poll() is not None
                 else:
                     return _stop_failed("Không xác minh được quyền sở hữu tiến trình.")

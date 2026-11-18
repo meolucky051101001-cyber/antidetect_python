@@ -197,7 +197,7 @@ def browser_process_birth(pid):
         return None
 
 
-def terminate_verified_browser(pid, user_data_dir, expected_identity, timeout=8.0):
+def terminate_verified_browser(pid, user_data_dir, expected_identity, timeout=30.0):
     """Terminate the same native handle whose directory/birth was verified."""
     handle = None
     try:
@@ -218,13 +218,23 @@ def terminate_verified_browser(pid, user_data_dir, expected_identity, timeout=8.
             return {"state": "unknown", "reason": "process_birth_changed"}
         if not api.TerminateProcess(handle, 1):
             return {"state": "unknown", "reason": "terminate_failed"}
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
+        swept_children = False
         while True:
             result = _handle_snapshot(api, handle)
             if result["state"] == "absent":
                 return result
-            if result["state"] == "unknown" or time.monotonic() >= deadline:
+            now = time.monotonic()
+            if result["state"] == "unknown" or now >= deadline:
                 return {"state": "unknown", "reason": "exit_unconfirmed"}
+            if not swept_children and timeout >= 2.0 and now - started >= 1.0:
+                swept_children = True
+                found = set(browser_pids_using_dir(user_data_dir) or ()) - {pid}
+                for child_pid in sorted(found):
+                    child_identity = read_browser_identity(child_pid, user_data_dir, fresh=True)
+                    if child_identity.get("state") == "owned":
+                        terminate_verified_browser(child_pid, user_data_dir, child_identity, timeout=1.5)
             time.sleep(0.1)
     except Exception:
         return {"state": "unknown", "reason": "termination_query_failed"}
