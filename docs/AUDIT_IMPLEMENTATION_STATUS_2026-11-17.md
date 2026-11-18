@@ -107,6 +107,18 @@ Bản sửa hoàn chỉnh đồng bộ trần `30.0 s` của `soak_test.py` và 
 - Sửa một chỗ đọc lại `proc.cmdline()` bị `NoSuchProcess` trên tiến trình tự thoát sớm trong `test_live_release_runtime.py` sang dùng `proc.info["cmdline"]`.
 - Kiểm chứng cuối tại `%TEMP%/antidetect-crashpad-sweep-final-20261118/`: **1277 passed, 7 skipped, coverage 79.09%, 198.22 s** (1 expected ZIP warning); Ruff, `compileall`, `lock_dependencies.py check`, `pip check` sạch; bộ browser bắt buộc **8 passed, 0 skipped, 246.53 s**. SHA mới tiếp tục cần CI xanh và chạy lại trọn bộ candidate `restore → fingerprint → preflight → long → overnight` từ đầu.
 
+### Kết quả ứng viên 17b28f2 trước khi dừng máy 12:00 (18/11/2026)
+
+Commit `17b28f224f6614b059d346a20a2c444624196724` đạt [CI run 44224344899](https://github.com/meolucky051101001-cyber/antidetect_python/actions/runs/44224344899) xanh cả ba job (`test-windows`, `dependency-audit`, `browser-windows`).
+
+Lượt candidate `%TEMP%/antidetect-candidate-17b28f2-20261118/`:
+
+- `restore`: **PASS** (`report_sha256: 909846eda2477c2943d432524c8f8c04f0220f4164d3ca045222f60f1059fe0a`).
+- `fingerprint` (Chrome + Edge 6/6, 12 realms): **PASS** (`report_sha256: 6c86f7dca4579baab91d98946981d0a61f239657f92cbce8e0d3fa01d137a1ed`).
+- `preflight` (15 phút): **PASS** (`report_sha256: 85698e35084187b599fd58de6dfc584c8d99f4d988c976c776b3521f2d835e27`).
+- `long` (2 giờ): chạy trọn thời lượng `7212.2 s` (`480` samples, `440` healthy samples, `11` lifecycle, `7` copy, `119` tab cycles, `2769` canvas/worker executions với `0` contract failures; xác nhận thực tế `1` lần `memory_shed` lúc `03:14:56Z` ở `636.2 MB` và tự phục hồi `memory_recovered` lên lại `2` profile lúc `03:16:42Z` ở `2104.1 MB`; tổng `21` lần dừng và `7` lần copy đều đạt, `orphan_processes=0`, cooldown budget đạt với RAM `-28.9 MB`, handles `+64`, threads `-2`). Tuy nhiên kết thúc ở trạng thái **FAILED** (`exit_code=1`, `errors=10`) vì lúc `04:33:40Z` (`available_mb=815.3`), `Soak 1` chuyển sang `degraded` (`TARGET_CONFIG_FAILED`), khiến 10 lần `open_tab` kế tiếp (`04:34:27Z`–`04:43:27Z`) trả `HTTP 409 CDP_UNHEALTHY` trước khi `copy_cycle` lúc `04:43:29Z` khởi động lại `Soak 1` về lại `healthy` đến hết 2 giờ; `long/results/server.log` ghi nhận `Task exception was never retrieved` với `asyncio.exceptions.TimeoutError: CDP Runtime.runIfWaitingForDebugger response timed out` tại `antidetect/launcher.py:1586` (nhánh `else` của `Target.attachedToTarget` gọi `asyncio.create_task(send("Runtime.runIfWaitingForDebugger", ...))` chưa qua `spawn_target_task`).
+- `overnight` (24 giờ): **NOT_RUN**. Toàn bộ tiến trình con đã thoát sạch trước `12:00+07:00` (`0` orphan). Việc tiếp theo khi mở máy lại là xử lý race `Runtime.runIfWaitingForDebugger` / `TARGET_CONFIG_FAILED` trong `antidetect/launcher.py` rồi chạy lại chuỗi nghiệm thu trên SHA mới.
+
 ## Phần còn chờ nghiệm thu
 
 1. Chốt sửa resource recovery của harness và SHA mới; kiểm regression/CI phù hợp rồi chạy candidate mới với manifest ngoài Git. Restore/matrix đã đạt ở `9fcb10b` vẫn là bằng chứng đúng SHA đó; không chuyển nhãn sang SHA mới.
