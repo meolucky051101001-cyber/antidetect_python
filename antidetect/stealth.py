@@ -16,6 +16,7 @@ def _read_asset(name: str) -> str:
 
 _WORKER_TEMPLATE = _read_asset("stealth_worker.js")
 _PAGE_TEMPLATE = _read_asset("stealth_page.js")
+_CANVAS_TEMPLATE = _read_asset("stealth_canvas.js")
 
 STEALTH_GROUPS = (
     "navigator",
@@ -498,6 +499,7 @@ def _stealth_config(fp: FingerprintConfig, native_brands: Optional[dict] = None)
         "os": fp.os,
         "browserBrand": brand,
         "canvasSeed": fp.canvas_noise_seed,
+        "algorithmVersion": getattr(fp, "fingerprint_algorithm_version", 1),
         "audioSeed": fp.audio_noise_seed,
         "webglVendor": fp.webgl_vendor,
         "webglRenderer": fp.webgl_renderer,
@@ -537,6 +539,7 @@ def get_worker_stealth_script(
     fp: FingerprintConfig,
     native_brands: Optional[dict] = None,
     disabled: Optional[set] = None,
+    cpp_engine: Optional[str] = None,
 ) -> str:
     """Stealth payload for dedicated/shared/module workers and service workers.
 
@@ -554,6 +557,12 @@ def get_worker_stealth_script(
     cfg.pop("shaderPrecision", None)
     if disabled is None:
         disabled = _effective_disabled_groups(fp)
+    else:
+        disabled = set(disabled)
+    if cpp_engine == "fingerprint-chromium":
+        # Native C++ engine already separates Canvas/WebGL/Audio/Fonts/Rects;
+        # omit JS Canvas prototype hooks so zero JS wrappers appear on DOM/Workers.
+        disabled = set(disabled) | {"canvas"}
     platform = "MacIntel" if fp.os == "macos" else ("Linux x86_64" if fp.os == "linux" else "Win32")
     ch_platform = "macOS" if fp.os == "macos" else ("Linux" if fp.os == "linux" else "Windows")
     ch_platform_ver = "14.5.0" if fp.os == "macos" else ("6.5.0" if fp.os == "linux" else "15.0.0")
@@ -562,6 +571,7 @@ def get_worker_stealth_script(
     script = _WORKER_TEMPLATE
     replacements = {
         "__CFG__": json.dumps(cfg),
+        "__CANVAS_RUNTIME__": _CANVAS_TEMPLATE,
         "__DISABLED__": json.dumps(sorted(disabled)),
         "__PLATFORM__": json.dumps(platform),
         "__CH_PLATFORM__": json.dumps(ch_platform),
@@ -574,7 +584,9 @@ def get_worker_stealth_script(
 
 
 def get_stealth_script(
-    fp: FingerprintConfig, native_brands: Optional[dict] = None
+    fp: FingerprintConfig,
+    native_brands: Optional[dict] = None,
+    cpp_engine: Optional[str] = None,
 ) -> str:
     """Tạo mã JavaScript tiêm trước khi trang load (Page.addScriptToEvaluateOnNewDocument)
     để can thiệp dấu vân tay (Canvas, WebGL, AudioContext, Navigator, Screen, Fonts, WebGPU).
@@ -582,13 +594,16 @@ def get_stealth_script(
 
     fp_json = json.dumps(_stealth_config(fp, native_brands=native_brands))
     disabled = _effective_disabled_groups(fp)
+    if cpp_engine == "fingerprint-chromium":
+        disabled = set(disabled) | {"canvas"}
 
     worker_js = get_worker_stealth_script(
-        fp, native_brands=native_brands, disabled=disabled
+        fp, native_brands=native_brands, disabled=disabled, cpp_engine=cpp_engine
     )
     script = _PAGE_TEMPLATE
     replacements = {
         "__CFG__": fp_json,
+        "__CANVAS_RUNTIME__": _CANVAS_TEMPLATE,
         "__DISABLED__": json.dumps(sorted(disabled)),
         "__WORKER_JS__": json.dumps(worker_js),
     }
@@ -601,3 +616,78 @@ def get_stealth_script(
 # Alias cho tương thích ngược và theo đặc tả kế hoạch P0-05
 generate_stealth_js = get_stealth_script
 get_webgl_limits = _webgl_limits
+
+
+def get_stealth_capabilities(
+    fp: FingerprintConfig, cpp_engine: Optional[str] = None
+) -> dict:
+    """Describe enforced behavior, not a detector or privacy certification.
+
+    Revision 2 preserves browser contracts by keeping surfaces native where a
+    JavaScript substitute cannot safely reproduce WebIDL/render semantics.
+    """
+    revision = getattr(fp, "fingerprint_algorithm_version", 1)
+    disabled = _effective_disabled_groups(fp)
+    if cpp_engine == "fingerprint-chromium":
+        return {
+            "algorithm_version": revision,
+            "cpp_engine": "fingerprint-chromium",
+            "canvas_2d": (
+                "native" if "canvas" in disabled else "cpp_seeded_blink"
+            ),
+            "native_surfaces": [
+                "cpp_seeded_webgl",
+                "cpp_seeded_audio",
+                "cpp_seeded_fonts",
+                "cpp_seeded_client_rects",
+                "webgpu",
+                "media_devices",
+                "speech",
+            ],
+            "native_canvas_cases": ["webgl"],
+            "worker_installation": "cdp_execution_context",
+            "cross_os_rendering": "cpp_platform_flag",
+            "profile_separation": (
+                "none_from_render_hooks" if "canvas" in disabled else "cpp_engine_full"
+            ),
+            "limitations": [
+                "Network/IP still requires per-profile proxy isolation.",
+                "C++ engine separation depends on the locally SHA-256-pinned Fingerprint-Chromium build.",
+            ],
+        }
+    native_surfaces = [
+        "webgl", "webgpu", "audio", "fonts", "client_rects", "media_devices", "speech"
+    ]
+    if revision >= 2:
+        return {
+            "algorithm_version": revision,
+            "canvas_2d": (
+                "native" if "canvas" in disabled else "seeded_opaque_srgb_unorm8"
+            ),
+            "native_surfaces": native_surfaces,
+            "native_canvas_cases": [
+                "webgl", "display_p3", "float16", "object_coordinate_arguments"
+            ],
+            "worker_installation": "cdp_execution_context",
+            "cross_os_rendering": "unsupported",
+            "profile_separation": (
+                "none_from_render_hooks" if "canvas" in disabled else "canvas_2d_only"
+            ),
+            "limitations": [
+                "Native GPU, audio, fonts and network may link profiles on one host.",
+                "Canvas readout changes do not provide an undetectability guarantee.",
+            ],
+        }
+    return {
+        "algorithm_version": revision,
+        "canvas_2d": "native" if "canvas" in disabled else "legacy_region_gate",
+        "native_surfaces": [],
+        "worker_installation": "cdp_execution_context",
+        "cross_os_rendering": "experimental",
+        "profile_separation": "legacy_unverified",
+        "limitations": [
+            "Legacy rendering hooks retain known crop and API consistency limitations.",
+            "Canvas exports use immutable snapshots and may differ from older releases.",
+            "Legacy global markers, iframe wrapping and Blob worker wrapping were removed.",
+        ],
+    }

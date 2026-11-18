@@ -28,6 +28,7 @@ def fixture_launcher(tmp_path):
     launcher._core_verified_events = {}
     launcher._navigation_events = {}
     launcher._health_persist_warned = set()
+    launcher._health_persist_write_lock = threading.Lock()
     launcher.manager = SimpleNamespace(get_profile=lambda _: SimpleNamespace(pid=None), get_profile_dir=lambda _: str(tmp_path))
     return launcher
 
@@ -66,6 +67,7 @@ def test_is_running_recovers_replacement_after_local_process_exits(tmp_path, mon
 
 def test_stop_snapshot_cannot_remove_runtime_replaced_during_identity_query(tmp_path, monkeypatch):
     launcher = fixture_launcher(tmp_path)
+    monkeypatch.setattr("antidetect.launcher.browser_pids_using_dir", lambda *_a: set())
     launcher._runtime_store.upsert("profile-1", launch_id="generation-A", owner_instance="owner-A", pid=100)
 
     def identity(*a):
@@ -145,6 +147,7 @@ def test_delete_rechecks_liveness_after_successful_stop(tmp_path, query_raises):
 
 def test_retry_after_stale_local_stop_checks_current_process(tmp_path, monkeypatch):
     launcher = fixture_launcher(tmp_path)
+    monkeypatch.setattr("antidetect.launcher.browser_pids_using_dir", lambda *_a: set())
     launcher.cdp_health.begin_launch("profile-1", "owner-A")
     launcher.active_processes["profile-1"] = SimpleNamespace(pid=100, poll=lambda: 0)
     set_replacement(launcher)

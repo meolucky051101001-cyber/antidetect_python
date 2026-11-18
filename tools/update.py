@@ -129,6 +129,11 @@ def cmd_verify(args) -> int:
     return 0
 
 
+def _print_recovery(bootstrap) -> None:
+    print("Phục hồi độc lập nếu cập nhật gián đoạn: " + bootstrap["instructions_path"], flush=True)
+    print(bootstrap["command_powershell"], flush=True)
+
+
 def cmd_apply(args) -> int:
     if not args.dry_run and not args.yes:
         raise updater.UpdateError(
@@ -151,6 +156,7 @@ def cmd_apply(args) -> int:
         require_authenticode=args.require_authenticode,
         stop_server=args.stop_server,
         dry_run=args.dry_run,
+        recovery_notify=_print_recovery,
     )
     if result.get("dry_run"):
         print(f"Dry-run:  {result['from_version']} -> {result['to_version']}")
@@ -181,6 +187,7 @@ def cmd_rollback(args) -> int:
         backup_dir=args.backup,
         stop_server=args.stop_server,
         force=args.force,
+        recovery_notify=_print_recovery,
     )
     print(
         f"Đã rollback {result['from_version']} -> {result['to_version']}."

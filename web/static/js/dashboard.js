@@ -644,7 +644,7 @@
 
                 // P2-06: Nhãn phân định Target OS Assurance
                 const osBadge = p.fingerprint.os === 'windows'
-                    ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30" title="Host-Native Windows: Độ tin cậy tối đa, đồng nhất phần cứng và driver">Native</span>'
+                    ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30" title="Cấu hình Windows trên host Windows; GPU/driver native vẫn có thể liên kết profile">Native</span>'
                     : '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30" title="Cross-OS CDP Spoofing: Giả lập qua CDP. Lưu ý TLS/JA3 và driver gốc vẫn là Windows">Experimental</span>';
 
                 // Chế độ stealth: authentic = tắt noise canvas/webgl/audio/media/worker
@@ -652,7 +652,7 @@
                 const authenticGroups = ['canvas', 'webgl', 'audio', 'media', 'worker'];
                 const authenticMode = authenticGroups.every(g => disabled.has(g));
                 const stealthBadge = authenticMode
-                    ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30" title="Authentic: không noise, fingerprint trùng Chrome thật trên máy (Pixelscan không còn masking)">Authentic</span>'
+                    ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30" title="Authentic: tắt các hook đã chọn; các profile có thể chia sẻ đặc điểm của máy. Không bảo đảm vượt kiểm tra fingerprint.">Authentic</span>'
                     : (disabled.size > 0
                         ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-sky-500/10 text-slate-400 border border-slate-500/30" title="Tắt ' + disabled.size + ' nhóm hook (xem Edit profile)">Partial</span>'
                         : '');
@@ -997,20 +997,13 @@
                 const data = await res.json().catch(() => ({}));
                 if (handleLaunchGateBlock(data, id, null)) return;
                 if (res.ok && data.success) {
-                    if (showLaunchGateResult(data)) {
-                        // Gate warning/override already surfaced with the issue summary.
-                    } else if (data.cdp_ready === false) {
-                        showToast(data.warning || 'Chrome đã mở nhưng CDP chưa xác nhận khởi tạo.', 'warning');
-                    } else if (data.warnings && data.warnings.length) {
-                        showToast('Đã khởi chạy, nhưng có điều chỉnh: ' + data.warnings.join(' '), 'warning');
-                    } else if (data.warning) {
-                        showToast(data.warning, 'warning');
-                    } else {
-                        showToast('Khởi chạy trình duyệt thành công!', 'success');
-                    }
+                    const notice = launchOutcomeNotice(data, 'Khởi chạy trình duyệt thành công!');
+                    showToast(notice.message, notice.type);
                     refreshProfiles();
                 } else {
-                    showToast(data.detail || data.error || 'Lỗi khởi chạy profile', 'error');
+                    const notice = launchOutcomeNotice(data, 'Lỗi khởi chạy profile', false);
+                    showToast(notice.message, notice.type);
+                    if (data.browser_started || data.cleanup_failed) refreshProfiles();
                 }
             } catch (err) {
                 showToast('Lỗi kết nối máy chủ: ' + err, 'error');
@@ -1039,20 +1032,13 @@
                 const data = await res.json().catch(() => ({}));
                 if (handleLaunchGateBlock(data, id, testUrl)) return;
                 if (res.ok && data.success) {
-                    if (showLaunchGateResult(data)) {
-                        // Gate warning/override already surfaced with the issue summary.
-                    } else if (data.cdp_ready === false) {
-                        showToast(data.warning || 'Chrome đã mở nhưng CDP chưa xác nhận khởi tạo.', 'warning');
-                    } else if (data.warnings && data.warnings.length) {
-                        showToast('Đang mở trang kiểm tra. Lưu ý: ' + data.warnings.join(' '), 'warning');
-                    } else if (data.warning) {
-                        showToast(data.warning, 'warning');
-                    } else {
-                        showToast('Đang mở trang kiểm tra Browserleaks...', 'success');
-                    }
+                    const notice = launchOutcomeNotice(data, 'Đang mở trang kiểm tra Browserleaks...');
+                    showToast(notice.message, notice.type);
                     refreshProfiles();
                 } else {
-                    showToast(data.detail || data.error || 'Lỗi mở trang kiểm tra', 'error');
+                    const notice = launchOutcomeNotice(data, 'Lỗi mở trang kiểm tra', false);
+                    showToast(notice.message, notice.type);
+                    if (data.browser_started || data.cleanup_failed) refreshProfiles();
                 }
             } catch (err) {
                 showToast('Lỗi: ' + err, 'error');
@@ -1732,14 +1718,38 @@
             return false;
         }
 
-        function showLaunchGateResult(data) {
-            const gate = data && data.gate;
-            if (!gate || gate.status === 'healthy' || gate.status === 'off') return false;
-            if (gate.status === 'warning' || gate.status === 'overridden' || gate.status === 'unverified') {
-                showToast(gate.message || 'Cổng fingerprint có cảnh báo.', 'warning');
-                return true;
+        function launchOutcomeNotice(data, fallback, ok = true) {
+            data = data || {};
+            const messages = [];
+            const add = value => {
+                if (typeof value === 'string' && value.trim() && !messages.includes(value)) messages.push(value);
+            };
+            if (!ok) add(apiErrorMessage(data, fallback));
+            if (data.cleanup_failed) add('Chưa dọn xong tiến trình lỗi; kiểm tra trạng thái trước khi mở lại.');
+            if (data.browser_started === false && ok) add('Chưa xác nhận trình duyệt đã khởi chạy.');
+            if (data.navigation_allowed === false) add('Chưa cho phép điều hướng: profile đang ở trang trắng hoặc đã dừng.');
+            if (data.configuration_verified === false) add('Cấu hình fingerprint chưa được kiểm chứng đầy đủ.');
+            if (data.cdp_ready === false || data.degraded) add('Kết nối điều khiển chưa sẵn sàng hoặc đang suy giảm.');
+            const gate = data.gate;
+            if (gate && ['warning', 'overridden', 'unverified'].includes(gate.status)) {
+                add(gate.message || 'Cổng fingerprint có cảnh báo.');
             }
-            return false;
+            (Array.isArray(data.warnings) ? data.warnings : []).forEach(add);
+            add(data.warning);
+            const caps = data.fingerprint_capabilities;
+            if (caps && caps.profile_separation === 'canvas_2d_only') {
+                add('Chỉ một số canvas 2D được tách theo seed; GPU, audio và font vẫn dùng máy thật.');
+            } else if (caps && caps.profile_separation === 'none_from_render_hooks') {
+                add('Các bề mặt render dùng máy thật; hook hiện tại không tách chúng giữa các profile.');
+            } else if (caps && caps.profile_separation === 'legacy_unverified') {
+                add('Thuật toán cũ còn giới hạn về tính nhất quán; chưa xác nhận khả năng tách profile.');
+            } else if (caps && Array.isArray(caps.limitations) && caps.limitations.length) {
+                add('Cấu hình có giới hạn fingerprint; xem thông tin khả năng trước khi sử dụng.');
+            }
+            return {
+                message: messages.length ? messages.join(' ') : fallback,
+                type: !ok ? 'error' : (messages.length ? 'warning' : 'success')
+            };
         }
 
         function openLaunchGateModal(gate, id, url) {
@@ -2547,7 +2557,9 @@
             document.getElementById('edit-fp-w').value = fp.screen_width || 1920;
             document.getElementById('edit-fp-h').value = fp.screen_height || 1080;
 
-            document.getElementById('edit-fp-canvas').value = fp.canvas_noise_seed || 12345;
+            document.getElementById('edit-fp-algorithm').value = String(fp.fingerprint_algorithm_version ?? 1);
+            document.getElementById('edit-fp-verification').value = fp.verification_mode || 'compatibility';
+            document.getElementById('edit-fp-canvas').value = fp.canvas_noise_seed ?? 12345;
             const disabledGroups = new Set(fp.stealth_disable || []);
             document.getElementById('edit-stealth-canvas').checked = disabledGroups.has('canvas');
             document.getElementById('edit-stealth-webgl').checked = disabledGroups.has('webgl');
@@ -2673,13 +2685,15 @@
 
             const fp = {
                 ...origFp,
+                fingerprint_algorithm_version: Number(document.getElementById('edit-fp-algorithm').value) || origFp.fingerprint_algorithm_version || 1,
+                verification_mode: document.getElementById('edit-fp-verification').value || origFp.verification_mode || 'compatibility',
                 os: osVal,
                 screen_width: width,
                 screen_height: height,
                 screen_color_depth: 24,
                 device_pixel_ratio: osVal === 'macos' ? 2.0 : (origFp.device_pixel_ratio || (width <= 1920 ? 1.0 : 1.25)),
-                canvas_noise_seed: parseInt(document.getElementById('edit-fp-canvas').value) || origFp.canvas_noise_seed || 12345,
-                audio_noise_seed: parseInt(origFp.audio_noise_seed) || 12345,
+                canvas_noise_seed: document.getElementById('edit-fp-canvas').value.trim() === '' ? (origFp.canvas_noise_seed ?? 12345) : Number(document.getElementById('edit-fp-canvas').value),
+                audio_noise_seed: origFp.audio_noise_seed ?? 12345,
                 webgl_vendor: gpuVal.includes('Apple') ? 'Google Inc. (Apple)' : (gpuVal.includes('Intel') ? 'Google Inc. (Intel)' : (gpuVal.includes('AMD') ? 'Google Inc. (AMD)' : 'Google Inc. (NVIDIA)')),
                 webgl_renderer: gpuVal,
                 hardware_concurrency: parseInt(document.getElementById('edit-fp-cores').value) || origFp.hardware_concurrency || 8,

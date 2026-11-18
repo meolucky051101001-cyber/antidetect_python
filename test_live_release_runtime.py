@@ -27,7 +27,9 @@ import time
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import Request
+from antidetect.loopback import open_loopback
+from tools.live_test_diagnostics import server_failure_diagnostics
 
 import pytest
 
@@ -38,7 +40,6 @@ pytestmark = pytest.mark.skipif(
 
 ROOT = Path(__file__).resolve().parent
 IDENTITY_FIELDS = ("launch_id", "owner_instance", "pid", "user_data_dir")
-_LOOPBACK_OPENER = build_opener(ProxyHandler({}))
 CLEANUP_COUNT_SCOPE = (
     "Chrome/Edge processes whose --user-data-dir is inside the fixture TEMP root; "
     "excludes unrelated Chrome sessions and standalone native-brand-probe directories."
@@ -69,7 +70,7 @@ def _http(base, method, path, token=None, payload=None, timeout=60):
     request = Request(base + path, data=body, headers=headers, method=method)
     try:
         # A fixture bearer must never be sent through env or Windows proxies.
-        with _LOOPBACK_OPENER.open(request, timeout=timeout) as response:
+        with open_loopback(request, timeout=timeout) as response:
             data = response.read()
             return response.status, json.loads(data) if data else {}
     except HTTPError as exc:
@@ -110,9 +111,12 @@ class LiveServer:
         self.port = _free_port()
         self.base = f"http://127.0.0.1:{self.port}"
         self.ready = data_dir / f"{label}.ready.dpapi"
-        self.log = open(data_dir / f"{label}.log", "wb")
+        self.log_path = data_dir / f"{label}.log"
+        self.app_log_path = data_dir / "app.log"
+        self.log = open(self.log_path, "wb")
         self.token = None
         self.identity = {}
+        self.failure_diagnostics = []
         env = dict(os.environ, ANTIDETECT_DATA_DIR=str(data_dir), ANTIDETECT_NO_BROWSER="1",
                    PYTHONIOENCODING="utf-8")
         browser = os.environ.get("ANTIDETECT_LIVE_BROWSER")
@@ -132,7 +136,8 @@ class LiveServer:
         from antidetect.runtime_auth import _crypt
 
         def ready():
-            assert self.proc.poll() is None, "Fixture server exited during startup."
+            if self.proc.poll() is not None:
+                self.fail("Fixture server exited during startup.")
             if not self.ready.exists():
                 return False
             try:
@@ -147,11 +152,25 @@ class LiveServer:
             self.identity = identity
             return True
 
-        _wait_until(ready, timeout=90)
+        try:
+            _wait_until(ready, timeout=90)
+        except AssertionError:
+            self.fail("Fixture startup readiness condition failed.")
         return self
 
+    def fail(self, message):
+        diagnostic = server_failure_diagnostics(
+            self.proc, (("child stdout/stderr", self.log_path), ("application log", self.app_log_path)),
+            secrets=(self.token,),
+        )
+        self.failure_diagnostics.append(diagnostic)
+        pytest.fail(message + "\n" + diagnostic, pytrace=False)
+
     def request(self, method, path, payload=None, timeout=90):
-        return _http(self.base, method, path, self.token, payload, timeout)
+        try:
+            return _http(self.base, method, path, self.token, payload, timeout)
+        except (OSError, URLError, TimeoutError):
+            self.fail(f"Fixture HTTP transport failed for {method} {path.split('?', 1)[0]}.")
 
     def shutdown(self):
         status, result = self.request("POST", "/api/system/shutdown", {})
@@ -171,7 +190,9 @@ class LiveServer:
 
 @pytest.fixture
 def live_environment():
-    data_dir = Path(tempfile.mkdtemp(prefix="antidetect-live-runtime-"))
+    # Windows CI may expose TEMP through an 8.3 alias (RUNNER~1). Compare
+    # canonical paths on both sides while retaining the direct-TEMP guard.
+    data_dir = Path(tempfile.mkdtemp(prefix="antidetect-live-runtime-")).resolve()
     assert data_dir.parent == Path(tempfile.gettempdir()).resolve()
     servers = []
     application_commit = subprocess.check_output(
@@ -197,6 +218,9 @@ def live_environment():
                 instance.cleanup()
             except Exception as exc:
                 cleanup_errors.append(type(exc).__name__)
+        report["server_failure_diagnostics"] = [
+            diagnostic for instance in servers for diagnostic in instance.failure_diagnostics
+        ]
         # Emergency cleanup is constrained by exact TEMP user-data-dir identity.
         for proc in _fixture_browser_processes(data_dir):
             try:
@@ -251,7 +275,7 @@ def test_real_ownership_replacement_disconnect_and_restart(live_environment):
         # Chromium renderers also carry --user-data-dir; count browser roots,
         # while cleanup continues to inspect all processes of the fixture.
         roots = [proc for proc in _fixture_browser_processes(data_dir)
-                 if not any(arg.startswith("--type=") for arg in proc.cmdline())]
+                 if not any(arg.startswith("--type=") for arg in (proc.info.get("cmdline") or ()))]
         assert len(roots) == 1
         return record
 

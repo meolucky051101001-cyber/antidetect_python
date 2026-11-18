@@ -8,6 +8,8 @@ import threading
 import re
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from contextlib import contextmanager
+from . import profile_delete
 from .models import Profile, FingerprintConfig, ProxyConfig
 from .fingerprint import generate_fingerprint
 from .applog import get_logger
@@ -223,9 +225,14 @@ class ProfileManager:
         self._corrupted = False  # Cờ bảo vệ chống ghi đè khi file hỏng
         self._cache: Optional[List[Profile]] = None
         self._cache_mtime: float = 0.0
+        self._delete_write_local = threading.local()
         os.makedirs(DATA_DIR, exist_ok=True)
         os.makedirs(PROFILES_DATA_DIR, exist_ok=True)
         self._ensure_profiles_file()
+        try:
+            self.recover_delete_operations()
+        except Exception as e:
+            _safe_log(f"[Storage] Deletion recovery retained: {type(e).__name__}")
         try:
             self.recover_copy_operations()
         except Exception as e:
@@ -338,6 +345,7 @@ class ProfileManager:
         # B1: lock reentrant — các method mutate đã giữ cùng lock này quanh
         # read-modify-write; gọi save_profiles trực tiếp vẫn khoá đúng.
         with self._lock, self._ipc_lock:
+            self._assert_no_pending_deletions({profile.id for profile in profiles})
             # Revalidate dictionaries, not model instances: assignment validation
             # is intentionally disabled for legacy readers. Do this before secrets.
             for profile in profiles:
@@ -419,6 +427,8 @@ class ProfileManager:
 
     def get_profile_dir(self, profile_id: str) -> str:
         self._validate_profile_id(profile_id)
+        if profile_delete.read_journal(DATA_DIR, PROFILES_DATA_DIR, profile_id) is not None:
+            raise ProfileDeletionError("Profile deletion recovery is pending; directory access refused.")
         p_dir = os.path.join(PROFILES_DATA_DIR, profile_id)
         # Kiểm tra thêm: đường dẫn phải nằm trong PROFILES_DATA_DIR
         real_dir = os.path.realpath(p_dir)
@@ -439,6 +449,7 @@ class ProfileManager:
         # B1: giữ file lock quanh cả chuỗi read-modify-write để hai process
         # (server + cli) cùng ghi không mất profile của nhau.
         with self._lock, self._ipc_lock:
+            self._assert_no_pending_deletions()
             if fingerprint is None:
                 fingerprint = generate_fingerprint(target_os=target_os)
 
@@ -467,6 +478,7 @@ class ProfileManager:
         # B1: read-modify-write trong file lock; list_profiles() bên trong đọc
         # lại từ đĩa (mtime đổi khi process khác vừa ghi).
         with self._lock, self._ipc_lock:
+            self._assert_no_pending_deletions({updated.id})
             profiles = self.list_profiles()
             found = False
             for i, p in enumerate(profiles):
@@ -736,6 +748,7 @@ class ProfileManager:
         for profile_id in target_ids:
             self._validate_profile_id(profile_id)
         with self._lock, self._ipc_lock:
+            self._assert_no_pending_deletions(target_ids)
             self._cache = None
             if self._corrupted:
                 raise RuntimeError(
@@ -887,82 +900,142 @@ class ProfileManager:
                 "Profile đang được thao tác bởi tiến trình khác. Hãy thử lại sau."
             ) from e
 
-    def _delete_profile_locked(self, profile_id: str) -> bool:
-        """Delete a profile with retryable, secret-safe ordering.
-
-        Order: profile directory -> metadata -> secret. If the directory cannot
-        be removed, metadata and the DPAPI secret are left untouched so the
-        user can retry after closing the browser. Only a successful metadata
-        save allows the secret to be removed.
-        """
-        # B1: rmtree user_data có thể chậm (thư mục GB, retry khi file bị
-        # khóa) — làm nó NGOÀI file lock để không chặn create/update của
-        # process khác tới timeout 8s.
-        if not any(p.id == profile_id for p in self.list_profiles()):
-            return False
-
-        p_dir = os.path.join(PROFILES_DATA_DIR, profile_id)
-        if os.path.exists(p_dir):
-            last_error = None
-            for attempt in range(3):
-                try:
-                    shutil.rmtree(p_dir)
-                    last_error = None
-                    break
-                except PermissionError as e:
-                    last_error = e
-                    if attempt < 2:
-                        time.sleep(0.5 * (attempt + 1))
-                except Exception as e:
-                    last_error = e
-                    break
-
-            if os.path.exists(p_dir):
-                _safe_log(
-                    f"[Storage] Không thể xóa thư mục profile {profile_id} "
-                    f"(file đang bị khóa). Hãy đóng trình duyệt trước khi xóa. "
-                    f"Chi tiết: {type(last_error).__name__ if last_error else 'unknown'}"
-                )
-                raise ProfileDeletionError(
-                    "Không thể xóa thư mục profile (file đang bị khóa). "
-                    "Metadata và mật khẩu proxy được giữ nguyên; hãy đóng trình duyệt rồi thử lại."
-                )
-
-        # Directory is gone. Persist the metadata removal before deleting
-        # the DPAPI entry: if this write fails, the secret is still needed
-        # for a retry.
-        with self._lock, self._ipc_lock:
-            profiles = self.list_profiles()
-            new_list = [p for p in profiles if p.id != profile_id]
-            if len(new_list) == len(profiles):
-                # Process khác đã xóa metadata sau khi ta đọc ở trên.
-                return False
-            self.save_profiles(new_list)
-            meta = self._read_scan_meta()
-            if meta and profile_id in (meta.get("profiles") or {}):
-                meta["profiles"].pop(profile_id, None)
-                try:
-                    self._write_scan_meta(meta)
-                except OSError as e:
-                    _safe_log(
-                        f"[Storage] Không dọn được scan meta của {profile_id}: "
-                        f"{type(e).__name__}"
-                    )
-
+    @contextmanager
+    def _deletion_metadata_write(self):
+        depth = getattr(self._delete_write_local, "depth", 0)
+        self._delete_write_local.depth = depth + 1
         try:
-            delete_proxy_password(profile_id)
-        except SecretStoreCorruption as e:
-            # The profile is already gone; do not resurrect metadata just
-            # because the encrypted store is unreadable. Leave an audit log.
-            _safe_log(
-                f"[Storage] Profile {profile_id} đã xóa nhưng không dọn được secret: {e}"
-            )
-        except Exception as e:
-            _safe_log(
-                f"[Storage] Profile {profile_id} đã xóa nhưng dọn secret thất bại: "
-                f"{type(e).__name__}: {e}"
-            )
+            yield
+        finally:
+            self._delete_write_local.depth = depth
+
+    def _assert_no_pending_deletions(self, incoming_ids=None):
+        if getattr(self._delete_write_local, "depth", 0):
+            return
+        for profile_id in profile_delete.pending_profile_ids(DATA_DIR):
+            journal = profile_delete.read_journal(DATA_DIR, PROFILES_DATA_DIR, profile_id)
+            if journal is None:
+                continue
+            if journal["phase"] not in ("committed", "rolled_back") or profile_id in (incoming_ids or set()):
+                raise ProfileDeletionError("Unfinished deletion must be recovered before changing profile metadata.")
+
+    def _delete_purge(self, journal):
+        """Purge only a committed tombstone, outside the global metadata lock."""
+        try:
+            with self._lock, self._ipc_lock:
+                if any(p.id == journal["profile_id"] for p in self.list_profiles()):
+                    raise ProfileDeletionError("Replacement metadata blocks quarantine purge.")
+                profile_delete.require_entry_absent(journal["profile_id"])
+            profile_delete.finish(DATA_DIR, PROFILES_DATA_DIR, journal, purge=True)
+        except Exception as exc:
+            # Deletion is committed. Keep the journal/quarantine for an
+            # idempotent cleanup retry; never resurrect partially purged data.
+            _safe_log(f"[Storage] deletion cleanup_pending {journal['profile_id']}: {type(exc).__name__}")
+            return False
         return True
+
+    def _recover_delete_operation_locked(self, profile_id):
+        """Caller holds lifecycle lock; recover one operation without clobbering others."""
+        with self._lock, self._ipc_lock:
+            journal = profile_delete.read_journal(DATA_DIR, PROFILES_DATA_DIR, profile_id)
+            if journal is None:
+                return None
+            if journal["phase"] == "rolled_back":
+                profile_delete.finish(DATA_DIR, PROFILES_DATA_DIR, journal, purge=False)
+                return "rolled_back"
+            if journal["phase"] != "committed":
+                capsule = profile_delete.read_capsule(DATA_DIR, PROFILES_DATA_DIR, journal)
+                snapshot = capsule["profile"]
+                restored = Profile.model_validate(snapshot)
+                profiles = self.list_profiles()
+                existing = next((p for p in profiles if p.id == profile_id), None)
+                if existing is not None and self._profile_snapshot(existing) != self._profile_snapshot(restored):
+                    raise ProfileDeletionError("Newer profile metadata conflicts with deletion recovery.")
+                # Secret conflict checks run before exposing a restored directory.
+                profile_delete.restore_entry(profile_id, capsule)
+                profile_delete.restore_directory(DATA_DIR, PROFILES_DATA_DIR, journal)
+                if existing is None:
+                    # restore_entry already published a deterministic DPAPI
+                    # value. Do not remigrate this target during save_profiles:
+                    # a crash before rolled_back must accept its own prior write.
+                    if restored.proxy:
+                        restored.proxy.password = None
+                    with self._deletion_metadata_write():
+                        self.save_profiles(profiles + [restored])
+                journal = profile_delete.write_phase(DATA_DIR, journal, "rolled_back")
+                profile_delete.finish(DATA_DIR, PROFILES_DATA_DIR, journal, purge=False)
+                return "rolled_back"
+        self._delete_purge(journal)
+        return "committed"
+
+    def recover_delete_operations(self, lock_timeout: float = 0.2) -> int:
+        handled = 0
+        for profile_id in profile_delete.pending_profile_ids(DATA_DIR):
+            try:
+                with self._profile_locks.acquire(profile_id, timeout=lock_timeout):
+                    self._recover_delete_operation_locked(profile_id)
+                    handled += 1
+            except Exception as exc:
+                _safe_log(f"[Storage] deletion recovery_pending {profile_id}: {type(exc).__name__}")
+        return handled
+
+    def _delete_profile_locked(self, profile_id: str) -> bool:
+        """Rename to quarantine, commit metadata/secrets, then purge after commit."""
+        try:
+            if self._recover_delete_operation_locked(profile_id) == "committed":
+                return True
+            # Slow tree validation happens without the global metadata lock.
+            profile_delete.preflight_tree(os.path.join(PROFILES_DATA_DIR, profile_id))
+            with self._lock, self._ipc_lock:
+                profiles = self.list_profiles()
+                profile = next((p for p in profiles if p.id == profile_id), None)
+                if profile is None:
+                    return False
+                journal = profile_delete.prepare(
+                    DATA_DIR, PROFILES_DATA_DIR, profile_id,
+                    profile.model_dump(context={"include_secrets": True}))
+                try:
+                    capsule = profile_delete.read_capsule(DATA_DIR, PROFILES_DATA_DIR, journal)
+                    profile_delete.quarantine(DATA_DIR, PROFILES_DATA_DIR, journal)
+                    journal = profile_delete.write_phase(DATA_DIR, journal, "quarantined")
+                    with self._deletion_metadata_write():
+                        self.save_profiles([p for p in profiles if p.id != profile_id])
+                    journal = profile_delete.write_phase(DATA_DIR, journal, "metadata_removed")
+                    profile_delete.remove_entry(profile_id, capsule)
+                    journal = profile_delete.write_phase(DATA_DIR, journal, "secret_removed")
+                    journal = profile_delete.write_phase(DATA_DIR, journal, "committed")
+                except Exception as exc:
+                    # Inspect disk rather than our local phase: an atomic write
+                    # may have committed before a post-write error was raised.
+                    observed = profile_delete.read_journal(DATA_DIR, PROFILES_DATA_DIR, profile_id)
+                    if observed and observed["phase"] == "committed":
+                        journal = observed
+                    else:
+                        try:
+                            self._recover_delete_operation_locked(profile_id)
+                        except Exception as recovery_exc:
+                            raise ProfileDeletionError(
+                                "Deletion interrupted; encrypted recovery capsule and quarantine retained."
+                            ) from recovery_exc
+                        raise ProfileDeletionError(
+                            "Deletion failed before commit; profile data, metadata and secret restored."
+                        ) from exc
+                # Scan cache is auxiliary; keep it intact until the core commit.
+                meta = self._read_scan_meta()
+                if meta and profile_id in (meta.get("profiles") or {}):
+                    meta["profiles"].pop(profile_id, None)
+                    try:
+                        self._write_scan_meta(meta)
+                    except OSError as exc:
+                        _safe_log(f"[Storage] deletion scan cache cleanup retained: {type(exc).__name__}")
+            self._delete_purge(journal)
+            return True
+        except ProfileDeletionError:
+            raise
+        except Exception as exc:
+            raise ProfileDeletionError(
+                "Deletion could not be completed safely; recovery data was retained."
+            ) from exc
 
     def commit_staged_profile(self, profile: Profile) -> Profile:
         """Publish an already-staged profile without creating directories.
@@ -1333,13 +1406,21 @@ class ProfileManager:
         copy_data: bool,
         source_running: Optional[Callable[[str], bool]],
     ) -> Optional[Profile]:
-        orig = self.get_profile(profile_id)
+        with self._lock, self._ipc_lock:
+            self._assert_no_pending_deletions({profile_id})
+            orig = self.get_profile(profile_id)
         if not orig:
             return None
 
-        if copy_data and source_running is not None:
+        def assert_source_idle():
+            if not copy_data:
+                return
             try:
-                running = bool(source_running(profile_id))
+                if source_running is None:
+                    raise RuntimeError("missing source state verifier")
+                running = source_running(profile_id)
+                if running is not True and running is not False:
+                    raise RuntimeError("inconclusive source state")
             except Exception as e:
                 raise ProfileCopyError(
                     "Không xác minh được profile nguồn đã dừng; hủy sao chép.",
@@ -1350,6 +1431,7 @@ class ProfileManager:
                     "Hãy đóng profile trước khi sao chép dữ liệu phiên.",
                     code="SOURCE_RUNNING",
                 )
+        assert_source_idle()
 
         new_fp = generate_fingerprint(
             target_os=orig.fingerprint.os,
@@ -1412,6 +1494,7 @@ class ProfileManager:
                     copied_files=copied.total_files,
                     copied_bytes=copied.total_bytes,
                 )
+                assert_source_idle()
                 promote_staging(staging_user_data, target_user_data)
                 journal.update("promoted", promoted=True)
             else:

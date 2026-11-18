@@ -5,6 +5,7 @@ nhờ vậy test được từng hàm mà không cần dựng FastAPI app.
 """
 import os
 import time
+import threading
 import zoneinfo
 from typing import Any, Callable, Dict, List
 
@@ -21,7 +22,8 @@ try:
 except ImportError:  # pragma: no cover - psutil là optional
     psutil = None
 
-_ram_cache: Dict[str, Any] = {"at": 0.0, "data": {}}
+_ram_cache: Dict[str, Any] = {"at": 0.0, "key": None, "data": {}}
+_ram_scan_lock = threading.Lock()
 
 
 def auto_max_concurrent() -> int:
@@ -39,37 +41,70 @@ def auto_max_concurrent() -> int:
     return 8
 
 
-def ram_by_profile_dir(user_data_dirs: Dict[str, str]) -> Dict[str, float]:
-    """Tổng WorkingSet (MB) của các Chrome process theo user-data-dir.
+def _canonical_profile_dir(path: str) -> str:
+    return os.path.normcase(os.path.realpath(path))
 
-    Cache 5 giây — psutil.process_iter quét toàn bộ process table, không rẻ
-    khi gọi mỗi lần poll 3s với 20 profile.
-    """
-    if psutil is None:
-        return {}
-    now = time.time()
-    if now - _ram_cache["at"] < 5.0:
-        return {k: v for k, v in _ram_cache["data"].items() if k in user_data_dirs}
-    result: Dict[str, float] = {}
-    needle_map = {ud: pid for pid, ud in user_data_dirs.items() if ud}
-    for proc in psutil.process_iter(["pid", "name", "memory_info", "cmdline"]):
-        try:
-            name = (proc.info.get("name") or "").lower()
-            if name not in ("chrome.exe", "msedge.exe", "chromium.exe"):
-                continue
-            cmdline = proc.info.get("cmdline") or []
-            joined = " ".join(cmdline)
-            mem = proc.info.get("memory_info")
-            if not mem:
-                continue
-            for ud, pid in needle_map.items():
-                if ud and ud in joined:
-                    result[pid] = result.get(pid, 0.0) + mem.rss / (1024 * 1024)
-        except Exception:
+
+def _process_profile_dir(arguments) -> str | None:
+    for index, argument in enumerate(arguments):
+        if argument.startswith("--user-data-dir="):
+            value = argument.split("=", 1)[1]
+        elif argument == "--user-data-dir" and index + 1 < len(arguments):
+            value = arguments[index + 1]
+        else:
             continue
-    _ram_cache["at"] = now
-    _ram_cache["data"] = result
-    return {k: v for k, v in result.items() if k in user_data_dirs}
+        return _canonical_profile_dir(value) if value else None
+    return None
+
+
+def ram_by_profile_dir(user_data_dirs: Dict[str, str]) -> Dict[str, float]:
+    """Measure matching browser trees; retain no machine-wide process handles."""
+    if psutil is None or not user_data_dirs:
+        return {}
+    key = tuple(sorted((profile_id, _canonical_profile_dir(directory))
+                       for profile_id, directory in user_data_dirs.items() if directory))
+    if not key:
+        return {}
+    with _ram_scan_lock:
+        now = time.monotonic()
+        if key == _ram_cache["key"] and now - _ram_cache["at"] < 5.0:
+            return dict(_ram_cache["data"])
+        wanted = {directory: profile_id for profile_id, directory in key}
+        result: Dict[str, float] = {}
+        measured = set()
+        try:
+            # memory_info/cmdline on every Windows process opens handles that
+            # process_iter's global cache retains. Inspect only browser names
+            # first, and read RSS only for the matching profile and children.
+            for process in psutil.process_iter(["pid", "name"]):
+                try:
+                    if (process.info.get("name") or "").lower() not in (
+                            "chrome.exe", "msedge.exe", "chromium.exe"):
+                        continue
+                    profile_id = wanted.get(_process_profile_dir(process.cmdline()))
+                    if profile_id is None:
+                        continue
+                    members = [process]
+                    try:
+                        members.extend(process.children(recursive=True))
+                    except psutil.Error:
+                        pass
+                    for member in members:
+                        if member.pid in measured:
+                            continue
+                        try:
+                            rss = member.memory_info().rss
+                        except psutil.Error:
+                            continue
+                        measured.add(member.pid)
+                        result[profile_id] = result.get(profile_id, 0.0) + rss / (1024 * 1024)
+                except psutil.Error:
+                    continue
+        finally:
+            # No cached Process instances may survive a dashboard RAM scan.
+            psutil.process_iter.cache_clear()
+        _ram_cache.update(at=now, key=key, data=result)
+        return dict(result)
 
 
 def worker_pool(max_workers: int = 64):

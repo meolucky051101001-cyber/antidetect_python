@@ -37,7 +37,7 @@ def _fake_http(monkeypatch, handlers):
                 return _Response(payload)
         raise AssertionError(f"URL không mong đợi: {method} {url}")
 
-    monkeypatch.setattr(facebook.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(facebook, "open_loopback", fake_urlopen)
     return calls
 
 
@@ -90,7 +90,7 @@ def _routes(close_payload=None):
                 {
                     "id": "tab-1",
                     "url": "https://www.facebook.com/bookmarks/pages",
-                    "webSocketDebuggerUrl": "ws://tab-1",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/tab-1",
                 }
             ],
         ),
@@ -144,7 +144,7 @@ def test_fetch_pages_cdp_reads_pages_and_closes_tab(monkeypatch):
     assert got["completion_reason"] == "END_MARKER"
     assert got["observed_count"] == 1
     assert got["scan_id"] and got["collector_version"]
-    assert module.connector.urls == ["ws://tab-1"]
+    assert module.connector.urls == ["ws://127.0.0.1:9222/tab-1"]
     assert calls[0][0] == "PUT"
     assert any("/json/close/tab-1" in url for _, url in calls)
 
@@ -321,12 +321,12 @@ def test_fetch_pages_cdp_aborts_without_closing_user_tabs(monkeypatch):
                 {
                     "id": "tab-user",
                     "url": "https://www.facebook.com/",
-                    "webSocketDebuggerUrl": "ws://tab-user",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/tab-user",
                 },
                 {
                     "id": "tab-1",
                     "url": "https://www.facebook.com/bookmarks/pages",
-                    "webSocketDebuggerUrl": "ws://tab-1",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/tab-1",
                 },
             ],
         ),
@@ -360,7 +360,7 @@ def _deep_routes():
         (lambda url, method: "/json/new" in url, {"id": "tab-1"}),
         (
             lambda url, method: "/json/list" in url,
-            [{"id": "tab-1", "url": "about:blank", "webSocketDebuggerUrl": "ws://tab-1"}],
+            [{"id": "tab-1", "url": "about:blank", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/tab-1"}],
         ),
         (lambda url, method: "/json/close/tab-1" in url, {}),
     ]

@@ -1,0 +1,3 @@
+# Official PyPA pip-audit, verified on PyPI for Python >=3.10.
+# Installed in a separate tool environment; not a runtime dependency.
+pip-audit==2.10.1

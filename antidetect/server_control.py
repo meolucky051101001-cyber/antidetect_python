@@ -6,6 +6,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from .loopback import open_loopback
 from typing import Any, Dict, Optional, Tuple
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -283,7 +284,7 @@ def check_server_health(port: int = 8000) -> Optional[Dict[str, Any]]:
             f"http://127.0.0.1:{port}/health",
             headers={"User-Agent": "AntidetectHealthCheck"},
         )
-        with urllib.request.urlopen(req, timeout=1.0) as resp:
+        with open_loopback(req, timeout=1.0) as resp:
             if resp.status == 200:
                 return json.loads(resp.read().decode("utf-8"))
     except Exception:
@@ -366,7 +367,7 @@ def stop_server(timeout: float = 8.0) -> Dict[str, Any]:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
+            with open_loopback(req, timeout=3.0) as resp:
                 if resp.status in (200, 202):
                     _safe_log(f"[ServerControl] Đã gửi lệnh tắt máy chủ qua API cổng {port}.")
                     if _wait_for_process_exit(pid, timeout):

@@ -4,10 +4,14 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, codex/release-validation-2026-11-15]
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  PYTHONUTF8: "1"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -19,22 +23,25 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python 3.10
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.10"
           cache: pip
           cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-            constraints.txt
+            requirements-dev-win-py310.lock.txt
+            requirements-win-py310.lock.txt
+            requirements-audit-win-py310.lock.txt
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt -c constraints.txt
+          python -m pip install --require-hashes --only-binary=:all: -r requirements-dev-win-py310.lock.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/lock_dependencies.py check
 
       - name: Syntax check
         run: python -m compileall -q antidetect web cli.py run.py tools
@@ -43,5 +50,109 @@ jobs:
         run: python -m ruff check .
 
       - name: Run tests with coverage gate
+        run: python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing --cov-fail-under=58
+
+  browser-windows:
+    needs: test-windows
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      ANTIDETECT_RUN_LIVE_RELEASE: "1"
+      ANTIDETECT_RUN_UI_SMOKE: "1"
+      ANTIDETECT_RUN_LIVE_FINGERPRINT: "1"
+      ANTIDETECT_RUN_LIVE_NETWORK: "1"
+      ANTIDETECT_REQUIRE_BROWSER_TESTS: "1"
+      ANTIDETECT_LIVE_RUNTIME_REPORT: "${{ github.workspace }}/reports/live-runtime.json"
+      ANTIDETECT_LIVE_FINGERPRINT_REPORT: "${{ github.workspace }}/reports/live-fingerprint.json"
+      ANTIDETECT_LIVE_NETWORK_REPORT: "${{ github.workspace }}/reports/live-network.json"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Python 3.10
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.10"
+      - name: Install tested dependencies
         run: |
-          python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing --cov-fail-under=58
+          python -m pip install --require-hashes --only-binary=:all: -r requirements-dev-win-py310.lock.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Resolve the installed browser and record its build
+        shell: pwsh
+        run: |
+          $candidates = @(
+            (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe')
+          )
+          $browserPath = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $browserPath) { throw 'Required system Chrome is missing; browser checks cannot be skipped.' }
+          New-Item -ItemType Directory -Path reports -Force | Out-Null
+          "ANTIDETECT_LIVE_BROWSER=$browserPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ANTIDETECT_BROWSER_PATH=$browserPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          @{
+            sha = $env:GITHUB_SHA
+            browser_version = (Get-Item -LiteralPath $browserPath).VersionInfo.ProductVersion
+            browser_sha256 = (Get-FileHash -LiteralPath $browserPath -Algorithm SHA256).Hash
+            runner_os = $env:RUNNER_OS
+            renderer_scope = 'Synthetic localhost runtime/UI/fingerprint contracts; hardware diversity validation is separate'
+          } | ConvertTo-Json | Set-Content reports/browser-environment.json -Encoding utf8
+      - name: Run isolated runtime, UI and fingerprint checks
+        run: python -m pytest -q test_live_release_runtime.py test_ui_smoke.py test_ui_release_errors.py test_live_fingerprint_contracts.py test_live_browser_network.py --junitxml=reports/browser.xml
+      - name: Reject skipped or missing required browser checks
+        run: |
+          python -c "import xml.etree.ElementTree as E; cases=E.parse('reports/browser.xml').findall('.//testcase'); required={'test_real_ownership_replacement_disconnect_and_restart','test_dashboard_ui_smoke','test_malformed_batch_import_has_no_partial_profiles','test_stale_edit_shows_conflict_and_preserves_newer_data','test_real_scheduler_failure_and_accepted_job_are_distinct','test_fingerprint_revision_and_verification_controls_preserve_then_migrate','test_browserlauncher_canvas_contracts','test_browserlauncher_local_proxy_and_stun_contracts'}; assert required <= {c.get('name') for c in cases}, 'Required browser checks did not run'; assert not any(c.find(tag) is not None for c in cases for tag in ('skipped','failure','error')), 'Browser checks were skipped or failed'"
+      - name: Upload synthetic browser evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-validation-${{ github.sha }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
+
+  dependency-audit:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Python 3.10
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.10"
+      - name: Install the hashed application runtime for advisory scanning
+        shell: pwsh
+        run: |
+          $runtimeSite = Join-Path $env:RUNNER_TEMP 'antidetect-audit-runtime'
+          python -m pip install --require-hashes --only-binary=:all: --target $runtimeSite -r requirements-win-py310.lock.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AUDIT_RUNTIME_SITE=$runtimeSite" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Record inventory and install the isolated audit tool
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path reports -Force | Out-Null
+          python -X utf8 -m pip inspect --path $env:AUDIT_RUNTIME_SITE | Set-Content reports/dependency-inventory.json -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $toolDir = Join-Path $env:RUNNER_TEMP 'antidetect-audit-tools'
+          python -m venv $toolDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $auditPython = Join-Path $toolDir 'Scripts\python.exe'
+          & $auditPython -m pip install --require-hashes --only-binary=:all: -r requirements-audit-win-py310.lock.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $auditPython -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AUDIT_PYTHON=$auditPython" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Audit runtime packages and emit CycloneDX SBOM
+        shell: pwsh
+        run: |
+          & $env:AUDIT_PYTHON -X utf8 -m pip_audit --path $env:AUDIT_RUNTIME_SITE --format cyclonedx-json --output reports/security-sbom.json
+          exit $LASTEXITCODE
+      - name: Upload dependency evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dependency-audit-${{ github.sha }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14

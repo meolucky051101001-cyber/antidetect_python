@@ -1,9 +1,9 @@
 
 (function() {
     const g = self;
-    if (g.__adWorkerStealth) return;
-    try { Object.defineProperty(g, '__adWorkerStealth', { value: true, configurable: true }); } catch(e) {}
+    // The CDP controller owns one installation per worker execution context.
     const CFG = __CFG__;
+    const CONTRACT_V2 = Number(CFG.algorithmVersion || 1) >= 2;
     const DISABLED = new Set(__DISABLED__);
     const platformStr = __PLATFORM__;
     const chPlatform = __CH_PLATFORM__;
@@ -95,7 +95,7 @@
         } catch(e) { return false; }
     }
     function defineNav(prop, value, name) {
-        if (!g.navigator) return;
+        if (DISABLED.has('navigator') || !g.navigator) return;
         const proto = NavCtor && NavCtor.prototype;
         const getter = function() {
             if (NavCtor && !(this instanceof NavCtor)) throw new TypeError('Illegal invocation');
@@ -123,7 +123,7 @@
         'get userAgent');
 
     // Client Hints in workers
-    if (g.NavigatorUAData && g.NavigatorUAData.prototype) {
+    if (!DISABLED.has('navigator') && g.NavigatorUAData && g.NavigatorUAData.prototype) {
         const uap = g.NavigatorUAData.prototype;
         defineOn(uap, 'brands', function() {
             return CFG.brands.map(b => ({ brand: b.brand, version: b.version }));
@@ -153,72 +153,8 @@
         }
     }
 
-    function canvasIsComplex(data) {
-        // S5: CreepJS flags noise on trivial solid/simple probes. Only vary
-        // canvases that already contain real visual complexity (text, images,
-        // gradients). The same test runs for getImageData/toDataURL/toBlob, so
-        // all three paths stay consistent.
-        const pixels = data.length >> 2;
-        if (pixels < 256) return false;
-        const seen = new Set();
-        const stride = Math.max(1, Math.floor(pixels / 4096));
-        for (let p = 0; p < pixels; p += stride) {
-            const i = p * 4;
-            if (data[i + 3] !== 255) continue;
-            const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
-            seen.add(key);
-            if (seen.size >= 64) return true;
-        }
-        return false;
-    }
-
-    function canvasNoise(data, seed, startX, startY, width) {
-        if (!canvasIsComplex(data)) return;
-        for (let i = 0; i < data.length; i += 4) {
-            const pixelIndex = i / 4;
-            const absX = startX + (pixelIndex % width);
-            const absY = startY + Math.floor(pixelIndex / width);
-            const hash = ((absX * 374761393 + absY * 668265263 + seed) ^ (seed >>> 13)) >>> 0;
-            if (data[i + 3] === 255 && (hash % 7) === 0) {
-                const delta = (hash % 2 === 0) ? 1 : -1;
-                const rNoise = ((hash * 1103515245 + 12345) >>> 16) % 3;
-                data[i]     = Math.min(255, Math.max(0, data[i]     + (rNoise >= 1 ? delta : 0)));
-                data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + (rNoise <= 1 ? delta : 0)));
-                data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + (rNoise >= 1 ? -delta : delta)));
-            }
-        }
-    }
-
-    if (!DISABLED.has('canvas') && typeof OffscreenCanvas !== 'undefined') {
-        let origOffGID = null;
-        if (typeof OffscreenCanvasRenderingContext2D !== 'undefined') {
-            const p = OffscreenCanvasRenderingContext2D.prototype;
-            origOffGID = p.getImageData;
-            p.getImageData = markNative(function(sx, sy, sw, sh) {
-                const img = origOffGID.apply(this, arguments);
-                canvasNoise(img.data, CFG.canvasSeed || 12345, sx || 0, sy || 0, sw || 1);
-                return img;
-            }, 'getImageData', 4);
-        }
-        const origBlob = OffscreenCanvas.prototype.convertToBlob;
-        if (origBlob) {
-            OffscreenCanvas.prototype.convertToBlob = markNative(function(options) {
-                try {
-                    if (this.width > 0 && this.height > 0) {
-                        const ctx = this.getContext('2d');
-                        if (ctx) {
-                            const img = origOffGID
-                                ? origOffGID.apply(ctx, [0, 0, this.width, this.height])
-                                : ctx.getImageData(0, 0, this.width, this.height);
-                            canvasNoise(img.data, CFG.canvasSeed || 12345, 0, 0, this.width);
-                            ctx.putImageData(img, 0, 0);
-                        }
-                    }
-                } catch(e) {}
-                return origBlob.apply(this, arguments);
-            }, 'convertToBlob', 0);
-        }
-    }
+    __CANVAS_RUNTIME__
+    installCanvas(g);
 
     function hookWebGL(glProto) {
         if (!glProto) return;
@@ -238,22 +174,11 @@
             return orig.apply(this, arguments);
         }, 'getParameter', 1);
     }
-    if (!DISABLED.has('webgl')) {
+    if (!CONTRACT_V2 && !DISABLED.has('webgl')) {
         try {
             if (g.WebGLRenderingContext) hookWebGL(g.WebGLRenderingContext.prototype);
             if (g.WebGL2RenderingContext) hookWebGL(g.WebGL2RenderingContext.prototype);
         } catch(e) {}
     }
 
-    // The classic Worker wrapper loads the original script from a blob URL.
-    // Resolve relative importScripts() against the original script URL.
-    if (g.__adWorkerBase && typeof g.importScripts === 'function') {
-        const origImport = g.importScripts.bind(g);
-        g.importScripts = markNative(function() {
-            const urls = Array.from(arguments).map(function(u) {
-                try { return new URL(String(u), g.__adWorkerBase).href; } catch(e) { return u; }
-            });
-            return origImport.apply(g, urls);
-        }, 'importScripts', 1);
-    }
 })();

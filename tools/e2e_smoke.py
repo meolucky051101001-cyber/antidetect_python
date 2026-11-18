@@ -18,6 +18,7 @@ import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
+from antidetect.loopback import open_loopback
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -38,7 +39,7 @@ def _request(method, path, token=None, body=None, headers=None, timeout=60):
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_loopback(req, timeout=timeout) as resp:
             try:
                 return resp.status, json.loads(resp.read().decode() or "{}")
             except json.JSONDecodeError:

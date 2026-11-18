@@ -89,7 +89,9 @@ def main():
                 fp = normalize_fingerprint_for_launch(FingerprintConfig(), browser)
                 measured = await asyncio.to_thread(api.launcher._measure_native_brands_standalone, browser)
                 if not measured:
-                    raise RuntimeError("Native browser measurement failed before fixture launch.")
+                    diagnostic = getattr(api.launcher, "_native_brand_probe_diagnostic", {})
+                    raise RuntimeError("Native browser measurement failed before fixture launch: "
+                                       + json.dumps(diagnostic, sort_keys=True))
                 api.launcher._native_brands_cache[fp.browser_version] = measured
                 browser_version = fp.browser_version
                 warmed = True

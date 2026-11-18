@@ -14,6 +14,7 @@ Ví dụ:
 import argparse
 import ctypes
 import json
+import math
 import os
 import subprocess
 import sys
@@ -33,6 +34,10 @@ except ImportError:  # pragma: no cover - psutil là optional
     psutil = None
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+from antidetect.loopback import open_loopback
+from antidetect.process_identity import browser_pids_using_dirs
 REAL_DATA_DIR = os.path.realpath(os.path.join(BASE_DIR, "data"))
 STATE_FILENAME = "soak_state.json"
 EVENTS_FILENAME = "soak_events.jsonl"
@@ -43,6 +48,90 @@ MAX_ERRORS = 100
 # trước khi ghi error để retry thành công không bị tính là lỗi chức năng.
 TRANSIENT_TAB_CONFLICT_CODES = {"CDP_STARTING", "CDP_UNHEALTHY", "PROFILE_BUSY"}
 OPEN_TAB_RETRY_DELAY = 2.0
+CONTRACT_REALMS = ("page", "classic_worker", "nested_worker")
+CONTRACT_CHECKS = (
+    "executionSucceeded", "readStable", "fullTileEqual", "negativeCropEqual",
+    "unchangedWhilePending", "unchangedAfterExport", "drawPreserved", "repeatedExportsEqual",
+)
+WORKLOAD_MAX_BYTES = 4096
+WORKLOAD_STALE_SECONDS = 120.0
+RECOVERY_STABLE_SAMPLES = 3
+RECOVERY_COOLDOWN_SECONDS = 60.0
+
+
+class _WorkloadCollector:
+    """Retain aggregate booleans/counts only, never fixture pixels or images."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._profiles = {}
+        self._invalid = 0
+
+    def register(self, profile_id):
+        with self._lock:
+            self._profiles.setdefault(profile_id, {
+                realm: {"executions": 0, "failures": 0, "failed_checks": {},
+                        "last_report_at": None, "last_report_monotonic": None}
+                for realm in CONTRACT_REALMS
+            })
+
+    def record(self, payload):
+        with self._lock:
+            if not isinstance(payload, dict) or set(payload) != {"profile_id", "realm", "checks"}:
+                self._invalid += 1
+                return False
+            profile_id, realm, checks = (payload.get(key) for key in ("profile_id", "realm", "checks"))
+            if (not isinstance(profile_id, str) or profile_id not in self._profiles
+                    or not isinstance(realm, str) or realm not in CONTRACT_REALMS
+                    or not isinstance(checks, dict) or set(checks) != set(CONTRACT_CHECKS)
+                    or any(type(value) is not bool for value in checks.values())):
+                self._invalid += 1
+                return False
+            entry = self._profiles[profile_id][realm]
+            entry["executions"] += 1
+            failed = [name for name in CONTRACT_CHECKS if not checks[name]]
+            entry["failures"] += int(bool(failed))
+            for name in failed:
+                entry["failed_checks"][name] = entry["failed_checks"].get(name, 0) + 1
+            entry["last_report_at"] = _now_iso()
+            entry["last_report_monotonic"] = time.monotonic()
+            return True
+
+    def snapshot(self):
+        with self._lock:
+            profiles = {
+                profile_id: {
+                    realm: {key: (dict(value) if isinstance(value, dict) else value)
+                            for key, value in entry.items() if key != "last_report_monotonic"}
+                    for realm, entry in realms.items()
+                }
+                for profile_id, realms in self._profiles.items()
+            }
+            entries = [entry for realms in profiles.values() for entry in realms.values()]
+            return {
+                "executions": sum(entry["executions"] for entry in entries),
+                "failures": sum(entry["failures"] for entry in entries),
+                "invalid_reports": self._invalid, "profiles": profiles,
+            }
+
+    def stale_realms(self, profile_id, started_monotonic):
+        now = time.monotonic()
+        if now - started_monotonic <= WORKLOAD_STALE_SECONDS:
+            return []
+        with self._lock:
+            return [
+                realm for realm, entry in self._profiles.get(profile_id, {}).items()
+                if now - (entry["last_report_monotonic"] or started_monotonic) > WORKLOAD_STALE_SECONDS
+            ]
+
+    def passes(self, started_ids, minimum=2):
+        snapshot = self.snapshot()
+        if not started_ids or snapshot["failures"] or snapshot["invalid_reports"]:
+            return False
+        return all(
+            snapshot["profiles"].get(profile_id, {}).get(realm, {}).get("executions", 0) >= minimum
+            for profile_id in started_ids for realm in CONTRACT_REALMS
+        )
 
 
 def _now_iso():
@@ -81,7 +170,7 @@ def _http(base, method, path, token=None, body=None, headers=None, timeout=30):
         req.add_header(key, value)
     started = time.perf_counter()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_loopback(req, timeout=timeout) as resp:
             payload = _decode_json(resp.read())
             return resp.status, payload, (time.perf_counter() - started) * 1000, None
     except urllib.error.HTTPError as exc:
@@ -93,7 +182,7 @@ def _http(base, method, path, token=None, body=None, headers=None, timeout=30):
 
 def _http_plain(url, timeout=10):
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with open_loopback(url, timeout=timeout) as resp:
             return resp.status, _decode_json(resp.read()), None
     except Exception as exc:
         return -1, {}, f"{type(exc).__name__}: {exc}"
@@ -137,7 +226,9 @@ def _process_metrics(pid):
     if psutil is None or not pid:
         return None
     try:
-        proc = psutil.Process(int(pid))
+        proc = pid if hasattr(pid, "memory_info") else psutil.Process(int(pid))
+        if not proc.is_running():
+            return None
         with proc.oneshot():
             handles = None
             try:
@@ -145,7 +236,7 @@ def _process_metrics(pid):
             except Exception:
                 pass
             return {
-                "pid": int(pid),
+                "pid": proc.pid,
                 "rss_mb": round(proc.memory_info().rss / (1024 * 1024), 1),
                 "cpu_percent": round(proc.cpu_percent(interval=None), 1),
                 "threads": proc.num_threads(),
@@ -158,40 +249,31 @@ def _process_metrics(pid):
 def _chrome_processes(dirs):
     if psutil is None:
         return {}
-    result = {
-        profile_id: {"pids": [], "rss_mb": 0.0, "cpu_percent": 0.0}
-        for profile_id in dirs
-    }
-    normalized = {
-        profile_id: os.path.normcase(os.path.realpath(path))
-        for profile_id, path in dirs.items()
-    }
-    for proc in psutil.process_iter(["pid", "name", "cmdline", "memory_info"]):
-        try:
-            name = (proc.info.get("name") or "").lower()
-            if name not in ("chrome.exe", "msedge.exe", "chromium.exe"):
+    result = {}
+    inventory = browser_pids_using_dirs(dirs)
+    for profile_id, directory in dirs.items():
+        pids = inventory.get(profile_id)
+        entry = {"pids": [], "rss_mb": 0.0, "cpu_percent": None,
+                 "observation_complete": pids is not None,
+                 "rss_scope": "summed matching processes and descendants; shared pages may be counted twice"}
+        result[profile_id] = entry
+        seen = set()
+        for pid in pids or ():
+            try:
+                process = psutil.Process(pid)
+                tree = [process, *process.children(recursive=True)]
+                for child in tree:
+                    if child.pid in seen or not child.is_running():
+                        continue
+                    seen.add(child.pid)
+                    entry["pids"].append(child.pid)
+                    entry["rss_mb"] += child.memory_info().rss / (1024 * 1024)
+            except psutil.NoSuchProcess:
                 continue
-            cmdline = proc.info.get("cmdline") or []
-            joined = os.path.normcase(" ".join(cmdline))
-            if not joined:
-                continue
-            for profile_id, path in normalized.items():
-                if path and path in joined:
-                    mem = proc.info.get("memory_info")
-                    entry = result[profile_id]
-                    entry["pids"].append(int(proc.info["pid"]))
-                    if mem:
-                        entry["rss_mb"] += mem.rss / (1024 * 1024)
-                    try:
-                        entry["cpu_percent"] += proc.cpu_percent(interval=None)
-                    except Exception:
-                        pass
-                    break
-        except Exception:
-            continue
-    for entry in result.values():
+            except psutil.Error:
+                entry["observation_complete"] = False
+        entry["pids"].sort()
         entry["rss_mb"] = round(entry["rss_mb"], 1)
-        entry["cpu_percent"] = round(entry["cpu_percent"], 1)
     return result
 
 
@@ -267,18 +349,54 @@ class _QuietSoakServer(ThreadingHTTPServer):
 
 
 class _SoakPageHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = (
-            b"<!doctype html><meta charset='utf-8'><title>Antidetect soak</title>"
-            b"<h1>Antidetect soak test page</h1>"
-            b"<script>setInterval(function(){document.title='soak-'+Date.now();},5000);</script>"
-        )
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+    def _send(self, status, body=b"", mime="text/plain; charset=utf-8"):
+        self.send_response(status)
+        self.send_header("Content-Type", mime)
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path in ("/", "/soak"):
+            body = (
+                b"<!doctype html><meta charset='utf-8'><title>Antidetect soak</title>"
+                b"<h1>Synthetic canvas and worker soak</h1>"
+                b"<script src='/contract.js'></script><script src='/soak-workload.js'></script>"
+            )
+            self._send(200, body, "text/html; charset=utf-8")
+        elif path in ("/contract.js", "/soak-workload.js"):
+            filename = "fingerprint_browser.js" if path == "/contract.js" else "soak_workload.js"
+            with open(os.path.join(BASE_DIR, "tools", "fixtures", filename), "rb") as source:
+                body = source.read()
+            self._send(200, body, "text/javascript; charset=utf-8")
+        else:
+            self._send(404)
+
+    def do_POST(self):
+        expected_origin = "http://127.0.0.1:" + str(self.server.server_port)
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= WORKLOAD_MAX_BYTES:
+                self._send(413)
+                return
+            raw = self.rfile.read(length)
+        except ValueError:
+            self._send(400)
+            return
+        if (self.path != "/workload" or self.headers.get("Origin") != expected_origin
+                or self.headers.get_content_type() != "application/json"):
+            self._send(403)
+            return
+        try:
+            payload = json.loads(raw)
+        except (ValueError, UnicodeError):
+            self._send(400)
+            return
+        self._send(204 if self.server.workload.record(payload) else 400)
 
     def log_message(self, *_args):
         pass
@@ -292,6 +410,9 @@ class SoakRunner:
     def __init__(self, args):
         self.args = args
         self.hours = float(args.hours)
+        self.min_lifecycle_cycles = max(0, int(getattr(args, "min_lifecycle_cycles", 2)))
+        self.min_copy_cycles = max(0, int(getattr(args, "min_copy_cycles", 2)))
+        self.workload = _WorkloadCollector()
         self.target_profiles = max(1, int(args.profiles))
         self.min_active = min(
             max(0, int(getattr(args, "min_active", 0))), self.target_profiles
@@ -306,6 +427,8 @@ class SoakRunner:
         self.stop_path = os.path.join(self.results_dir, STOP_FILENAME)
         self.log_path = os.path.join(self.results_dir, "soak.log")
         self.server = None
+        self._server_observer = None
+        self._server_baseline = None
         self.server_log = None
         self.local_server = None
         self.local_thread = None
@@ -326,6 +449,10 @@ class SoakRunner:
         self._tabs_closed = 0
         self._shed_count = 0
         self._shed_blocked_logged = False
+        self._last_memory_shed_monotonic = None
+        self._last_ramp_pause_monotonic = None
+        self._last_resource_recovery_monotonic = None
+        self._recovery_healthy_samples = 0
         self._cycle_index = 0
         self._copy_index = 0
         self._api_latencies = []
@@ -335,6 +462,9 @@ class SoakRunner:
         self._started_ts = time.time()
         self._deadline_ts = self._started_ts + self.hours * 3600
         self._started_mono = time.monotonic()
+        # Wall time is display evidence only; clock corrections cannot shorten
+        # or extend the acceptance workload or its measured duration.
+        self._deadline_mono = self._started_mono + self.hours * 3600
         self.state = {
             "schema": 1,
             "status": "starting",
@@ -349,6 +479,8 @@ class SoakRunner:
             "results_dir": self.results_dir,
             "target_profiles": self.target_profiles,
             "min_active": self.min_active,
+            "min_lifecycle_cycles": self.min_lifecycle_cycles,
+            "min_copy_cycles": self.min_copy_cycles,
             "profiles": [],
             "counters": {
                 "samples": 0,
@@ -359,6 +491,8 @@ class SoakRunner:
                 "tabs_opened": 0,
                 "tabs_closed": 0,
                 "memory_shed": 0,
+                "contract_executions": 0,
+                "contract_failures": 0,
                 "errors": 0,
             },
             "last_sample": {},
@@ -409,6 +543,8 @@ class SoakRunner:
                 "cdp_port": item.get("port"),
                 "starts": item.get("starts", 0),
                 "stops": item.get("stops", 0),
+                "stop_unconfirmed": bool(item.get("stop_unconfirmed")),
+                "last_observed_pids": item.get("last_observed_pids"),
             }
             for item in self.profiles
         ]
@@ -432,6 +568,7 @@ class SoakRunner:
 
     def _start_local_server(self):
         self.local_server = _QuietSoakServer(("127.0.0.1", 0), _SoakPageHandler)
+        self.local_server.workload = self.workload
         self.local_thread = threading.Thread(
             target=self.local_server.serve_forever, name="soak-page", daemon=True
         )
@@ -450,8 +587,12 @@ class SoakRunner:
             os.path.join(self.results_dir, "server.log"), "ab", buffering=0
         )
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        warmup_operation = str(uuid.uuid4())
+        warmup_path = os.path.join(self.results_dir, "trust-warmup.json")
         self.server = subprocess.Popen(
-            [sys.executable, os.path.join(BASE_DIR, "run.py"), f"--port={self.port}"],
+            [sys.executable, os.path.join(BASE_DIR, "tools", "soak_server.py"),
+             "--port", str(self.port), "--data-dir", self.data_dir,
+             "--report", warmup_path, "--operation-id", warmup_operation],
             cwd=BASE_DIR,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -466,6 +607,53 @@ class SoakRunner:
             )
             if status == 200 and body.get("application") == "antidetect-python":
                 self.state["server_pid"] = self.server.pid
+                # Windows venv python.exe can be a small forwarding process.
+                # Bind measurement to the real server PID, verified as part of
+                # this spawned tree and to the health instance, never a random
+                # Python process or unrelated dashboard.
+                with open(os.path.join(self.data_dir, "server.pid"), encoding="utf-8") as fh:
+                    server_info = json.load(fh)
+                parent = psutil.Process(self.server.pid)
+                descendants = {proc.pid: proc for proc in [parent, *parent.children(recursive=True)]}
+                actual = descendants.get(server_info.get("pid"))
+                if actual is None or server_info.get("instance_id") != body.get("instance_id"):
+                    raise SoakFailure("Không xác minh được process server để đo tài nguyên.")
+                try:
+                    with open(warmup_path, encoding="utf-8") as fh:
+                        warmup = json.load(fh)
+                    cold, warm = warmup["cold_before_trust"], warmup["warm_after_trust"]
+                    attested = warmup["browser"]
+                    configured_browser = env.get("ANTIDETECT_BROWSER_PATH")
+                    valid = (
+                        warmup.get("schema") == 1 and warmup.get("operation_id") == warmup_operation
+                        and warmup.get("pid") == actual.pid
+                        and os.path.normcase(os.path.realpath(warmup.get("data_dir", "")))
+                        == os.path.normcase(os.path.realpath(self.data_dir))
+                        and all(sample.get("pid") == actual.pid
+                                and type(sample.get("handles")) is int and sample["handles"] >= 0
+                                for sample in (cold, warm))
+                        and warmup.get("trust_handles_delta") == warm["handles"] - cold["handles"]
+                        and len(attested.get("sha256", "")) == 64
+                        and all(value in "0123456789abcdefABCDEF" for value in attested["sha256"])
+                        and attested.get("publisher") in ("Google LLC", "Microsoft Corporation")
+                        and bool(attested.get("version")) and bool(attested.get("path"))
+                        and (not configured_browser or os.path.normcase(os.path.realpath(configured_browser))
+                             == os.path.normcase(os.path.realpath(attested["path"])))
+                    )
+                    if not valid:
+                        raise ValueError("warmup identity mismatch")
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                    raise SoakFailure("Không xác minh được cold/warm trust evidence của server fixture.") from error
+                self.state["resource_trust_warmup"] = warmup
+                self._server_observer = actual
+                self._server_baseline = _process_metrics(actual)
+                if not self._server_baseline:
+                    raise SoakFailure("Không đo được tài nguyên server baseline.")
+                self.state["server_actual_pid"] = actual.pid
+                self.state["resource_baseline"] = self._server_baseline
+                self.state["resource_baseline_scope"] = "application ready after offline trust warmup; before profile workload"
+                self.state["resource_budget"] = {"rss_mb_delta": 128, "handles_delta": 128, "threads_delta": 16,
+                                                 "scope": "idle server before profiles vs after browser cleanup; not Chrome peak leak proof"}
                 self._event("server_ready", pid=self.server.pid, port=self.port)
                 return
             if self.server.poll() is not None:
@@ -509,6 +697,7 @@ class SoakRunner:
                     self._error("create_profile", error or f"HTTP {status}", critical=True)
                     raise SoakFailure("Không tạo được profile soak.")
                 profile_id = body["id"]
+            self.workload.register(profile_id)
             self.profiles.append(
                 {
                     "id": profile_id,
@@ -534,14 +723,35 @@ class SoakRunner:
             return None
         return psutil.virtual_memory().available / (1024 * 1024)
 
-    def _start_profile(self, profile):
-        if self._available_mb() is not None and self._available_mb() < self.args.min_free_mb:
-            self._event("ramp_paused", profile=profile["name"], available_mb=round(self._available_mb(), 1))
+    def _start_profile(self, profile, *, require_resources=False):
+        if require_resources:
+            self._check_stop_requested()
+            if (self.stop_requested or self.critical or profile["active"]
+                    or profile.get("stop_unconfirmed")):
+                return False
+        available = self._available_mb()
+        if require_resources and (
+            isinstance(available, bool)
+            or not isinstance(available, (int, float))
+            or not math.isfinite(available)
+            or available < self.args.min_free_mb
+        ):
+            self._event("recovery_paused", profile=profile["name"])
             return False
+        if available is not None and available < self.args.min_free_mb:
+            self._last_ramp_pause_monotonic = time.monotonic()
+            self._event("ramp_paused", profile=profile["name"], available_mb=round(available, 1))
+            return False
+        if require_resources:
+            self._check_stop_requested()
+            if (self.stop_requested or self.critical or profile["active"]
+                    or profile.get("stop_unconfirmed")):
+                return False
         status, body, _latency, error = _http(
             self.base,
             "POST",
-            f"/api/profiles/{profile['id']}/start",
+            f"/api/profiles/{profile['id']}/start?"
+            + urllib.parse.urlencode({"url": f"{self.soak_base}/soak?profile={profile['id']}"}),
             token=self.token,
             timeout=180,
         )
@@ -556,6 +766,7 @@ class SoakRunner:
         profile["pid"] = body.get("pid")
         profile["port"] = body.get("port")
         profile["starts"] = profile.get("starts", 0) + 1
+        profile["workload_started_monotonic"] = time.monotonic()
         _hide_pid(profile["pid"])
         health = (body.get("cdp_health") or {}).get("state")
         if body.get("degraded") or health not in (None, "healthy"):
@@ -572,11 +783,16 @@ class SoakRunner:
         return True
 
     def _wait_no_chrome(self, profile, timeout=30):
+        profile["last_observed_pids"] = None
+        if psutil is None:
+            return False
         deadline = time.time() + timeout
         while time.time() < deadline:
-            entry = _chrome_processes({profile["id"]: self._profile_dir(profile)})[
-                profile["id"]
-            ]
+            entry = _chrome_processes({profile["id"]: self._profile_dir(profile)}).get(profile["id"])
+            if (not isinstance(entry, dict) or not isinstance(entry.get("pids"), list)
+                    or entry.get("observation_complete") is not True):
+                return False
+            profile["last_observed_pids"] = list(entry["pids"])
             if not entry["pids"]:
                 return True
             time.sleep(1)
@@ -598,23 +814,21 @@ class SoakRunner:
                 f"{profile['name']}: {msg}",
                 code=body.get("code") if isinstance(body, dict) else None,
             )
-            # Kiểm tra xem Chrome thực tế đã dừng hay chưa để tránh lệch trạng thái
-            time.sleep(1.0)
-            pids = _chrome_processes(self._chrome_map()).get(profile["id"], {}).get("pids", [])
-            if not pids:
-                profile["active"] = False
-                profile["stops"] = profile.get("stops", 0) + 1
-                self._event("profile_stopped", profile=profile["name"], reason=reason)
+            # An API failure cannot establish that this profile stopped.
+            profile["stop_unconfirmed"] = True
             return False
-        profile["active"] = False
-        profile["stops"] = profile.get("stops", 0) + 1
         if not self._wait_no_chrome(profile):
+            profile["stop_unconfirmed"] = True
+            remaining = profile.get("last_observed_pids")
             self._error(
                 "orphan_after_stop",
-                f"{profile['name']}: Chrome vẫn còn sau 30s",
+                f"{profile['name']}: stop unconfirmed after 30s; fixture-scoped remaining_pids={remaining}",
                 critical=True,
             )
             return False
+        profile["active"] = False
+        profile["stop_unconfirmed"] = False
+        profile["stops"] = profile.get("stops", 0) + 1
         self._event("profile_stopped", profile=profile["name"], reason=reason)
         return True
 
@@ -666,16 +880,18 @@ class SoakRunner:
                 running += 1
             if health in ("degraded", "recovery_required"):
                 degraded += 1
-            pids = chrome.get(profile["id"], {}).get("pids", [])
+            observation = chrome.get(profile["id"], {})
+            pids = observation.get("pids", [])
+            observation_complete = observation.get("observation_complete") is True
             if profile["active"] and profile.get("pid"):
                 _hide_pid(profile["pid"])
-            if profile["active"] and not pids:
+            if observation_complete and profile["active"] and not pids:
                 self._error(
                     "missing_chrome",
                     f"{profile['name']}: active nhưng không thấy process",
                     critical=True,
                 )
-            if not profile["active"] and pids:
+            if observation_complete and not profile["active"] and pids:
                 self._error(
                     "orphan_chrome",
                     f"{profile['name']}: không active nhưng còn {len(pids)} process",
@@ -687,7 +903,13 @@ class SoakRunner:
                     f"{profile['name']}: active nhưng API status={status_text}",
                     critical=True,
                 )
-        server_metrics = _process_metrics(self.server.pid if self.server else None)
+        server_metrics = _process_metrics(self._server_observer)
+        if self._server_observer is not None and server_metrics is None:
+            self._error("server_metrics", "Bound server process measurement unavailable.", critical=True)
+        observation_complete = (set(chrome) == set(self._chrome_map()) and all(
+            entry.get("observation_complete") is True for entry in chrome.values()))
+        if not observation_complete:
+            self._error("process_observation", "Profile process scan incomplete; cannot certify resources or idle.", critical=True)
         chrome_total = sum(entry["rss_mb"] for entry in chrome.values())
         chrome_count = sum(len(entry["pids"]) for entry in chrome.values())
         self._chrome_peak["rss_mb"] = max(self._chrome_peak["rss_mb"], chrome_total)
@@ -716,9 +938,19 @@ class SoakRunner:
                 self._low_memory_samples = 0
                 self._shed_blocked_logged = False
         artifacts = self._artifact_counts()
+        workload = self.workload.snapshot()
+        self.state["counters"]["contract_executions"] = workload["executions"]
+        self.state["counters"]["contract_failures"] = workload["failures"] + workload["invalid_reports"]
+        if workload["failures"] or workload["invalid_reports"]:
+            self._error("canvas_worker_contract", "Synthetic canvas/worker contract failed.", critical=True)
+        for profile in self.profiles:
+            if profile["active"] and profile.get("workload_started_monotonic") is not None:
+                stale = self.workload.stale_realms(profile["id"], profile["workload_started_monotonic"])
+                if stale:
+                    self._error("canvas_worker_stalled", "No recent contract report: " + ", ".join(stale), critical=True)
         sample = {
             "at": _now_iso(),
-            "elapsed_seconds": round(time.time() - self._started_ts, 1),
+            "elapsed_seconds": round(time.monotonic() - self._started_mono, 1),
             "health_status": health_status,
             "profiles_status": list_status,
             "api_latency_ms": {
@@ -738,17 +970,25 @@ class SoakRunner:
             "cdp_states": cdp_states,
             "available_mb": round(available, 1) if available is not None else None,
             "artifacts": artifacts,
+            "canvas_worker_workload": workload,
         }
         minimum_running = max(1, self.min_active)
-        if (
+        recovery_sample_healthy = (
             health_status == 200
             and health_body.get("application") == "antidetect-python"
             and list_status == 200
             and running >= minimum_running
             and cdp_states.get("healthy", 0) >= minimum_running
             and degraded == 0
-        ):
+            and observation_complete
+        )
+        if recovery_sample_healthy:
             self._healthy_active_samples += 1
+        recovery_sample_healthy = recovery_sample_healthy and all(
+            by_id.get(profile["id"], {}).get("status") == "running"
+            and (by_id[profile["id"]].get("cdp_health") or {}).get("state") == "healthy"
+            for profile in self.profiles if profile["active"]
+        )
         self._sample_count += 1
         self.state["counters"]["samples"] = self._sample_count
         self.state["counters"]["healthy_active_samples"] = self._healthy_active_samples
@@ -756,6 +996,12 @@ class SoakRunner:
         _append_jsonl(self.metrics_path, sample)
         if self._low_memory_samples >= 3:
             self._shed_one()
+        self._consider_resource_recovery(
+            healthy_sample=recovery_sample_healthy,
+            available_mb=available,
+            api_profiles=by_id,
+            process_observations=chrome,
+        )
         self._save()
         if time.monotonic() - sample_started > 20:
             self._log(f"sample chậm: {time.monotonic() - sample_started:.1f}s")
@@ -822,7 +1068,67 @@ class SoakRunner:
             profile=victim["name"],
             available_mb=round(self._available_mb() or 0, 1),
         )
-        self._stop_profile(victim, "memory_shed")
+        if self._stop_profile(victim, "memory_shed"):
+            self._last_memory_shed_monotonic = time.monotonic()
+            self._recovery_healthy_samples = 0
+
+    def _consider_resource_recovery(
+        self, *, healthy_sample, available_mb, api_profiles, process_observations
+    ):
+        """Restore at most one resource-paused profile after verified headroom."""
+        active_count = sum(1 for profile in self.profiles if profile["active"])
+        pauses = [value for value in (self._last_memory_shed_monotonic, self._last_ramp_pause_monotonic)
+                  if value is not None]
+        if (self.stop_requested or self.critical or not pauses
+                or active_count >= self.target_profiles or active_count < self.min_active):
+            self._recovery_healthy_samples = 0
+            return False
+        if any(profile.get("stop_unconfirmed") for profile in self.profiles):
+            self._recovery_healthy_samples = 0
+            return False
+
+        if (
+            not healthy_sample
+            or isinstance(available_mb, bool)
+            or not isinstance(available_mb, (int, float))
+            or not math.isfinite(available_mb)
+            or available_mb < self.args.min_free_mb
+            or time.monotonic() - max(pauses) < RECOVERY_COOLDOWN_SECONDS
+            or (self._last_resource_recovery_monotonic is not None
+                and time.monotonic() - self._last_resource_recovery_monotonic < RECOVERY_COOLDOWN_SECONDS)
+        ):
+            self._recovery_healthy_samples = 0
+            return False
+
+        candidate = next((
+            profile for profile in self.profiles
+            if not profile["active"]
+            and not profile.get("stop_unconfirmed")
+            and api_profiles.get(profile["id"], {}).get("status") == "stopped"
+            and isinstance(process_observations.get(profile["id"]), dict)
+            and process_observations[profile["id"]].get("observation_complete") is True
+            and process_observations[profile["id"]].get("pids") == []
+        ), None)
+        if candidate is None:
+            self._recovery_healthy_samples = 0
+            return False
+
+        self._recovery_healthy_samples += 1
+        if self._recovery_healthy_samples < RECOVERY_STABLE_SAMPLES:
+            return False
+
+        self._recovery_healthy_samples = 0
+        started = self._start_profile(candidate, require_resources=True)
+        self._last_resource_recovery_monotonic = time.monotonic()
+        if started:
+            self._event(
+                "memory_recovered",
+                profile=candidate["name"],
+                active=sum(1 for profile in self.profiles if profile["active"]),
+                available_mb=round(available_mb, 1),
+            )
+            return True
+        return False
 
     def _open_soak_tab(self, profile, url):
         """POST start?url, retry once on a transient CDP conflict."""
@@ -924,8 +1230,10 @@ class SoakRunner:
         profile = active[self._cycle_index % len(active)]
         self._cycle_index += 1
         stopped = self._stop_profile(profile, "cycle")
-        if stopped or not profile["active"]:
-            self._start_profile(profile)
+        restarted = self._start_profile(profile) if stopped and not self.critical else False
+        if not (stopped and restarted):
+            self._save()
+            return
         self._lifecycle_cycles += 1
         self.state["counters"]["lifecycle_cycles"] = self._lifecycle_cycles
         self._event("lifecycle_cycle", profile=profile["name"])
@@ -951,6 +1259,7 @@ class SoakRunner:
             timeout=300,
         )
         target_id = body.get("id") if isinstance(body, dict) else None
+        copy_complete = False
         if status == 200 and target_id:
             target_dir = os.path.join(
                 self.data_dir, "profiles", target_id, "user_data"
@@ -981,6 +1290,7 @@ class SoakRunner:
                     f"target {target_id}: {delete_error or delete_body.get('detail')}",
                 )
             else:
+                copy_complete = size > 0
                 self._event("copy_verified", source=source["name"], bytes=size)
         else:
             self._error(
@@ -996,8 +1306,9 @@ class SoakRunner:
                     token=self.token,
                     timeout=120,
                 )
-        self._start_profile(source)
-        self._copy_cycles += 1
+        restarted = self._start_profile(source)
+        if copy_complete and restarted:
+            self._copy_cycles += 1
         self.state["counters"]["copy_cycles"] = self._copy_cycles
         self._event(
             "copy_cycle",
@@ -1022,12 +1333,14 @@ class SoakRunner:
             self._check_stop_requested()
             if self.stop_requested or self.critical:
                 break
-            if time.time() >= self._deadline_ts:
-                break
             now = time.monotonic()
+            if now >= self._deadline_mono:
+                break
             if now >= next_sample:
                 self._sample()
                 next_sample = max(next_sample + self.args.sample_interval, now + 1)
+                if self.stop_requested or self.critical:
+                    break
             if now >= next_tab:
                 self._tab_cycle()
                 next_tab = max(next_tab + self.args.tab_interval, now + 1)
@@ -1041,7 +1354,7 @@ class SoakRunner:
 
     def _finalize(self):
         completed = (
-            time.time() >= self._deadline_ts
+            time.monotonic() >= self._deadline_mono
             and not self.stop_requested
             and not self.critical
         )
@@ -1050,7 +1363,33 @@ class SoakRunner:
         for profile in self.profiles:
             if profile["active"]:
                 self._stop_profile(profile, "finalize")
-        if self.server and self.server.poll() is None:
+        resource_check = None
+        if self._server_baseline:
+            # Let disconnected CDP tasks settle after the same empty workload.
+            time.sleep(5)
+            cooldown = _process_metrics(self._server_observer)
+            trust_warmup = self.state.get("resource_trust_warmup")
+            resource_check = {"baseline": self._server_baseline, "cooldown": cooldown,
+                              "baseline_scope": self.state.get("resource_baseline_scope"),
+                              "trust_initialization": trust_warmup,
+                              "budget": self.state["resource_budget"], "passed": False}
+            if cooldown and trust_warmup:
+                resource_check["cold_to_cooldown_handles_delta"] = (
+                    cooldown["handles"] - trust_warmup["cold_before_trust"]["handles"]
+                    if type(cooldown.get("handles")) is int else None)
+                resource_check["cold_to_cooldown_scope"] = (
+                    "raw process cold before trust/application imports vs final cooldown; "
+                    "includes documented trust initialization and application startup")
+            if cooldown:
+                deltas = {key: cooldown[key] - self._server_baseline[key]
+                          for key in ("rss_mb", "handles", "threads")
+                          if cooldown.get(key) is not None and self._server_baseline.get(key) is not None}
+                resource_check["deltas"] = deltas
+                resource_check["passed"] = (len(deltas) == 3 and all(
+                    value <= self.state["resource_budget"][key + "_delta"] for key, value in deltas.items()))
+            if not resource_check["passed"]:
+                self._error("server_resource_budget", "Server cooldown vượt budget hoặc thiếu phép đo.", critical=True)
+        if self.server and (self.server.poll() is None or not self._dashboard_exited()):
             status, _body, _latency, _error = _http(
                 self.base,
                 "POST",
@@ -1070,6 +1409,21 @@ class SoakRunner:
                         self.server.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         self._error("server_cleanup", "Dashboard chưa thoát sau kill", critical=True)
+            if self._server_observer is not None:
+                try:
+                    try:
+                        self._server_observer.wait(timeout=30)
+                    except psutil.TimeoutExpired:
+                        self._server_observer.terminate()
+                        try:
+                            self._server_observer.wait(timeout=10)
+                        except psutil.TimeoutExpired:
+                            self._server_observer.kill()
+                            self._server_observer.wait(timeout=10)
+                except psutil.NoSuchProcess:
+                    pass
+                except psutil.Error:
+                    self._error("server_cleanup", "Bound server exit unverified.", critical=True)
         if self.local_server:
             self.local_server.shutdown()
             self.local_server.server_close()
@@ -1089,27 +1443,35 @@ class SoakRunner:
                     f"{profile['name']}: còn {len(pids)} process sau finalize",
                     critical=True,
                 )
+        process_observation_complete = (set(chrome) == set(self._chrome_map()) and all(
+            entry.get("observation_complete") is True for entry in chrome.values()))
         artifacts = self._artifact_counts()
         latencies = sorted(self._api_latencies)
         p95 = latencies[int(len(latencies) * 0.95)] if latencies else None
-        duration = time.time() - self._started_ts
+        duration = time.monotonic() - self._started_mono
         planned_seconds = self.hours * 3600
         required_exercises = {
             "tab": planned_seconds > self.args.tab_interval,
             "lifecycle": planned_seconds > self.args.cycle_interval + 25.0,
             "copy": planned_seconds > min(self.args.copy_interval, 3600),
         }
+        workload = self.workload.snapshot()
+        started_ids = [profile["id"] for profile in self.profiles if profile.get("starts", 0) > 0]
+        self.state["counters"]["contract_executions"] = workload["executions"]
+        self.state["counters"]["contract_failures"] = workload["failures"] + workload["invalid_reports"]
         workload_checks = {
             "profile_started": any(profile.get("starts", 0) > 0 for profile in self.profiles),
             "healthy_active_sample": self._healthy_active_samples > 0,
             "tab": self._tabs_opened > 0 if required_exercises["tab"] else None,
-            "lifecycle": self._lifecycle_cycles > 0 if required_exercises["lifecycle"] else None,
-            "copy": self._copy_cycles > 0 if required_exercises["copy"] else None,
+            "lifecycle": self._lifecycle_cycles >= max(self.min_lifecycle_cycles, int(required_exercises["lifecycle"])),
+            "copy": self._copy_cycles >= max(self.min_copy_cycles, int(required_exercises["copy"])),
+            "canvas_workers": self.workload.passes(started_ids),
         }
         cleanup_checks = {
             "process_observation_available": psutil is not None,
+            "process_observation_complete": process_observation_complete,
             "profile_browsers_exited": orphan_count == 0,
-            "dashboard_exited": self.server is None or self.server.poll() is not None,
+            "dashboard_exited": self._dashboard_exited(),
             "staging_empty": artifacts["staging_files"] == 0,
         }
         passed = (
@@ -1134,7 +1496,11 @@ class SoakRunner:
             "workload_required": required_exercises,
             "workload_checks": workload_checks,
             "cleanup_checks": cleanup_checks,
-            "scope": "local tabs, profile lifecycle and transactional profile copy",
+            "scope": "localhost canvas, classic/nested workers, tabs, lifecycle and transactional copy; no egress-isolation claim",
+            "canvas_worker_workload": workload,
+            "minimum_contract_executions_per_realm_per_started_profile": 2,
+            "min_lifecycle_cycles": self.min_lifecycle_cycles,
+            "min_copy_cycles": self.min_copy_cycles,
             "lifecycle_cycles": self._lifecycle_cycles,
             "tab_cycles": self._tab_cycles,
             "copy_cycles": self._copy_cycles,
@@ -1146,6 +1512,7 @@ class SoakRunner:
             "api_latency_p95_ms": round(p95, 1) if p95 is not None else None,
             "chrome_peak": self._chrome_peak,
             "server_peak": self._server_peak,
+            "server_cooldown": resource_check,
             "min_available_mb": round(self._min_available_mb, 1)
             if self._min_available_mb is not None
             else None,
@@ -1160,6 +1527,16 @@ class SoakRunner:
             duration_seconds=round(duration, 1),
         )
         return 0 if passed else 1
+
+    def _dashboard_exited(self):
+        if self.server is not None and self.server.poll() is None:
+            return False
+        if self._server_observer is not None:
+            try:
+                return not self._server_observer.is_running()
+            except psutil.Error:
+                return False
+        return True
 
     def run(self):
         self._validate_dirs()
@@ -1239,6 +1616,8 @@ def main(argv=None):
     run_parser.add_argument("--hours", type=float, default=24.0)
     run_parser.add_argument("--profiles", type=int, default=5)
     run_parser.add_argument("--min-active", type=int, default=0)
+    run_parser.add_argument("--min-lifecycle-cycles", type=int, default=2)
+    run_parser.add_argument("--min-copy-cycles", type=int, default=2)
     run_parser.add_argument("--port", type=int, default=0)
     run_parser.add_argument("--data-dir", default="")
     run_parser.add_argument("--results-dir", default="")

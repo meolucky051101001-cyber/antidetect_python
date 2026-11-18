@@ -2,6 +2,8 @@
 
 Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, can thiệp dấu vân tay qua Chrome DevTools Protocol (CDP), hỗ trợ proxy xác thực và dashboard local.
 
+> **Cập nhật audit 2026-11-17:** tài liệu tính năng bên dưới mô tả V1/V2 và giới hạn hiện tại. Các kết quả detector/proxy trong các ghi chú lịch sử không chứng nhận bản sửa này. Xem [kế hoạch và tiêu chí nghiệm thu](docs/AUDIT_REMEDIATION_PLAN_2026-11-17.md); CI dùng dữ liệu tổng hợp, không tài khoản thật.
+
 > **Cập nhật 2026-11-15 — sửa R01–R11:** import validate trước commit; delete/cleanup kiểm tra owner và generation; proxy lỗi chặn launch; GeoIP/fingerprint patch có revision; Fanpage có observation/lease/token; scheduler lưu kết quả và retry hữu hạn; browser removal kiểm tra phạm vi/reparse point. Xem [kết quả kiểm chứng và hướng dẫn nâng cấp](docs/VERIFICATION_REVIEW_FIXES_2026-11-15.md). Dữ liệu production chưa được migrate; ngừng writer cũ và backup trước khi chạy schema Fanpage mới. Các số liệu bên dưới là lịch sử, không phải kết quả của bản sửa này.
 
 > **Trạng thái 2026-11-05 (F1–F4, CHƯA COMMIT):** sửa ổn định CDP health (Chrome sống ≠ CDP khỏe; detach không có CDP owner), copy profile có staging/journal/lifecycle lock + idempotency, tuổi bài đăng theo mốc quan sát, và fanpage discovery có bằng chứng hoàn tất + merge cache theo trường (refresh không xóa lịch sử). Kiểm chứng tự động trên working tree: **407 pytest passed + 1 skipped**, ruff/compileall sạch; coverage **chưa đo lại**. **Chưa chạy** Facebook thật, Playwright UI smoke, E2E browser và soak 24–72h — xem [docs/VERIFICATION_STABILITY_FIX_2026-11-05.md](docs/VERIFICATION_STABILITY_FIX_2026-11-05.md).
@@ -19,11 +21,11 @@ Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, ca
    - Không ghi đè fingerprint đã chuẩn hóa vào `profiles.json` khi chỉ khởi chạy; fingerprint chuẩn hóa chỉ dùng trong bộ nhớ cho phiên chạy.
 
 2. **Fingerprint qua CDP**
-   - Canvas/OffscreenCanvas noise xác định theo `canvas_noise_seed`; `toDataURL()`, `toBlob()` và `getImageData()` nhất quán. Từ S5, noise chỉ áp dụng cho canvas phức tạp (>=64 màu opaque, >=256 px); canvas đơn giản giữ pixel native.
-   - WebGL vendor/renderer và `readPixels()` noise theo profile; giới hạn texture/viewport dùng bảng native đo từ Chrome sạch, không dùng số giả.
-   - Screen/DPR đặt qua `Emulation.setDeviceMetricsOverride`; từ R2, các getter work-area (`screen.availWidth/availHeight/availLeft/availTop`) hook theo work area thật của host (same-OS) hoặc default theo platform (cross-OS) để mô phỏng taskbar. `deviceMemory` lấy bucket của host (2/4/8/16/32); CPU cores, timezone, locale và geolocation theo profile.
-   - Client Hints và User-Agent đồng bộ với **Chrome / Edge / Chromium** thực tế đang cài; `Sec-CH-Device-Memory` khớp `navigator.deviceMemory` khi site opt-in.
-   - Từ R1, `Function.prototype.toString` được thay bằng concise method với native-source registry (`WeakMap`, không Proxy): wrapper hook trả `[native code]`, kể cả cross-realm iframe/worker; user function giữ source thật. CreepJS không phát hiện `hasToStringProxy`.
+   - Profile mới dùng thuật toán V2 và kiểm chứng Strict. Profile cũ không có version dùng V1/Compatibility; Edit cho phép đổi từng profile rõ ràng. Đổi thuật toán có thể đổi output ngay cả khi giữ seed.
+   - V2 áp dụng nhiễu xác định theo seed/tọa độ cho pixel opaque của canvas 2D sRGB 8-bit, dùng snapshot khi export. Các trường hợp WebGL canvas, Display-P3, float16 và đối số tọa độ dạng object giữ xử lý native.
+   - WebGL, WebGPU, audio, font, client rects, media devices và speech của V2 dùng hành vi máy thật. Vì thế GPU/audio/font/network có thể liên kết các profile trên cùng máy; canvas noise không chứng minh tính ẩn danh hoặc tránh phát hiện.
+   - Screen/DPR, CPU cores, timezone, locale và geolocation dùng cấu hình CDP. Client Hints/User-Agent được chuẩn hóa theo browser thực tế; runtime kiểm tra giá trị quan sát trước khi cho điều hướng.
+   - V1 giữ thuật toán legacy để tránh tự đổi identity nhưng còn giới hạn crop/API. V2 không mô phỏng rendering của hệ điều hành khác; không có cam kết vượt Pixelscan, CreepJS hay detector thương mại.
 
 3. **Proxy và WebRTC**
    - HTTP và SOCKS5; proxy có username/password dùng Chrome auth extension/CDP.
@@ -52,14 +54,14 @@ Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, ca
 
 ## Cài Đặt
 
-Yêu cầu: Windows 10/11, Python 3.10+, Google Chrome hoặc Microsoft Edge.
+Yêu cầu: Windows 10/11, Google Chrome hoặc Microsoft Edge. Bộ dependency khóa hash bên dưới dành riêng cho CPython 3.10 x64 trên Windows; Python/platform khác cần resolve và kiểm chứng bộ lock riêng.
 
 ```bash
 cd antidetect_python
-pip install -r requirements.txt
+python -m pip install --require-hashes --only-binary=:all: -r requirements-win-py310.lock.txt
 ```
 
-`requirements.txt` có `tzdata` để map timezone trên Windows sạch.
+`requirements.txt` có `tzdata` để map timezone trên Windows sạch. Các range và constraints.txt là nguồn để tái tạo lock, không thay thế hash verification. Xem [quy trình cập nhật dependency](docs/DEPENDENCY_LOCKS.md).
 
 ---
 
@@ -220,14 +222,19 @@ Kết quả chạy thật ngày **2026-10-23** trên profile tạm `Audit Smoke`
 ## Kiểm Thử
 
 ```bash
+# Cài bộ dev đã khóa cho Windows x64 / CPython 3.10
+python -m pip install --require-hashes --only-binary=:all: -r requirements-dev-win-py310.lock.txt
+python -m pip check
+python tools/lock_dependencies.py check
+
 # Toàn bộ pytest (unit + API + hardening + audit tools)
 python -m pytest -q
 
 # Coverage (CI gate 58%): lần đo 2026-10-26 là 68.15%; chưa đo lại 2026-11-05
 python -m pytest -q --cov=antidetect --cov=web --cov-report=term-missing
 
-# Playwright UI smoke (bắt buộc trước khi phát hành thay đổi UI; Chrome thật + data tạm;
-# không chạy trong CI) — pip install playwright && playwright install chromium
+# Playwright UI smoke (có job CI riêng; Chrome đã cài + data tạm)
+# ANTIDETECT_LIVE_BROWSER trỏ tới executable Chrome đã xác minh; không tải driver/browser ở đây
 $env:ANTIDETECT_RUN_UI_SMOKE = "1"
 python -m pytest test_ui_smoke.py -q
 
@@ -362,3 +369,24 @@ antidetect_python/
 - Chưa hỗ trợ Firefox; giả lập macOS/Linux trên host Windows vẫn là thực nghiệm; TLS/JA3/JA4 không thay đổi được bằng CDP.
 
 Xem chi tiết tại [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+
+
+**Audit remediation validation (2026-11-17)**
+
+Install the Windows/Python 3.10 wheel locks with --require-hashes to reproduce the full dependency set. CI has separate
+Windows unit, isolated Chrome runtime/UI/fingerprint, and dependency-advisory jobs. Browser checks
+use the installed Chrome executable explicitly and record its build/hash; skipped
+required checks fail the browser job. This validates synthetic localhost workflows,
+not real accounts or hardware fingerprint parity.
+
+The dependency job installs PyPA pip-audit from its complete hash lock in a separate
+tool environment, audits an isolated installation of the runtime lock, and emits a
+CycloneDX SBOM plus pip inventory. Installer/scanner packages are outside that runtime scope. Advisory-service outages fail visibly; findings are reviewed
+rather than silently ignored. Runtime, dev and audit-tool transitive dependencies are
+version/hash locked for CPython 3.10 Windows x64; other platforms are not covered.
+GitHub Actions are pinned to verified commits; deliberate dependency/Action updates
+must rerun the applicable checks.
+
+External metadata imports reject a nonempty browser_path. Remove that field before
+import and select a trusted browser locally afterward; existing local profile paths
+are not rewritten.

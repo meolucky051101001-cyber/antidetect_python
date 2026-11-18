@@ -95,11 +95,78 @@ class DowngradeError(UpdateError):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _assert_no_reparse(path: str) -> str:
+    """Reject links in every existing component, including the selected root.
+
+    Rechecked at mutation boundaries. This is not an OS isolation boundary:
+    hostile same-user code can still race path-based operations after a check.
+    """
+    absolute = os.path.abspath(path)
+    ancestors = []
+    current = absolute
+    while True:
+        ancestors.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    for component in reversed(ancestors):
+        try:
+            value = os.lstat(component)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(value.st_mode) or (
+            getattr(value, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        ):
+            raise ZipSafetyError("Reparse point/symlink không được phép trong đường cập nhật")
+    return absolute
+
+
+def _mkdir_checked(path: str) -> None:
+    _assert_no_reparse(path)
+    os.makedirs(path, exist_ok=True)
+    _assert_no_reparse(path)
+
+
+def _remove_checked(path: str) -> None:
+    _assert_no_reparse(path)
+    os.remove(path)
+
+
+def _cleanup_temp(path: str) -> None:
+    try:
+        _remove_checked(path)
+    except (OSError, UpdateError):
+        # Never follow a substituted parent just to clean a temporary file.
+        pass
+
+
+def _remove_tree_checked(path: str) -> None:
+    _assert_no_reparse(path)
+    if not os.path.exists(path):
+        return
+    for directory, dirs, files in os.walk(path, followlinks=False):
+        _assert_no_reparse(directory)
+        for name in dirs + files:
+            _assert_no_reparse(os.path.join(directory, name))
+    _assert_no_reparse(path)
+    shutil.rmtree(path)
+
+
+def _preflight_targets(root: str, paths: Iterable[str]) -> None:
+    for rel in paths:
+        target = _safe_install_path(root, rel)
+        if os.path.isdir(target):
+            raise UpdateError("File cập nhật trỏ vào thư mục")
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def sha256_file(path: str) -> str:
+    _assert_no_reparse(path)
     digest = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -149,10 +216,11 @@ def _safe_install_path(root: str, rel_path: str) -> str:
     rel = normalize_rel_path(rel_path)
     if is_protected_rel_path(rel):
         raise ManifestError(f"Path bảo vệ không được ghi: {rel}")
-    root_abs = os.path.abspath(root)
+    root_abs = _assert_no_reparse(root)
     target = os.path.abspath(os.path.join(root_abs, *rel.split("/")))
     if os.path.commonpath([root_abs, target]) != root_abs:
         raise ZipSafetyError(f"Path thoát khỏi thư mục cài đặt: {rel}")
+    _assert_no_reparse(target)
     return target
 
 
@@ -171,7 +239,7 @@ def version_tuple(version: str) -> Tuple[int, ...]:
 
 
 def read_installed_version(install_root: str) -> str:
-    path = os.path.join(install_root, "antidetect", "__init__.py")
+    path = _safe_install_path(install_root, "antidetect/__init__.py")
     try:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
@@ -186,22 +254,23 @@ def read_installed_version(install_root: str) -> str:
 
 
 def _write_json_atomic(path: str, data: Dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    _assert_no_reparse(path)
+    _mkdir_checked(os.path.dirname(os.path.abspath(path)))
     tmp = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(tmp, "x", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
+        _assert_no_reparse(path)
+        _assert_no_reparse(tmp)
         os.replace(tmp, path)
     finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+        _cleanup_temp(tmp)
 
 
 def read_update_state(state_path: str) -> Dict[str, Any]:
+    _assert_no_reparse(state_path)
     if not os.path.exists(state_path):
         return {}
     try:
@@ -656,6 +725,42 @@ def _check_authenticode(
 # Server guard
 # ---------------------------------------------------------------------------
 
+def _server_pid_liveness(pid: Any) -> str:
+    """A failed health probe is never evidence that a recorded PID exited."""
+    try:
+        if isinstance(pid, bool) or not 0 < int(pid) <= 0xFFFFFFFF:
+            return "unknown"
+        pid = int(pid)
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+            return "alive"
+        except ProcessLookupError:
+            return "absent"
+        except OSError:
+            return "unknown"
+    try:
+        import ctypes
+        from ctypes import wintypes
+        from .process_identity import _kernel32
+
+        api = _kernel32()
+        handle = api.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return "absent" if ctypes.get_last_error() == 87 else "unknown"
+        try:
+            status = wintypes.DWORD()
+            if not api.GetExitCodeProcess(handle, ctypes.byref(status)):
+                return "unknown"
+            return "alive" if status.value == 259 else "absent"
+        finally:
+            api.CloseHandle(handle)
+    except Exception:
+        return "unknown"
+
+
 def detect_running_server() -> Optional[Dict[str, Any]]:
     from . import server_control
 
@@ -675,6 +780,16 @@ def detect_running_server() -> Optional[Dict[str, Any]]:
                 "port": port,
                 "pid": info.get("pid"),
                 "instance_id": health.get("instance_id"),
+            }
+    if info or os.path.lexists(server_control.PID_FILE):
+        liveness = _server_pid_liveness(info.get("pid")) if info else "unknown"
+        if liveness != "absent":
+            # Do not kill here. The existing stop command must independently
+            # prove identity; an unknown/denied query blocks install writes.
+            return {
+                "port": info.get("port"), "pid": info.get("pid"),
+                "instance_id": info.get("instance_id"),
+                "state": liveness, "health_unavailable": True,
             }
     return None
 
@@ -709,21 +824,24 @@ def _ensure_server_stopped(
 # ---------------------------------------------------------------------------
 
 def _copy_verified(source: str, dest: str, expected_sha: str) -> None:
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    _assert_no_reparse(source)
+    _assert_no_reparse(dest)
+    _mkdir_checked(os.path.dirname(dest))
     tmp = f"{dest}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
     try:
-        shutil.copyfile(source, tmp)
-        with open(tmp, "rb+") as f:
-            f.flush()
-            os.fsync(f.fileno())
+        # Exclusive create refuses an already-present temporary link or file.
+        with open(source, "rb") as src, open(tmp, "xb") as out:
+            shutil.copyfileobj(src, out, 1024 * 1024)
+            out.flush()
+            os.fsync(out.fileno())
         if sha256_file(tmp) != expected_sha:
             raise UpdateError(f"Hash không khớp sau khi copy: {dest}")
+        _assert_no_reparse(source)
+        _assert_no_reparse(dest)
+        _assert_no_reparse(tmp)
         os.replace(tmp, dest)
     finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+        _cleanup_temp(tmp)
 
 
 def _extract_payload(
@@ -744,10 +862,10 @@ def _extract_payload(
                 raise ManifestError(f"Zip thiếu {arcname}") from exc
             digest = hashlib.sha256()
             total = 0
-            os.makedirs(os.path.dirname(target), exist_ok=True)
+            _mkdir_checked(os.path.dirname(target))
             tmp = f"{target}.tmp.{uuid.uuid4().hex[:8]}"
             try:
-                with zf.open(info) as src, open(tmp, "wb") as out:
+                with zf.open(info) as src, open(tmp, "xb") as out:
                     while True:
                         chunk = src.read(1024 * 1024)
                         if not chunk:
@@ -763,12 +881,11 @@ def _extract_payload(
                     os.fsync(out.fileno())
                 if total != entry["size"] or digest.hexdigest() != entry["sha256"]:
                     raise ManifestError(f"Hash không khớp: {entry['path']}")
+                _assert_no_reparse(tmp)
+                _safe_install_path(dest_root, entry["path"])
                 os.replace(tmp, target)
             finally:
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+                _cleanup_temp(tmp)
             extracted.append(target)
     return extracted
 
@@ -931,26 +1048,240 @@ def _backup_file(
         return None
     digest = sha256_file(source)
     size = os.path.getsize(source)
-    dest = os.path.join(backup_files_dir, *rel.split("/"))
+    dest = _safe_install_path(backup_files_dir, rel)
     _copy_verified(source, dest, digest)
     return {"path": rel, "sha256": digest, "size": size, "existed": True}
 
 
-def _read_backup_manifest(backup_dir: str) -> Dict[str, Any]:
-    manifest_path = os.path.join(backup_dir, "backup.json")
+def _read_backup_manifest(backup_dir: str, root: Optional[str] = None) -> Dict[str, Any]:
+    manifest_path = _assert_no_reparse(os.path.join(backup_dir, "backup.json"))
     try:
         with open(manifest_path, "r", encoding="utf-8") as f:
             backup = json.load(f)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise UpdateError(f"Không đọc được backup.json: {exc}") from exc
-    if not isinstance(backup, dict) or backup.get("schema") != 1:
-        raise UpdateError("Backup schema không hỗ trợ.")
+    if not isinstance(backup, dict) or type(backup.get("schema")) is not int or backup["schema"] != 1:
+        raise UpdateError("Backup schema is unsupported")
+    for key in ("from_version", "to_version"):
+        version_tuple(backup.get(key))
+    release_hash = backup.get("release_manifest_sha256")
+    if not isinstance(release_hash, str) or not _SHA256_RE.fullmatch(release_hash):
+        raise UpdateError("Backup release hash is invalid")
+    recorded_root = backup.get("install_root")
+    if recorded_root is not None:
+        if not isinstance(recorded_root, str) or not os.path.isabs(recorded_root):
+            raise UpdateError("Backup install root is invalid")
+        if root is not None and os.path.normcase(os.path.abspath(recorded_root)) != os.path.normcase(os.path.abspath(root)):
+            raise UpdateError("Backup belongs to another install root")
+    # Old schema-1 backups omit install_root; they still receive full entry,
+    # content-hash and target-path checks before any restore writes.
+    seen = set()
+    total = 0
+    for group in ("files", "delete", "added"):
+        entries = backup.get(group)
+        if not isinstance(entries, list) or len(entries) > MAX_FILES:
+            raise UpdateError("Backup file lists are missing or invalid")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise UpdateError("Backup entry must be an object")
+            rel = normalize_rel_path(entry.get("path"))
+            if rel != entry.get("path") or is_protected_rel_path(rel) or rel.casefold() in seen:
+                raise UpdateError("Backup path is unsafe or duplicated")
+            seen.add(rel.casefold())
+            digest = entry.get("sha256")
+            if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+                raise UpdateError("Backup entry hash is invalid")
+            if group != "added":
+                size = entry.get("size")
+                if entry.get("existed") is not True or type(size) is not int or size < 0:
+                    raise UpdateError("Backup restore entry is incomplete")
+                total += size
+                if size > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
+                    raise UpdateError("Backup content exceeds configured limits")
     return backup
+
+
+def _pending_path(updates_path: str, state_file: str) -> str:
+    path = _assert_no_reparse(os.path.join(updates_path, "pending_update.json"))
+    if os.path.normcase(path) == os.path.normcase(os.path.abspath(state_file)):
+        raise UpdateError("State path trùng journal cập nhật")
+    return path
+
+
+# Executed using -I -S: no site hooks, PYTHONPATH, or target installation imports.
+# Hash the exact bytes before compile/exec. The journal never selects code.
+_RECOVERY_LOADER = (
+    "import hashlib,pathlib,sys;"
+    "p=pathlib.Path(sys.argv[1]);b=p.read_bytes();"
+    "ok=hashlib.sha256(b).hexdigest()==sys.argv[2];"
+    "ok or sys.exit('Recovery bootstrap digest mismatch');"
+    "sys.argv=[str(p),*sys.argv[3:]];"
+    "exec(compile(b,str(p),'exec'),{'__name__':'__main__','__file__':str(p)})"
+)
+
+
+def _stage_recovery_bootstrap(
+    root: str, updates_path: str, state_file: str, pending: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist an independent, hash-bound recovery command before install writes.
+
+    The bootstrap is trusted installed release code, copied outside the install
+    so overwriting updater/storage/applog cannot break the recovery entrypoint.
+    Like the updater, this does not defend against hostile same-user tampering.
+    """
+    canonical = lambda path: os.path.realpath(_assert_no_reparse(path))
+    root, updates_path, state_file = map(canonical, (root, updates_path, state_file))
+    backup_dir = canonical(pending["backup_dir"])
+    lock_path = canonical(os.path.join(updates_path, "update.lock"))
+    journal_path = canonical(_pending_path(updates_path, state_file))
+    if (os.path.normcase(state_file) == os.path.normcase(lock_path)
+            or os.path.commonpath([backup_dir, state_file]) == backup_dir):
+        raise UpdateError("Recovery metadata paths collide")
+    backup = _read_backup_manifest(backup_dir, root)
+    metadata_paths = {os.path.normcase(path) for path in (state_file, journal_path, lock_path)}
+    for group in ("files", "delete", "added"):
+        for entry in backup[group]:
+            destination = canonical(_safe_install_path(root, entry["path"]))
+            if os.path.normcase(destination) in metadata_paths:
+                raise UpdateError("Recovery metadata collides with an install file")
+    root_id = sha256_bytes(os.path.normcase(root).encode("utf-8"))[:12]
+    capsule_dir = canonical(os.path.join(
+        os.path.dirname(root), ".antidetect-recovery-" + root_id, pending["operation_id"]
+    ))
+    if os.path.commonpath([root, capsule_dir]) == root:
+        raise UpdateError("Recovery bootstrap must be outside the installation")
+    _mkdir_checked(os.path.dirname(capsule_dir))
+    os.mkdir(capsule_dir)  # Never overwrite an old capsule or command.
+    _assert_no_reparse(capsule_dir)
+    source = canonical(os.path.join(os.path.dirname(__file__), "recovery_bootstrap.py"))
+    source_sha = sha256_file(source)
+    bootstrap = os.path.join(capsule_dir, "bootstrap.py")
+    _copy_verified(source, bootstrap, source_sha)
+    capsule = os.path.join(capsule_dir, "capsule.json")
+    _write_json_atomic(capsule, {
+        "schema": 1, "pending": pending, "install_root": root,
+        "updates_path": updates_path, "state_file": state_file,
+        "backup_dir": backup_dir, "pid_file": canonical(os.path.join(_data_root(root), "server.pid")),
+        "capsule_dir": capsule_dir,
+    })
+    capsule_sha = sha256_file(capsule)
+    command = [sys.executable, "-I", "-S", "-c", _RECOVERY_LOADER,
+               bootstrap, source_sha, capsule, capsule_sha]
+    # Single-quote every PowerShell token, doubling literal quote characters.
+    powershell = "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in command)
+    instructions = os.path.join(capsule_dir, "RECOVER.txt")
+    with open(instructions, "x", encoding="utf-8") as stream:
+        stream.write("Stop the application server, then paste this command into PowerShell.\n")
+        stream.write("Keep this command from before the update; do not trust replacement digests.\n\n")
+        stream.write(powershell + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return {"capsule_dir": capsule_dir, "capsule_sha256": capsule_sha,
+            "command_argv": command, "command_powershell": powershell,
+            "instructions_path": instructions}
+
+
+def _begin_pending(
+    root: str, updates_path: str, state_file: str, backup_dir: str,
+    action: str, operation_id: str, state_after: Optional[Dict[str, Any]] = None,
+    recovery_notify: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    path = _pending_path(updates_path, state_file)
+    if os.path.exists(path):
+        raise UpdateError("Còn cập nhật chưa phục hồi; không ghi đè journal")
+    pending = {
+        "schema": 1, "operation_id": operation_id, "action": action,
+        "install_root": os.path.abspath(root), "state_file": os.path.abspath(state_file),
+        "backup_dir": os.path.abspath(backup_dir),
+        "backup_manifest_sha256": sha256_file(os.path.join(backup_dir, "backup.json")),
+        "state_after": state_after,
+    }
+    bootstrap = _stage_recovery_bootstrap(root, updates_path, state_file, pending)
+    if recovery_notify is not None:
+        recovery_notify(bootstrap)
+    pending["bootstrap"] = {key: bootstrap[key] for key in ("capsule_dir", "capsule_sha256")}
+    _write_json_atomic(path, pending)
+    return bootstrap
+
+
+def _read_pending(root: str, updates_path: str, state_file: str) -> Optional[Dict[str, Any]]:
+    path = _pending_path(updates_path, state_file)
+    if not os.path.exists(path):
+        return None
+    pending = read_update_state(path)
+    operation_id = pending.get("operation_id")
+    if (pending.get("schema") != 1 or pending.get("action") not in ("apply", "rollback")
+            or not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id)):
+        raise UpdateError("Journal cập nhật hỏng; giữ nguyên để phục hồi thủ công")
+    for key, expected in (("install_root", root), ("state_file", state_file)):
+        recorded = pending.get(key)
+        if (not isinstance(recorded, str)
+                or os.path.normcase(os.path.abspath(recorded)) != os.path.normcase(os.path.abspath(expected))):
+            raise UpdateError("Journal không thuộc thư mục cài đặt/state hiện tại")
+    backup_dir = pending.get("backup_dir")
+    if not isinstance(backup_dir, str) or not backup_dir:
+        raise UpdateError("Journal thiếu backup")
+    digest = pending.get("backup_manifest_sha256")
+    if (not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest)
+            or sha256_file(os.path.join(backup_dir, "backup.json")) != digest):
+        raise UpdateError("Backup manifest không khớp journal")
+    if pending["action"] == "rollback":
+        state_after = pending.get("state_after")
+        if (not isinstance(state_after, dict) or state_after.get("schema") != 1
+                or state_after.get("last_operation_id") != operation_id
+                or not isinstance(state_after.get("current_version"), str)):
+            raise UpdateError("Journal rollback thiếu state hoàn tất")
+        backup = _read_backup_manifest(backup_dir, root)
+        if state_after["current_version"] != backup.get("from_version"):
+            raise UpdateError("Journal rollback không khớp version backup")
+    return pending
+
+
+def _clear_pending(updates_path: str, state_file: str, operation_id: str) -> None:
+    path = _pending_path(updates_path, state_file)
+    if not os.path.exists(path):
+        return
+    if read_update_state(path).get("operation_id") != operation_id:
+        raise UpdateError("Journal đã thay đổi; từ chối xóa")
+    _remove_checked(path)
+
+
+def _recover_interrupted_update(
+    root: str, updates_path: str, state_file: str,
+    server_check: Callable[[], Optional[Dict[str, Any]]],
+    stop_server: bool, stop_server_fn: Callable[[], Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Resume only under update.lock; keep the journal until durable completion."""
+    pending = _read_pending(root, updates_path, state_file)
+    if pending is None:
+        return None
+    operation_id = pending["operation_id"]
+    state = read_update_state(state_file)
+    result: Dict[str, Any] = {}
+    stopped = None
+    if state.get("last_operation_id") == operation_id:
+        action = "finish_committed_update"
+    else:
+        stopped = _ensure_server_stopped(server_check, stop_server, stop_server_fn)
+        result = _apply_from_backup(pending["backup_dir"], root)
+        if pending["action"] == "rollback":
+            _write_json_atomic(state_file, pending["state_after"])
+            action = "finish_interrupted_rollback"
+        else:
+            # Apply writes state only at the commit point, so the old state
+            # still describes the restored files. Recovery is idempotent.
+            action = "rollback_interrupted_apply"
+    _clear_pending(updates_path, state_file, operation_id)
+    return {
+        "action": action, "operation": pending["action"], "operation_id": operation_id,
+        "backup_dir": pending["backup_dir"], "server_stopped": stopped,
+        **result,
+    }
 
 
 def _apply_from_backup(backup_dir: str, root: str) -> Dict[str, Any]:
     """Khôi phục theo backup manifest; verify toàn bộ trước khi ghi."""
-    backup = _read_backup_manifest(backup_dir)
+    backup = _read_backup_manifest(backup_dir, root)
     files_dir = os.path.join(backup_dir, "files")
 
     restore_entries = []
@@ -961,7 +1292,7 @@ def _apply_from_backup(backup_dir: str, root: str) -> Dict[str, Any]:
         stored = _safe_install_path(files_dir, rel)
         if not os.path.isfile(stored):
             raise UpdateError(f"Backup thiếu file: {rel}")
-        if sha256_file(stored) != entry.get("sha256"):
+        if os.path.getsize(stored) != entry["size"] or sha256_file(stored) != entry["sha256"]:
             raise UpdateError(f"Backup bị sửa (hash sai): {rel}")
         restore_entries.append((rel, stored, entry.get("sha256")))
 
@@ -971,10 +1302,28 @@ def _apply_from_backup(backup_dir: str, root: str) -> Dict[str, Any]:
             continue
         rel = normalize_rel_path(entry.get("path"))
         stored = _safe_install_path(files_dir, rel)
-        if not os.path.isfile(stored) or sha256_file(stored) != entry.get("sha256"):
+        if (not os.path.isfile(stored) or os.path.getsize(stored) != entry["size"]
+                or sha256_file(stored) != entry["sha256"]):
             raise UpdateError(f"Backup bị sửa hoặc thiếu file đã xoá: {rel}")
         deleted_entries.append((rel, stored, entry.get("sha256")))
 
+    version_in_backup = any(
+        rel.casefold() == "antidetect/__init__.py"
+        for rel, _, _ in restore_entries + deleted_entries
+    )
+    version_source = files_dir if version_in_backup else root
+    if read_installed_version(version_source) != backup["from_version"]:
+        raise UpdateError("Backup cannot restore the declared previous version")
+
+    # Validate every destination, including deletions, before restoring any file.
+    added_entries = [
+        entry for entry in (backup.get("added") or []) if isinstance(entry, dict)
+    ]
+    _preflight_targets(
+        root,
+        [rel for rel, _, _ in restore_entries + deleted_entries]
+        + [normalize_rel_path(entry.get("path")) for entry in added_entries],
+    )
     for rel, stored, digest in restore_entries + deleted_entries:
         _copy_verified(stored, _safe_install_path(root, rel), digest)
 
@@ -988,11 +1337,13 @@ def _apply_from_backup(backup_dir: str, root: str) -> Dict[str, Any]:
         if not os.path.isfile(target):
             continue
         if sha256_file(target) == entry.get("sha256"):
-            os.remove(target)
+            _remove_checked(target)
             removed_added.append(rel)
         else:
             # File mới đã bị sửa sau update: giữ lại thay vì xoá mất dữ liệu.
             kept.append(rel)
+    if read_installed_version(root) != backup["from_version"]:
+        raise UpdateError("Restored install version does not match backup")
     return {
         "restored": [rel for rel, _, _ in restore_entries + deleted_entries],
         "removed_added": removed_added,
@@ -1001,6 +1352,7 @@ def _apply_from_backup(backup_dir: str, root: str) -> Dict[str, Any]:
 
 
 def _prune_backups(backups_root: str, keep: int = BACKUP_KEEP) -> None:
+    _assert_no_reparse(backups_root)
     if keep <= 0 or not os.path.isdir(backups_root):
         return
     entries = sorted(
@@ -1016,8 +1368,8 @@ def _prune_backups(backups_root: str, keep: int = BACKUP_KEEP) -> None:
         if not os.path.isfile(os.path.join(old, "backup.json")):
             continue
         try:
-            shutil.rmtree(old)
-        except OSError as exc:
+            _remove_tree_checked(old)
+        except (OSError, UpdateError) as exc:
             log.warning("Không xoá được backup cũ %s: %s", old, exc)
 
 
@@ -1035,13 +1387,16 @@ def apply_update(
     stop_server_fn: Optional[Callable[[], Dict[str, Any]]] = None,
     dry_run: bool = False,
     backup_keep: int = BACKUP_KEEP,
+    recovery_notify: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     from .storage import InterProcessLock
 
-    root = os.path.abspath(install_root or _BASE_DIR)
+    root = _assert_no_reparse(install_root or _BASE_DIR)
     if not os.path.isdir(os.path.join(root, "antidetect")):
         raise UpdateError(f"Không phải thư mục cài đặt Antidetect: {root}")
     updates_path, state_file = _resolve_paths(root, state_path, updates_dir)
+    _assert_no_reparse(updates_path)
+    _assert_no_reparse(state_file)
     server_check = server_check or detect_running_server
     stop_server_fn = stop_server_fn or _default_stop_server
 
@@ -1060,9 +1415,14 @@ def apply_update(
                 f"Release {target} cũ hơn bản đang cài {current_version}. "
                 "Thêm --allow-downgrade nếu thực sự muốn hạ cấp."
             )
+        _preflight_targets(
+            root, [entry["path"] for entry in manifest["files"]] + manifest["delete"]
+        )
         return manifest, raw_manifest, signature_state, target
 
     if dry_run:
+        if _read_pending(root, updates_path, state_file) is not None:
+            raise UpdateError("Còn cập nhật bị gián đoạn; dry-run không thực hiện phục hồi")
         current_version = read_installed_version(root)
         manifest, raw_manifest, signature_state, target_version = _verified(
             current_version
@@ -1079,15 +1439,20 @@ def apply_update(
             "server": server_check(),
         }
 
-    os.makedirs(updates_path, exist_ok=True)
+    _mkdir_checked(updates_path)
+    _assert_no_reparse(os.path.join(updates_path, "update.lock"))
     lock = InterProcessLock(os.path.join(updates_path, "update.lock"), timeout=5.0)
     try:
         with lock:
+            recovery = _recover_interrupted_update(
+                root, updates_path, state_file, server_check, stop_server, stop_server_fn
+            )
             # Đọc trong lock: một updater khác có thể vừa apply xong.
             current_version = read_installed_version(root)
             manifest, raw_manifest, signature_state, target_version = _verified(
                 current_version
             )
+            _assert_no_reparse(os.path.join(updates_path, "update.lock"))
             # State hỏng phải chặn trước khi ghi bất kỳ file nào.
             prior_state = read_update_state(state_file)
             stopped = _ensure_server_stopped(
@@ -1096,7 +1461,7 @@ def apply_update(
             staging = os.path.join(
                 updates_path, "staging", f"{target_version}-{uuid.uuid4().hex[:8]}"
             )
-            os.makedirs(staging, exist_ok=True)
+            _mkdir_checked(staging)
             try:
                 staged_files = _extract_payload(zip_path, manifest, staging)
                 authenticode = _check_authenticode(
@@ -1113,7 +1478,7 @@ def apply_update(
                     f"{uuid.uuid4().hex[:6]}",
                 )
                 backup_files_dir = os.path.join(backup_dir, "files")
-                os.makedirs(backup_files_dir, exist_ok=True)
+                _mkdir_checked(backup_files_dir)
 
                 file_entries = []
                 for entry in manifest["files"]:
@@ -1134,6 +1499,7 @@ def apply_update(
                 ]
                 backup_manifest = {
                     "schema": 1,
+                    "install_root": root,
                     "from_version": current_version,
                     "to_version": target_version,
                     "created_at": int(time.time()),
@@ -1146,6 +1512,11 @@ def apply_update(
                     os.path.join(backup_dir, "backup.json"), backup_manifest
                 )
 
+                operation_id = uuid.uuid4().hex
+                recovery_bootstrap = _begin_pending(
+                    root, updates_path, state_file, backup_dir, "apply", operation_id,
+                    recovery_notify=recovery_notify,
+                )
                 written = []
                 try:
                     for entry in manifest["files"]:
@@ -1160,7 +1531,7 @@ def apply_update(
                                 f"Delete trỏ vào thư mục, từ chối: {rel}"
                             )
                         if os.path.exists(target):
-                            os.remove(target)
+                            _remove_checked(target)
 
                     now = int(time.time())
                     history = list(prior_state.get("history") or [])[-19:]
@@ -1174,6 +1545,7 @@ def apply_update(
                     )
                     new_state = {
                         "schema": 1,
+                        "last_operation_id": operation_id,
                         "current_version": target_version,
                         "previous_version": current_version,
                         "updated_at": now,
@@ -1184,6 +1556,7 @@ def apply_update(
                         },
                         "rollback": {
                             "backup_dir": backup_dir,
+                            "backup_manifest_sha256": sha256_file(os.path.join(backup_dir, "backup.json")),
                             "from_version": current_version,
                             "to_version": target_version,
                             "created_at": now,
@@ -1192,9 +1565,12 @@ def apply_update(
                     }
                     _write_json_atomic(state_file, new_state)
                 except Exception as exc:
+                    if read_update_state(state_file).get("last_operation_id") == operation_id:
+                        raise UpdateError("Cập nhật đã commit; journal được giữ để hoàn tất cleanup") from exc
                     auto = {}
                     try:
                         auto = _apply_from_backup(backup_dir, root)
+                        _clear_pending(updates_path, state_file, operation_id)
                     except Exception as rollback_exc:  # noqa: BLE001
                         raise UpdateError(
                             f"Cập nhật lỗi ({exc}) và tự rollback cũng lỗi: "
@@ -1204,12 +1580,15 @@ def apply_update(
                         f"Cập nhật lỗi ({exc}); đã tự rollback "
                         f"({len(auto.get('restored', []))} file)."
                     ) from exc
+                _clear_pending(updates_path, state_file, operation_id)
             finally:
-                shutil.rmtree(staging, ignore_errors=True)
+                _remove_tree_checked(staging)
 
             _prune_backups(os.path.join(updates_path, "backups"), backup_keep)
             return {
                 "success": True,
+                "recovery": recovery,
+                "recovery_bootstrap": recovery_bootstrap,
                 "from_version": current_version,
                 "to_version": target_version,
                 "signature": signature_state,
@@ -1250,18 +1629,43 @@ def rollback_update(
     stop_server: bool = False,
     stop_server_fn: Optional[Callable[[], Dict[str, Any]]] = None,
     force: bool = False,
+    recovery_notify: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     from .storage import InterProcessLock
 
-    root = os.path.abspath(install_root or _BASE_DIR)
+    root = _assert_no_reparse(install_root or _BASE_DIR)
     updates_path, state_file = _resolve_paths(root, state_path, updates_dir)
+    _assert_no_reparse(updates_path)
+    _assert_no_reparse(state_file)
     server_check = server_check or detect_running_server
     stop_server_fn = stop_server_fn or _default_stop_server
-    os.makedirs(updates_path, exist_ok=True)
+    _mkdir_checked(updates_path)
+    _assert_no_reparse(os.path.join(updates_path, "update.lock"))
     lock = InterProcessLock(os.path.join(updates_path, "update.lock"), timeout=5.0)
     try:
         with lock:
+            recovery = _recover_interrupted_update(
+                root, updates_path, state_file, server_check, stop_server, stop_server_fn
+            )
             state = read_update_state(state_file)
+            same_recovered_backup = bool(
+                recovery and (
+                    backup_dir is None
+                    or os.path.normcase(os.path.abspath(backup_dir))
+                    == os.path.normcase(os.path.abspath(recovery["backup_dir"]))
+                )
+            )
+            if recovery and recovery["operation"] == "rollback" and same_recovered_backup:
+                return {
+                    "success": True, "from_version": state.get("previous_version"),
+                    "to_version": state.get("current_version"),
+                    "backup_dir": recovery["backup_dir"], "state_path": state_file,
+                    "restored": recovery.get("restored", []),
+                    "removed_added": recovery.get("removed_added", []),
+                    "kept_modified_added": recovery.get("kept_modified_added", []),
+                    "server_stopped": recovery["server_stopped"],
+                    "restart_required": True, "recovery": recovery,
+                }
             chosen = backup_dir
             if not chosen:
                 rollback = state.get("rollback") or {}
@@ -1271,10 +1675,17 @@ def rollback_update(
                     "Không có bản backup rollback trong update_state.json. "
                     "Dùng --backup <thư mục> nếu biết đường dẫn."
                 )
-            chosen = os.path.abspath(chosen)
+            chosen = _assert_no_reparse(chosen)
             if not os.path.isfile(os.path.join(chosen, "backup.json")):
                 raise UpdateError(f"Thư mục backup không hợp lệ: {chosen}")
-            backup = _read_backup_manifest(chosen)
+            backup = _read_backup_manifest(chosen, root)
+            prior_rollback = state.get("rollback") or {}
+            recorded_backup = prior_rollback.get("backup_dir")
+            if (isinstance(recorded_backup, str)
+                    and os.path.normcase(os.path.abspath(recorded_backup)) == os.path.normcase(chosen)
+                    and prior_rollback.get("backup_manifest_sha256") is not None):
+                if sha256_file(os.path.join(chosen, "backup.json")) != prior_rollback["backup_manifest_sha256"]:
+                    raise UpdateError("Backup manifest no longer matches the committed update")
 
             current_version = read_installed_version(root)
             expected_current = backup.get("to_version")
@@ -1290,8 +1701,6 @@ def rollback_update(
             stopped = _ensure_server_stopped(
                 server_check, stop_server, stop_server_fn
             )
-            result = _apply_from_backup(chosen, root)
-
             from_version = backup.get("from_version") or "unknown"
             now = int(time.time())
             history = list(state.get("history") or [])[-19:]
@@ -1303,8 +1712,10 @@ def rollback_update(
                     "at": now,
                 }
             )
+            operation_id = uuid.uuid4().hex
             new_state = {
                 "schema": 1,
+                "last_operation_id": operation_id,
                 "current_version": from_version,
                 "previous_version": current_version,
                 "updated_at": now,
@@ -1312,9 +1723,17 @@ def rollback_update(
                 "rollback": None,
                 "history": history,
             }
+            recovery_bootstrap = _begin_pending(
+                root, updates_path, state_file, chosen, "rollback", operation_id,
+                state_after=new_state, recovery_notify=recovery_notify,
+            )
+            result = _apply_from_backup(chosen, root)
             _write_json_atomic(state_file, new_state)
+            _clear_pending(updates_path, state_file, operation_id)
             return {
                 "success": True,
+                "recovery": recovery,
+                "recovery_bootstrap": recovery_bootstrap,
                 "from_version": current_version,
                 "to_version": from_version,
                 "backup_dir": chosen,

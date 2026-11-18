@@ -101,18 +101,15 @@ def test_proxy_password_is_bound_to_identity():
     manager.delete_profile(p.id)
 
 
-def test_delete_failure_preserves_metadata_and_secret(monkeypatch):
+def test_delete_quarantine_failure_preserves_metadata_and_secret(monkeypatch):
     p = manager.create_profile("delete-locked", proxy=_proxy())
     assert get_proxy_password(p.id, identity=p.proxy.identity_key()) == "secret"
 
-    original_rmtree = storage_module.shutil.rmtree
-    monkeypatch.setattr(storage_module.shutil, "rmtree", lambda *a, **k: (_ for _ in ()).throw(PermissionError("locked")))
-    monkeypatch.setattr(storage_module.time, "sleep", lambda *_: None)
-    try:
+    from antidetect import profile_delete
+    with monkeypatch.context() as patch:
+        patch.setattr(profile_delete, "quarantine", lambda *a, **k: (_ for _ in ()).throw(PermissionError("locked")))
         with pytest.raises(ProfileDeletionError):
             manager.delete_profile(p.id)
-    finally:
-        monkeypatch.setattr(storage_module.shutil, "rmtree", original_rmtree)
 
     assert manager.get_profile(p.id) is not None
     assert get_proxy_password(p.id, identity=p.proxy.identity_key()) == "secret"
@@ -205,7 +202,7 @@ def test_second_instance_otc_never_mints_locally(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    monkeypatch.setattr(run.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+    monkeypatch.setattr(run, "open_loopback", lambda req, timeout=0: FakeResponse())
     assert run.get_unlock_code_for_ui(8000, allow_local=False) == "otc_from_server"
 
     def fail_local(*args, **kwargs):
@@ -213,8 +210,8 @@ def test_second_instance_otc_never_mints_locally(monkeypatch):
 
     monkeypatch.setattr(web_app, "create_unlock_code", fail_local)
     monkeypatch.setattr(
-        run.urllib.request,
-        "urlopen",
+        run,
+        "open_loopback",
         lambda req, timeout=0: (_ for _ in ()).throw(OSError("server down")),
     )
     assert run.get_unlock_code_for_ui(8000, allow_local=False) is None
@@ -261,7 +258,7 @@ def test_stop_server_409_does_not_taskkill(monkeypatch):
     def conflict(req, timeout=0):
         raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, None)
 
-    monkeypatch.setattr(server_control.urllib.request, "urlopen", conflict)
+    monkeypatch.setattr(server_control, "open_loopback", conflict)
     calls = []
     monkeypatch.setattr(
         server_control.subprocess,

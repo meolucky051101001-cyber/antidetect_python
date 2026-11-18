@@ -90,7 +90,7 @@ def _fake_websockets(messages):
         def __init__(self):
             self.urls = []
 
-        def connect(self, url, max_size=None):
+        def connect(self, url, max_size=None, **kwargs):
             self.urls.append(url)
             return _FakeWebSocket(messages)
 
@@ -109,7 +109,7 @@ def test_fetch_cookies_cdp_skips_unrelated_messages(monkeypatch):
 
     async def fake_ws_url(port):
         assert port == 9222
-        return "ws://fake"
+        return "ws://127.0.0.1:9222/fake"
 
     monkeypatch.setattr(cookies, "_browser_ws_url", fake_ws_url)
     got = _run(cookies.fetch_cookies_cdp(9222))
@@ -121,7 +121,7 @@ def test_set_cookies_cdp_returns_true(monkeypatch):
     monkeypatch.setitem(sys.modules, "websockets", module)
 
     async def fake_ws_url(port):
-        return "ws://fake"
+        return "ws://127.0.0.1:9222/fake"
 
     monkeypatch.setattr(cookies, "_browser_ws_url", fake_ws_url)
     assert _run(cookies.set_cookies_cdp(9222, [{"name": "a", "value": "1"}])) is True
@@ -134,7 +134,7 @@ def test_set_cookies_cdp_raises_on_cdp_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "websockets", module)
 
     async def fake_ws_url(port):
-        return "ws://fake"
+        return "ws://127.0.0.1:9222/fake"
 
     monkeypatch.setattr(cookies, "_browser_ws_url", fake_ws_url)
     with pytest.raises(RuntimeError, match="Storage.setCookies"):
@@ -154,7 +154,7 @@ def test_browser_ws_url_reads_devtools_endpoint(monkeypatch):
                 {"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/x"}
             ).encode("utf-8")
 
-    monkeypatch.setattr(cookies.urllib.request, "urlopen", lambda req, timeout: _Response())
+    monkeypatch.setattr(cookies, "open_loopback", lambda req, timeout: _Response())
     assert _run(cookies._browser_ws_url(9222)).endswith("/devtools/browser/x")
 
 
@@ -169,6 +169,6 @@ def test_browser_ws_url_rejects_missing_endpoint(monkeypatch):
         def read(self):
             return b"{}"
 
-    monkeypatch.setattr(cookies.urllib.request, "urlopen", lambda req, timeout: _Response())
+    monkeypatch.setattr(cookies, "open_loopback", lambda req, timeout: _Response())
     with pytest.raises(RuntimeError, match="CDP"):
         _run(cookies._browser_ws_url(9222))

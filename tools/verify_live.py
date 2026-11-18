@@ -8,8 +8,8 @@ Checks:
   * JS screen values and CSS device-width/height/resolution agree.
   * navigator.deviceMemory equals the Sec-CH-Device-Memory request header.
   * WebGL limits match this machine's clean Chrome baseline.
-  * Canvas noise is skipped for a simple solid canvas and applied to a complex
-    multi-colour canvas.
+  * Canvas follows its explicit revision: v1 complexity gate, v2 coordinate
+    readout, or native when disabled. V2 native GPU values are observations.
   * Worker timezone/language/UA are overridden (not host values).
   * WebRTC constructors are untouched and no local IP appears in SDP.
 
@@ -47,6 +47,8 @@ from antidetect.stealth import (  # noqa: E402
     _connection_profile,
     _screen_work_area,
     _webgl_limits,
+    _effective_disabled_groups,
+    get_stealth_capabilities,
 )
 
 PAGE = (
@@ -374,6 +376,24 @@ def _check(name: str, ok: bool, actual: Any, expected: Any) -> Dict[str, Any]:
     return {"name": name, "ok": bool(ok), "actual": actual, "expected": expected}
 
 
+def _canvas_policy_checks(fp, canvas):
+    """Validate the selected canvas revision without assuming v1 for all profiles."""
+    disabled = "canvas" in _effective_disabled_groups(fp)
+    revision = getattr(fp, "fingerprint_algorithm_version", 1)
+    checks = []
+    for label, expect_noise in (
+        ("simple", not disabled and revision >= 2),
+        ("complex", not disabled),
+    ):
+        actual = canvas.get(label + "Diff")
+        valid = isinstance(actual, int) and (actual > 0 if expect_noise else actual == 0)
+        checks.append(_check(
+            "canvas_" + label + ("_noisy" if expect_noise else "_native"),
+            valid, actual, ">0" if expect_noise else 0,
+        ))
+    return checks
+
+
 def main(argv: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Live verify one real profile.")
     parser.add_argument("--profile", required=True, help="Profile id or name")
@@ -426,6 +446,8 @@ def main(argv: Any = None) -> int:
             "webgl_limits": _webgl_limits(fp),
         },
         "checks": [],
+        "capabilities": get_stealth_capabilities(fp),
+        "observations": {},
         "launch": None,
         "cleanup": None,
         "status": "UNKNOWN",
@@ -540,41 +562,35 @@ def main(argv: Any = None) -> int:
                             native.get("hcGetter"), True))
 
         webgl = data.get("webgl") or {}
-        expected_limits = _webgl_limits(fp) or CLEAN_WEBGL
-        checks.append(_check("webgl_max_texture",
-                            webgl.get("maxTextureSize") == expected_limits["maxTextureSize"],
-                            webgl.get("maxTextureSize"), expected_limits["maxTextureSize"]))
-        checks.append(_check("webgl_max_viewport",
-                            webgl.get("maxViewportDims") == expected_limits["maxViewportDims"],
-                            webgl.get("maxViewportDims"), expected_limits["maxViewportDims"]))
-        checks.append(_check("webgl_max_renderbuffer",
-                            webgl.get("maxRenderbufferSize") == expected_limits["maxRenderbufferSize"],
-                            webgl.get("maxRenderbufferSize"), expected_limits["maxRenderbufferSize"]))
-        checks.append(_check("webgl_vendor", webgl.get("vendor") == fp.webgl_vendor,
-                            webgl.get("vendor"), fp.webgl_vendor))
-        checks.append(_check("webgl_renderer", webgl.get("renderer") == fp.webgl_renderer,
-                            webgl.get("renderer"), fp.webgl_renderer))
-
-        canvas = data.get("canvas") or {}
-        checks.append(_check("canvas_simple_no_noise", canvas.get("simpleDiff") == 0,
-                            canvas.get("simpleDiff"), 0))
-        # Profile "authentic" (stealth_disable chứa 'canvas'): noise bị
-        # tắt chủ đích — canvas phức tạp giữ pixel native, complexDiff == 0.
-        canvas_noise_disabled = "canvas" in (getattr(fp, "stealth_disable", None) or [])
-        if canvas_noise_disabled:
-            checks.append(_check("canvas_complex_native",
-                                canvas.get("complexDiff") == 0,
-                                canvas.get("complexDiff"), 0))
+        revision = getattr(fp, "fingerprint_algorithm_version", 1)
+        native_webgl = revision >= 2 or "webgl" in _effective_disabled_groups(fp)
+        if native_webgl:
+            # Hardware observation, not a comparison against a different GPU's
+            # hard-coded limits or a profile renderer no longer being spoofed.
+            report["observations"]["native_webgl"] = webgl
+            report["observations"]["native_webgl_validation"] = "not_compared_to_clean_baseline"
         else:
-            checks.append(_check("canvas_complex_noisy",
-                                isinstance(canvas.get("complexDiff"), int)
-                                and canvas.get("complexDiff") > 0,
-                                canvas.get("complexDiff"), ">0"))
+            expected_limits = _webgl_limits(fp) or CLEAN_WEBGL
+            checks.append(_check("webgl_max_texture",
+                                webgl.get("maxTextureSize") == expected_limits["maxTextureSize"],
+                                webgl.get("maxTextureSize"), expected_limits["maxTextureSize"]))
+            checks.append(_check("webgl_max_viewport",
+                                webgl.get("maxViewportDims") == expected_limits["maxViewportDims"],
+                                webgl.get("maxViewportDims"), expected_limits["maxViewportDims"]))
+            checks.append(_check("webgl_max_renderbuffer",
+                                webgl.get("maxRenderbufferSize") == expected_limits["maxRenderbufferSize"],
+                                webgl.get("maxRenderbufferSize"), expected_limits["maxRenderbufferSize"]))
+            checks.append(_check("webgl_vendor", webgl.get("vendor") == fp.webgl_vendor,
+                                webgl.get("vendor"), fp.webgl_vendor))
+            checks.append(_check("webgl_renderer", webgl.get("renderer") == fp.webgl_renderer,
+                                webgl.get("renderer"), fp.webgl_renderer))
+
+        checks.extend(_canvas_policy_checks(fp, data.get("canvas") or {}))
 
         # Battery + NetworkInformation: hooks là opt-in (mặc định tắt) — khi
         # tắt, trang thấy giá trị native; chỉ so sánh khi biết nguồn expected
         # (native cache đo được, hoặc hooks đang bật với fallback deterministic).
-        from antidetect.stealth import _effective_disabled_groups, _native_or_fallback
+        from antidetect.stealth import _native_or_fallback
         fp_proxy = getattr(profile, "proxy", None)
         native_hw = {}
         if hasattr(launcher, "_native_brands_cache"):

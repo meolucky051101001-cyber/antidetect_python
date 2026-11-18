@@ -1,6 +1,6 @@
 import uuid
 import time
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Literal
 from pydantic import BaseModel, Field, field_validator, field_serializer, SerializationInfo
 
 REDACTED_SECRET = "********"
@@ -66,6 +66,15 @@ class ProxyConfig(BaseModel):
         error = self.configuration_error()
         if error:
             raise ValueError(error)
+
+    def browser_configuration_error(self) -> Optional[str]:
+        error = self.configuration_error()
+        if error:
+            return error
+        if (self.enabled and self.protocol in ("socks4", "socks5")
+                and (self.username is not None or self.password)):
+            return "Chromium không hỗ trợ xác thực SOCKS; hãy dùng proxy HTTP/HTTPS hoặc SOCKS không xác thực."
+        return None
 
     @classmethod
     def from_input(cls, data: Any) -> "ProxyConfig":
@@ -140,19 +149,19 @@ class ProxyConfig(BaseModel):
         return self._format_url(REDACTED_SECRET if self.password else None)
 
     def to_server_arg(self) -> str:
-        """Returns format for --proxy-server flag (without auth, auth handled by extension)."""
+        """Chromium proxy endpoint; HTTP authentication is handled through CDP."""
         if not self.enabled:
             return ""
         self.validate_for_launch()
-        # C8: SOCKS5 phải dùng scheme 'socks://' để Chrome phân giải DNS qua proxy (remote DNS)
-        # 'socks5://' khiến Chrome phân giải DNS cục bộ → rò rỉ DNS nghiêm trọng
-        scheme = self.protocol
-        if scheme == "socks5":
-            scheme = "socks"
-        return f"{scheme}://{self._url_host()}:{self.port}"
+        # Chromium's explicit SOCKS5 transport resolves destination names at
+        # the proxy. SOCKS4 is a different protocol; never use an ambiguous alias.
+        return f"{self.protocol}://{self._url_host()}:{self.port}"
 
 
 class FingerprintConfig(BaseModel):
+    # Missing revision means legacy. New generated identities explicitly opt in.
+    fingerprint_algorithm_version: Literal[1, 2] = 1
+    verification_mode: Literal["strict", "compatibility"] = "compatibility"
     os: str = "windows"  # windows, macos, linux
     browser_brand: str = "chrome"  # chrome, edge, chromium
     user_agent: str = (

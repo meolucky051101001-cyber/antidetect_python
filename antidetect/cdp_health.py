@@ -66,15 +66,66 @@ _PUBLIC_KEYS = (
 class CdpSession:
     """Handle for one CDP websocket session owned by a launch."""
 
-    __slots__ = ("launch_id", "closed", "thread")
+    __slots__ = (
+        "launch_id", "closed", "thread", "_close_lock", "_browser_close",
+        "_close_pending", "_close_requested",
+    )
 
     def __init__(self, launch_id: str):
         self.launch_id = launch_id
         self.closed = threading.Event()
         self.thread: Optional[threading.Thread] = None
+        self._close_lock = threading.Lock()
+        self._browser_close: Optional[Callable[[], Optional[bool]]] = None
+        self._close_pending = False
+        self._close_requested = False
 
     def mark_closed(self) -> None:
-        self.closed.set()
+        with self._close_lock:
+            self.closed.set()
+            self._browser_close = None
+
+    def bind_browser_close(self, handler: Callable[[], Optional[bool]]) -> bool:
+        """Bind this socket's nonblocking close scheduler once.
+
+        The handler must enqueue work on the already-owned websocket's loop;
+        it must not open a connection or wait for browser shutdown. None/True
+        means accepted, False or an exception means unavailable. The queued
+        work must recheck this session/generation before sending Browser.close.
+        """
+        if not callable(handler):
+            raise TypeError("Browser close handler must be callable")
+        with self._close_lock:
+            if self.closed.is_set():
+                return False
+            if self._browser_close is not None:
+                return self._browser_close is handler
+            self._browser_close = handler
+            return True
+
+    def request_browser_close(self) -> bool:
+        """Schedule one graceful close; success is not proof of process exit."""
+        with self._close_lock:
+            if self.closed.is_set() or self._browser_close is None:
+                return False
+            if self._close_requested:
+                return True
+            if self._close_pending:
+                return False
+            handler = self._browser_close
+            self._close_pending = True
+        # Never run a callback while holding either registry or session locks.
+        # It may schedule into an event loop or inspect the registry itself.
+        try:
+            accepted = handler() is not False
+        except Exception:
+            accepted = False
+        with self._close_lock:
+            self._close_pending = False
+            if self.closed.is_set():
+                return False
+            self._close_requested = accepted
+            return accepted
 
     def is_open(self) -> bool:
         return not self.closed.is_set()
@@ -390,6 +441,23 @@ class CdpHealthRegistry:
                 return False
             session = self._sessions.get(str(profile_id))
             return bool(session and session.is_open())
+
+    def request_browser_close(self, profile_id: str, launch_id: str) -> bool:
+        """Ask only the exact current socket to enqueue graceful browser close.
+
+        STOPPING remains eligible: this request is part of shutdown, unlike
+        ordinary healthy-channel actions. A captured old session is never
+        replaced with a newer session or rediscovered through a debugging port.
+        """
+        with self._lock:
+            record = self._records.get(str(profile_id))
+            if (not record or record.get("launch_id") != launch_id
+                    or record.get("state") in (STATE_STOPPED, STATE_RECOVERY_REQUIRED)):
+                return False
+            session = self._sessions.get(str(profile_id))
+            if session is None or session.launch_id != launch_id or not session.is_open():
+                return False
+        return session.request_browser_close()
 
     def is_stopping(self, profile_id: str) -> bool:
         with self._lock:

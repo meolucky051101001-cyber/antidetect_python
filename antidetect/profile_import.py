@@ -13,6 +13,13 @@ def prepare_import_profile(entry: Any, index: int, sanitize_pages: Callable) -> 
         value = entry.get(field)
         if value is not None and not isinstance(value, str):
             raise ValueError(f"{field} phải là chuỗi hoặc null")
+    if (entry.get("browser_path") or "").strip():
+        # Imported metadata must not grant permission to execute a local file.
+        # Reject explicitly instead of silently choosing a different browser.
+        raise ValueError(
+            "browser_path không được nhập từ tệp bên ngoài. "
+            "Hãy bỏ trường này và chọn trình duyệt trong cấu hình local sau khi import."
+        )
     tags = entry.get("tags", [])
     if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
         raise ValueError("tags phải là danh sách chuỗi")
@@ -33,7 +40,7 @@ def prepare_import_profile(entry: Any, index: int, sanitize_pages: Callable) -> 
             name=entry.get("name") or f"Imported {index + 1}",
             notes=entry.get("notes") or "",
             tags=tags,
-            browser_path=(entry.get("browser_path") or "").strip() or None,
+            browser_path=None,
             fingerprint=FingerprintConfig.model_validate(entry.get("fingerprint") or {}),
             proxy=ProxyConfig.from_input(proxy_data),
             facebook_pages=sanitize_pages(entry.get("facebook_pages")),
