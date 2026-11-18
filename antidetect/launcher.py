@@ -54,6 +54,7 @@ from .launch_verification import LaunchVerification, verification_origin
 from .profile_locks import ProfileLockTimeout, ProfileLocks
 from .proxy_auth import ProxyAuthAttempts
 from .browser_trust import BrowserTrustError, hold_trusted_browser, verify_browser_executable
+from .custom_cores import build_cpp_engine_flags, custom_cores_manifest_path
 from .applog import get_logger
 from . import metrics
 from .fingerprint import (
@@ -195,6 +196,8 @@ class BrowserLauncher:
         self._core_verified_events: Dict[str, LaunchVerification] = {}
         self._navigation_events: Dict[str, threading.Event] = {}
         self._page_load_events: Dict[str, Any] = {}
+        self._configured_targets: Dict[str, Set[str]] = collections.defaultdict(set)
+        self._configured_target_cond = threading.Condition(threading.Lock())
         # P2: brands/fullVersionList đo được từ Chrome host, cache theo
         # browser_version để không đo lại mỗi launch.
         self._native_brands_cache: Dict[str, dict] = {}
@@ -484,6 +487,8 @@ class BrowserLauncher:
                 "success": True,
                 "message": "Profile đang chạy, đã mở trong tab mới",
                 "port": port,
+                "launch_id": (guard["health"] or {}).get("launch_id"),
+                "owner_instance": (guard["health"] or {}).get("owner_instance"),
                 "cdp_health": guard["health"],
                 "launched_now": False,
             }
@@ -491,9 +496,73 @@ class BrowserLauncher:
             "success": True,
             "message": "Đang chạy",
             "port": port,
+            "launch_id": (guard["health"] or {}).get("launch_id"),
+            "owner_instance": (guard["health"] or {}).get("owner_instance"),
             "cdp_health": guard["health"],
             "launched_now": False,
         }
+
+    @staticmethod
+    def _custom_cores_manifest_path() -> Optional[str]:
+        return custom_cores_manifest_path()
+
+    def _configured_state(self):
+        cond = getattr(self, "_configured_target_cond", None)
+        store = getattr(self, "_configured_targets", None)
+        if cond is None or store is None:
+            cond = threading.Condition(threading.Lock())
+            store = collections.defaultdict(set)
+            self._configured_target_cond = cond
+            self._configured_targets = store
+        return cond, store
+
+    def _mark_target_configured(
+        self, profile_id: str, launch_id: Optional[str], target_id: Optional[str]
+    ) -> None:
+        if not target_id:
+            return
+        if launch_id and self.cdp_health.current_launch_id(profile_id) != launch_id:
+            return
+        cond, store = self._configured_state()
+        with cond:
+            store[str(profile_id)].add(str(target_id))
+            cond.notify_all()
+
+    def _discard_configured_target(
+        self, profile_id: str, target_id: Optional[str] = None
+    ) -> None:
+        cond = getattr(self, "_configured_target_cond", None)
+        store = getattr(self, "_configured_targets", None)
+        if cond is None or store is None:
+            return
+        with cond:
+            if target_id is None:
+                store.pop(str(profile_id), None)
+            else:
+                bucket = store.get(str(profile_id))
+                if bucket is not None:
+                    bucket.discard(str(target_id))
+            cond.notify_all()
+
+    def wait_for_target_configured(
+        self, profile_id: str, target_id: str, timeout: float = 6.0
+    ) -> bool:
+        """Block until configure_page finishes injecting stealth & UA overrides on target_id."""
+        if not target_id:
+            return False
+        cond, store = self._configured_state()
+        pid = str(profile_id)
+        tid = str(target_id)
+        deadline = time.monotonic() + max(0.05, float(timeout))
+        with cond:
+            while tid not in store.get(pid, ()):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                if not self.cdp_guard(pid)["ok"]:
+                    return False
+                cond.wait(timeout=min(0.25, remaining))
+            return True
 
     def mark_detached(self, profile_id: str) -> Dict[str, Any]:
         """Persist the detached (no-CDP-owner) state before the CLI exits."""
@@ -587,6 +656,7 @@ class BrowserLauncher:
         self._cdp_ready_events.pop(profile_id, None)
         self._core_verified_events.pop(profile_id, None)
         self._navigation_events.pop(profile_id, None)
+        self._discard_configured_target(profile_id)
 
     def _clear_process(self, profile_id, *, expected_record=None):
         with self._launch_locks[profile_id]:
@@ -647,6 +717,7 @@ class BrowserLauncher:
         self._cdp_ready_events.pop(profile_id, None)
         self._core_verified_events.pop(profile_id, None)
         self._navigation_events.pop(profile_id, None)
+        self._discard_configured_target(profile_id)
         release_port(requested)
         if active and active != requested:
             release_port(active)
@@ -1069,7 +1140,9 @@ class BrowserLauncher:
         proc = None
         try:
             diagnostic.update(stage="verify_and_spawn", error=None)
-            with hold_trusted_browser(browser_path):
+            with hold_trusted_browser(
+                browser_path, custom_manifest_path=self._custom_cores_manifest_path()
+            ):
                 proc = subprocess.Popen(
                     [
                     browser_path,
@@ -1441,6 +1514,7 @@ class BrowserLauncher:
         proxy_auth: Optional[tuple] = None,
         fp_override: Optional[Any] = None,
         launch_id: Optional[str] = None,
+        cpp_engine: Optional[str] = None,
     ):
         """Inject stealth into every page/worker/OOPIF target via CDP."""
         import websockets
@@ -1462,8 +1536,16 @@ class BrowserLauncher:
         # JS and the verification probe must see the same values.
         fp = fp_override or profile.fingerprint
         native_brands = self._native_brands_cache.get(fp.browser_version)
-        stealth_js = get_stealth_script(fp, native_brands=native_brands)
-        worker_js = get_worker_stealth_script(fp, native_brands=native_brands)
+        if cpp_engine:
+            stealth_js = get_stealth_script(
+                fp, native_brands=native_brands, cpp_engine=cpp_engine
+            )
+            worker_js = get_worker_stealth_script(
+                fp, native_brands=native_brands, cpp_engine=cpp_engine
+            )
+        else:
+            stealth_js = get_stealth_script(fp, native_brands=native_brands)
+            worker_js = get_worker_stealth_script(fp, native_brands=native_brands)
 
         # Wait for Chrome's DevTools endpoint. DevToolsActivePort is more
         # reliable than the requested port because Chrome may choose another.
@@ -1614,18 +1696,76 @@ class BrowserLauncher:
                     finally:
                         pending_responses.pop(current_id, None)
 
-                def spawn_target_task(coro, session_id, target_id):
-                    """Run target setup without leaking expected close races as task tracebacks."""
-                    async def guarded():
+                expected_close_markers = (
+                    "Cannot find default execution context",
+                    "Session closed",
+                    "No target with given id",
+                    "Target closed",
+                    "Inspected target navigated or closed",
+                    "Session with given id not found",
+                )
+
+                def spawn_protocol_reply(coro, cleanup_session=None, cleanup_target=None):
+                    """Run a one-shot protocol reply without leaking unretrieved close/timeout exceptions."""
+                    async def guarded_reply():
                         try:
                             await coro
                         except Exception:
+                            if cleanup_session:
+                                attached_sessions.discard(cleanup_session)
+                            if cleanup_target and target_owners.get(cleanup_target) == cleanup_session:
+                                target_owners.pop(cleanup_target, None)
+
+                    task = asyncio.create_task(guarded_reply())
+                    target_tasks.add(task)
+                    task.add_done_callback(target_tasks.discard)
+                    return task
+
+                def spawn_target_task(coro, session_id, target_id):
+                    """Run target setup without leaking expected close races as task tracebacks."""
+                    quarantined_state = {"isolated": False}
+
+                    async def guarded():
+                        try:
+                            await coro
+                        except Exception as setup_exc:
                             # Strict launches must not run a target whose setup
                             # failed. Close only that target; if closing fails,
                             # retain its pause and report degraded health.
+                            stopping_now = bool(
+                                launch_id and self.cdp_health.is_stopping(profile.id)
+                            )
                             try:
                                 if fp.verification_mode == "strict":
-                                    await send("Target.closeTarget", {"targetId": target_id})
+                                    if target_id:
+                                        try:
+                                            close_res = await send(
+                                                "Target.closeTarget", {"targetId": target_id}
+                                            )
+                                            if close_res.get("success") is True:
+                                                quarantined_state["isolated"] = True
+                                        except Exception as close_exc:
+                                            if any(
+                                                marker in str(close_exc)
+                                                for marker in expected_close_markers
+                                            ):
+                                                quarantined_state["isolated"] = True
+                                            else:
+                                                raise
+                                    if (
+                                        not quarantined_state["isolated"]
+                                        and target_id
+                                        and self._cdp_process_alive(profile.id)
+                                        and not stopping_now
+                                    ):
+                                        targets_res = await send("Target.getTargets")
+                                        live_ids = {
+                                            str(info.get("targetId") or "")
+                                            for info in (targets_res or {}).get("targetInfos") or []
+                                            if isinstance(info, dict)
+                                        }
+                                        if str(target_id) not in live_ids:
+                                            quarantined_state["isolated"] = True
                                 else:
                                     if session_id in worker_pauses:
                                         await send("Debugger.disable", session_id=session_id)
@@ -1633,10 +1773,37 @@ class BrowserLauncher:
                                         "Runtime.runIfWaitingForDebugger",
                                         session_id=session_id,
                                     )
-                            except Exception:
-                                pass
+                            except Exception as cleanup_exc:
+                                if any(
+                                    marker in str(cleanup_exc)
+                                    for marker in expected_close_markers
+                                ):
+                                    quarantined_state["isolated"] = True
+                                elif (
+                                    fp.verification_mode != "strict"
+                                    and isinstance(setup_exc, asyncio.TimeoutError)
+                                    and target_id
+                                    and self._cdp_process_alive(profile.id)
+                                    and not stopping_now
+                                ):
+                                    try:
+                                        targets_res = await send("Target.getTargets")
+                                        live_ids = {
+                                            str(info.get("targetId") or "")
+                                            for info in (targets_res or {}).get("targetInfos") or []
+                                            if isinstance(info, dict)
+                                        }
+                                        if str(target_id) not in live_ids:
+                                            quarantined_state["isolated"] = True
+                                    except Exception:
+                                        pass
                             finally:
                                 worker_pauses.pop(session_id, None)
+                                if quarantined_state["isolated"]:
+                                    attached_sessions.discard(session_id)
+                                    if target_id and target_owners.get(target_id) == session_id:
+                                        target_owners.pop(target_id, None)
+                                    self._discard_configured_target(profile.id, target_id)
                             raise
 
                     task = asyncio.create_task(guarded())
@@ -1653,16 +1820,16 @@ class BrowserLauncher:
                         if exc is None:
                             return
                         text = str(exc)
-                        expected = (
-                            "Cannot find default execution context",
-                            "Session closed",
-                            "No target with given id",
-                            "Target closed",
-                            "Inspected target navigated or closed",
-                            "Session with given id not found",
-                        )
                         stopping = launch_id and self.cdp_health.is_stopping(profile.id)
-                        if any(marker in text for marker in expected):
+                        if any(marker in text for marker in expected_close_markers):
+                            return
+                        if quarantined_state["isolated"]:
+                            log.info(
+                                "[Launcher] Đã cô lập target lỗi cấu hình CDP (%s): %s: %s",
+                                target_id,
+                                type(exc).__name__,
+                                text,
+                            )
                             return
                         if isinstance(exc, asyncio.TimeoutError):
                             # A timeout while the target is gone is a normal
@@ -1818,6 +1985,9 @@ class BrowserLauncher:
                         )
                     await send(
                         "Runtime.runIfWaitingForDebugger", session_id=session_id
+                    )
+                    self._mark_target_configured(
+                        profile.id, launch_id, target_info.get("targetId")
                     )
                     # R4: signal readiness only after the document is unpaused.
                     # The main thread can now verify core values on the initial
@@ -2075,6 +2245,7 @@ class BrowserLauncher:
                         for target_id, owner in list(target_owners.items()):
                             if owner == detached:
                                 target_owners.pop(target_id, None)
+                                self._discard_configured_target(profile.id, target_id)
                         asyncio.create_task(sync_session_tabs(0.35))
                         return
 
@@ -2117,18 +2288,20 @@ class BrowserLauncher:
                                 target_info.get("targetId"),
                             )
                         else:
-                            asyncio.create_task(
+                            spawn_protocol_reply(
                                 send(
                                     "Runtime.runIfWaitingForDebugger",
                                     session_id=attached_id,
-                                )
+                                ),
+                                cleanup_session=attached_id,
+                                cleanup_target=target_id,
                             )
 
                     elif method == "Fetch.authRequired":
                         request_id = params.get("requestId")
                         challenge = params.get("authChallenge", {})
                         if request_id:
-                            asyncio.create_task(
+                            spawn_protocol_reply(
                                 send(
                                     "Fetch.continueWithAuth",
                                     {
@@ -2144,7 +2317,7 @@ class BrowserLauncher:
                     elif method == "Fetch.requestPaused":
                         request_id = params.get("requestId")
                         if request_id:
-                            asyncio.create_task(
+                            spawn_protocol_reply(
                                 send(
                                     "Fetch.continueRequest",
                                     {"requestId": request_id},
@@ -2298,6 +2471,8 @@ class BrowserLauncher:
                 task.cancel()
             if target_tasks:
                 await asyncio.gather(*target_tasks, return_exceptions=True)
+            if not launch_id or self.cdp_health.current_launch_id(profile.id) == launch_id:
+                self._discard_configured_target(profile.id)
             if session is not None:
                 session.mark_closed()
             if (
@@ -2323,6 +2498,7 @@ class BrowserLauncher:
         proxy_auth: Optional[tuple] = None,
         fp_override: Optional[Any] = None,
         launch_id: Optional[str] = None,
+        cpp_engine: Optional[str] = None,
     ):
         def run_loop():
             asyncio.run(
@@ -2334,6 +2510,7 @@ class BrowserLauncher:
                     proxy_auth,
                     fp_override,
                     launch_id=launch_id,
+                    cpp_engine=cpp_engine,
                 )
             )
 
@@ -2519,10 +2696,17 @@ class BrowserLauncher:
                 return {"success": False, "code": "INVALID_PROXY_CONFIG", "error": proxy_error}
 
             try:
-                verify_browser_executable(browser_path)
+                attestation = verify_browser_executable(
+                    browser_path, custom_manifest_path=self._custom_cores_manifest_path()
+                )
             except BrowserTrustError as exc:
                 return {"success": False, "code": exc.code, "error": str(exc),
                         "browser_started": False, "navigation_allowed": False}
+            cpp_engine = (
+                attestation.engine
+                if getattr(attestation, "engine", "chromium-branded") != "chromium-branded"
+                else None
+            )
 
             profile_dir = self.manager.get_profile_dir(profile_id)
             user_data_dir = os.path.join(profile_dir, "user_data")
@@ -2617,6 +2801,8 @@ class BrowserLauncher:
             # proxy is actually configured. The old unconditional flags changed
             # behaviour even for direct connections and ignored webrtc_mode.
             args.extend(build_webrtc_flags(profile, fp))
+            if cpp_engine:
+                args.extend(build_cpp_engine_flags(cpp_engine, fp))
             # Do not disable WebGPU for every spoofed macOS/Linux profile. Real
             # modern Chrome exposes WebGPU on all desktop platforms; the JS
             # adapter hook is responsible for masking host-specific details.
@@ -2654,7 +2840,13 @@ class BrowserLauncher:
             # Khởi chạy tiến trình Browser
             proc = None
             try:
-                with hold_trusted_browser(browser_path):
+                with hold_trusted_browser(
+                    browser_path, custom_manifest_path=self._custom_cores_manifest_path()
+                ) as launch_attestation:
+                    if getattr(launch_attestation, "engine", "chromium-branded") != getattr(
+                        attestation, "engine", "chromium-branded"
+                    ):
+                        raise BrowserTrustError("Loại engine của browser đã đổi trước khi khởi chạy.")
                     proc = subprocess.Popen(
                         args,
                         stdout=subprocess.DEVNULL,
@@ -2728,15 +2920,27 @@ class BrowserLauncher:
                                 self._native_brands_cache[fp.browser_version] = measured
 
                 # Khởi chạy luồng gắn kết CDP để tiêm script và điều hướng
-                self._start_cdp_thread(
-                    port,
-                    profile,
-                    target_url,
-                    user_data_dir,
-                    proxy_auth,
-                    fp,
-                    launch_id=launch_id,
-                )
+                if cpp_engine:
+                    self._start_cdp_thread(
+                        port,
+                        profile,
+                        target_url,
+                        user_data_dir,
+                        proxy_auth,
+                        fp,
+                        launch_id=launch_id,
+                        cpp_engine=cpp_engine,
+                    )
+                else:
+                    self._start_cdp_thread(
+                        port,
+                        profile,
+                        target_url,
+                        user_data_dir,
+                        proxy_auth,
+                        fp,
+                        launch_id=launch_id,
+                    )
 
                 # Chờ CDP tiêm stealth thành công vào trang (tối đa 6.0 giây)
                 stealth_ok = cdp_ready.wait(timeout=6.0)
@@ -2774,7 +2978,11 @@ class BrowserLauncher:
                         "navigation_allowed": False, "cleanup_failed": not cleanup_ok,
                         "cleanup_diagnostics": cleanup_diagnostics,
                         "verification": verification, "launched_now": True,
-                        "fingerprint_capabilities": get_stealth_capabilities(fp),
+                        "fingerprint_capabilities": (
+                            get_stealth_capabilities(fp, cpp_engine=cpp_engine)
+                            if cpp_engine
+                            else get_stealth_capabilities(fp)
+                        ),
                         "cdp_health": self.cdp_health.snapshot(profile_id),
                     }
 
@@ -2845,8 +3053,16 @@ class BrowserLauncher:
                     and runtime_persisted
                     and final_health.get("state") == STATE_HEALTHY
                 )
-                capabilities = get_stealth_capabilities(fp)
-                if fp.fingerprint_algorithm_version == 2:
+                capabilities = (
+                    get_stealth_capabilities(fp, cpp_engine=cpp_engine)
+                    if cpp_engine
+                    else get_stealth_capabilities(fp)
+                )
+                if cpp_engine == "fingerprint-chromium":
+                    launch_warnings.append(
+                        "C++ core (fingerprint-chromium): phân tách phần cứng ở tầng C++ được kích hoạt theo seed của profile."
+                    )
+                elif fp.fingerprint_algorithm_version == 2:
                     launch_warnings.append(
                         "Fingerprint v2: chỉ Canvas 2D có phân tách; WebGL/audio/fonts/media/WebGPU dùng giá trị native chung của máy."
                     )
@@ -2870,6 +3086,8 @@ class BrowserLauncher:
                     "profile_id": profile_id,
                     "port": actual_port,
                     "pid": proc.pid,
+                    "launch_id": launch_id,
+                    "owner_instance": self.instance_id,
                     "ws_endpoint": f"http://127.0.0.1:{actual_port}",
                     "cdp_ready": cdp_ready_final,
                     "page_ready": page_ready,
@@ -3135,6 +3353,116 @@ class BrowserLauncher:
             )
             return False
         return self._open_tab_impl(profile_id, url)
+
+    def close_transient_tab(self, profile_id: str, target_id: str) -> bool:
+        """Đóng tab tạm do automation mở và gỡ khỏi TRANSIENT_TARGET_IDS."""
+        tid = str(target_id or "").strip()
+        if not tid:
+            return False
+        TRANSIENT_TARGET_IDS.discard(tid)
+        self._discard_configured_target(profile_id, tid)
+        port = self.active_ports.get(profile_id)
+        if not port:
+            record = self._runtime_store.get(profile_id) or {}
+            port = record.get("port")
+        if not port:
+            return False
+        for method in ("PUT", "GET"):
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{int(port)}/json/close/{tid}", method=method
+                )
+                with open_loopback(req, timeout=3) as resp:
+                    if resp.status in (200, 201, 204):
+                        return True
+            except Exception:
+                continue
+        return False
+
+    def open_transient_tab(
+        self, profile_id: str, *, timeout: float = 8.0
+    ) -> Dict[str, Any]:
+        """Mở tab tạm about:blank và đợi stealth/UA/timezone hoàn tất trước khi trả ws_url.
+
+        Đảm bảo công cụ bên ngoài (ví dụ tool bình luận) không bao giờ gọi
+        Page.navigate trước khi configure_page đặt xong Network.setUserAgentOverride
+        và Page.addScriptToEvaluateOnNewDocument, cũng không bao giờ mở tab trên
+        profile đang degraded hoặc detached.
+        """
+        health = self.require_cdp(profile_id)
+        port = self.active_ports.get(profile_id)
+        if not port:
+            record = self._runtime_store.get(profile_id) or {}
+            port = record.get("port")
+            if port:
+                self.active_ports[profile_id] = int(port)
+        if not port:
+            raise CdpUnavailable("NOT_RUNNING", "Hãy mở profile trước khi tạo tab tạm.", health)
+
+        deadline = time.monotonic() + max(1.0, float(timeout))
+        info: Dict[str, Any] = {}
+        for method in ("PUT", "GET"):
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{int(port)}/json/new?about%3Ablank", method=method
+                )
+                with open_loopback(req, timeout=3) as resp:
+                    raw = resp.read().decode("utf-8", "replace")
+                    info = json.loads(raw) if raw.strip() else {}
+                if info.get("id"):
+                    break
+            except Exception:
+                continue
+
+        target_id = str(info.get("id") or "").strip()
+        if not target_id:
+            raise CdpUnavailable(
+                "CDP_UNHEALTHY",
+                "Chrome CDP không trả về target_id khi mở tab tạm.",
+                self.cdp_health_snapshot(profile_id),
+            )
+        TRANSIENT_TARGET_IDS.add(target_id)
+        try:
+            ws_url = info.get("webSocketDebuggerUrl")
+            while time.monotonic() < deadline and not ws_url:
+                try:
+                    with open_loopback(
+                        f"http://127.0.0.1:{int(port)}/json/list", timeout=2
+                    ) as resp:
+                        targets = json.loads(resp.read().decode("utf-8", "replace"))
+                    for item in targets or []:
+                        if isinstance(item, dict) and item.get("id") == target_id and item.get("webSocketDebuggerUrl"):
+                            ws_url = item["webSocketDebuggerUrl"]
+                            break
+                except Exception:
+                    pass
+                if not ws_url:
+                    time.sleep(0.1)
+
+            remaining = max(0.2, deadline - time.monotonic())
+            configured = bool(ws_url) and self.wait_for_target_configured(
+                profile_id, target_id, timeout=remaining
+            )
+            guard = self.cdp_guard(profile_id)
+            if not ws_url or not configured or not guard["ok"]:
+                raise CdpUnavailable(
+                    guard["code"] or "CDP_UNHEALTHY",
+                    guard["message"] or "Tab tạm chưa xác nhận hoàn tất cấu hình stealth; đã đóng tab.",
+                    guard["health"],
+                )
+            return {
+                "success": True,
+                "profile_id": profile_id,
+                "port": int(port),
+                "target_id": target_id,
+                "ws_url": str(ws_url),
+                "launch_id": (guard["health"] or {}).get("launch_id"),
+                "owner_instance": (guard["health"] or {}).get("owner_instance"),
+                "cdp_health": guard["health"],
+            }
+        except BaseException:
+            self.close_transient_tab(profile_id, target_id)
+            raise
 
     def export_cookies(self, profile_id: str) -> List[Dict[str, Any]]:
         """Đọc cookies trực tiếp từ profile đang chạy, không tạo bản sao JSON trên đĩa."""

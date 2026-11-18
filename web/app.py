@@ -2312,7 +2312,12 @@ async def bulk_create_profiles(req: BulkCreateRequest):
 
 
 @app.post("/api/profiles/{profile_id}/start")
-async def start_profile(profile_id: str, url: Optional[str] = None, force: bool = False):
+async def start_profile(
+    profile_id: str,
+    url: Optional[str] = None,
+    force: bool = False,
+    require_healthy: bool = False,
+):
     p = profile_manager.get_profile(profile_id)
     if not p:
         raise HTTPException(status_code=404, detail="Profile không tồn tại")
@@ -2361,9 +2366,64 @@ async def start_profile(profile_id: str, url: Optional[str] = None, force: bool 
                 },
             )
         raise HTTPException(status_code=500, detail=res.get("error", "Lỗi khởi chạy"))
+    if require_healthy and (
+        res.get("degraded")
+        or res.get("cdp_ready") is False
+        or (res.get("cdp_health") or {}).get("state") != "healthy"
+    ):
+        cleanup = None
+        if res.get("launched_now") is True:
+            owned_launch_id = res.get("launch_id") or (res.get("cdp_health") or {}).get("launch_id")
+            if owned_launch_id:
+                cleanup = await asyncio.to_thread(
+                    launcher.stop,
+                    profile_id,
+                    expected_launch_id=owned_launch_id,
+                    expected_owner_instance=launcher.instance_id,
+                )
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "code": res.get("code") or "CDP_UNHEALTHY",
+                "detail": (
+                    res.get("warning")
+                    or "Profile đã mở nhưng stealth/CDP chưa được xác minh khỏe; từ chối cho automation."
+                ),
+                "cdp_health": res.get("cdp_health"),
+                "cleanup": cleanup,
+            },
+        )
     if gate and gate.status in ("warning", "overridden", "unverified"):
         res["gate"] = gate.as_dict()
     return res
+
+
+@app.post("/api/profiles/{profile_id}/tabs/transient")
+async def open_transient_profile_tab(profile_id: str, timeout: float = 8.0):
+    """Mở tab tạm cho automation ngoài sau khi xác nhận CDP khỏe & đã tiêm stealth."""
+    p = profile_manager.get_profile(profile_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Profile không tồn tại")
+    bounded_timeout = max(1.0, min(20.0, float(timeout or 8.0)))
+    try:
+        return await asyncio.to_thread(
+            launcher.open_transient_tab, profile_id, timeout=bounded_timeout
+        )
+    except CdpUnavailable as exc:
+        return _cdp_conflict_response(exc)
+
+
+@app.delete("/api/profiles/{profile_id}/tabs/transient/{target_id}")
+async def close_transient_profile_tab(profile_id: str, target_id: str):
+    """Đóng tab tạm do automation ngoài tạo mà không ảnh hưởng tab người dùng."""
+    p = profile_manager.get_profile(profile_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Profile không tồn tại")
+    closed = await asyncio.to_thread(
+        launcher.close_transient_tab, profile_id, target_id
+    )
+    return {"success": True, "closed": bool(closed), "target_id": target_id}
 
 
 @app.post("/api/profiles/{profile_id}/stop")

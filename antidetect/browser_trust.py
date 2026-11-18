@@ -1,7 +1,11 @@
 """Offline Windows browser attestation without executing the candidate binary.
 
-Trust is limited to signed Google Chrome and Microsoft Edge. The file handle
-denies write/delete sharing for the whole context; callers should hold it across
+Default trust requires Authenticode-signed Google Chrome or Microsoft Edge.
+Optionally, a caller may pass a local non-reparse custom-core manifest path
+(`trusted_cores.json`) pinning exact local executables by full SHA-256 (for
+C++ antidetect cores such as Fingerprint-Chromium). Profile imports cannot
+supply executable paths or modify the local manifest. The file handle denies
+write/delete sharing for the whole context; callers should hold it across
 CreateProcess. This is not isolation from hostile code with the same OS rights.
 """
 from collections import OrderedDict
@@ -10,6 +14,7 @@ import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 import re
 import stat
@@ -34,6 +39,7 @@ class BrowserAttestation:
     file_identity: tuple
     certificate_sha256: str
     verification_mode: str = "offline_authenticode_current_revocation_unverified"
+    engine: str = "chromium-branded"
 
 
 _CACHE = OrderedDict()
@@ -43,33 +49,121 @@ _ALLOWED = {
     "chrome.exe": ("Google LLC", {"Google Chrome", "Google Chrome for Testing"}),
     "msedge.exe": ("Microsoft Corporation", {"Microsoft Edge"}),
 }
+_CUSTOM_ALLOWED_BASENAMES = {"chrome.exe", "msedge.exe", "chromium.exe"}
+_CUSTOM_ENGINES = {"fingerprint-chromium", "custom-chromium"}
+_MAX_MANIFEST_BYTES = 256 * 1024
 
 
-def _checked_path(path):
+def _checked_local_path_syntax(path, label="Browser"):
     if not isinstance(path, (str, os.PathLike)):
-        raise BrowserTrustError("Đường dẫn browser không hợp lệ.")
+        raise BrowserTrustError(f"Đường dẫn {label.lower()} không hợp lệ.")
     raw = os.fspath(path)
     if (not isinstance(raw, str) or not re.match(r"^[A-Za-z]:[\\/]", raw)
             or raw.startswith(("\\\\", "//")) or ":" in raw[2:]):
-        raise BrowserTrustError("Browser phải là file local trên ổ đĩa Windows; không hỗ trợ UNC, device path hoặc ADS.")
-    absolute = os.path.abspath(raw)
+        raise BrowserTrustError(
+            f"{label} phải là file local trên ổ đĩa Windows; không hỗ trợ UNC, device path hoặc ADS."
+        )
+    return os.path.abspath(raw)
+
+
+def _reject_reparse_ancestors(absolute, *, allow_missing_leaf=False, label="browser"):
     cursor = absolute
-    try:
-        while True:
+    first = True
+    while True:
+        try:
             value = os.lstat(cursor)
-            if stat.S_ISLNK(value.st_mode) or getattr(value, "st_file_attributes", 0) & 0x400:
-                raise BrowserTrustError("Đường dẫn browser chứa liên kết hoặc reparse point.")
-            parent = os.path.dirname(cursor)
-            if parent == cursor:
-                break
-            cursor = parent
+        except FileNotFoundError:
+            if allow_missing_leaf and first:
+                parent = os.path.dirname(cursor)
+                if parent == cursor:
+                    return False
+                cursor = parent
+                first = False
+                continue
+            if allow_missing_leaf:
+                parent = os.path.dirname(cursor)
+                if parent == cursor:
+                    return False
+                cursor = parent
+                continue
+            raise BrowserTrustError(f"Không đọc được {label} hoặc thư mục chứa {label}.") from None
+        except OSError:
+            raise BrowserTrustError(f"Không đọc được {label} hoặc thư mục chứa {label}.") from None
+        first = False
+        if stat.S_ISLNK(value.st_mode) or getattr(value, "st_file_attributes", 0) & 0x400:
+            raise BrowserTrustError(f"Đường dẫn {label} chứa liên kết hoặc reparse point.")
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            break
+        cursor = parent
+    return True
+
+
+def _checked_path(path, *, allow_custom_basenames=False):
+    absolute = _checked_local_path_syntax(path, "Browser")
+    _reject_reparse_ancestors(absolute, allow_missing_leaf=False, label="browser")
+    try:
         if not stat.S_ISREG(os.stat(absolute, follow_symlinks=False).st_mode):
             raise BrowserTrustError("Browser không phải file thông thường.")
+    except BrowserTrustError:
+        raise
     except OSError:
         raise BrowserTrustError("Không đọc được browser hoặc thư mục chứa browser.") from None
-    if os.path.basename(absolute).lower() not in _ALLOWED:
+    allowed_names = _CUSTOM_ALLOWED_BASENAMES if allow_custom_basenames else _ALLOWED
+    if os.path.basename(absolute).lower() not in allowed_names:
         raise BrowserTrustError("Chỉ hỗ trợ Chrome/Edge có chữ ký hợp lệ; Chromium/custom unsigned chưa được tin cậy.")
     return os.path.realpath(absolute)
+
+
+def _load_pinned_custom_core(custom_manifest_path, checked_exe_path):
+    if custom_manifest_path is None:
+        return None
+    manifest_abs = _checked_local_path_syntax(custom_manifest_path, "Manifest")
+    exists = _reject_reparse_ancestors(manifest_abs, allow_missing_leaf=True, label="manifest")
+    if not exists or not os.path.exists(manifest_abs):
+        return None
+    try:
+        st = os.stat(manifest_abs, follow_symlinks=False)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_MANIFEST_BYTES:
+            raise BrowserTrustError("Manifest custom browser core không hợp lệ.")
+        with open(manifest_abs, "r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except BrowserTrustError:
+        raise
+    except (OSError, ValueError, TypeError):
+        raise BrowserTrustError("Không đọc được manifest custom browser core.") from None
+    if (not isinstance(payload, dict) or payload.get("schema") != 1
+            or not isinstance(payload.get("cores"), list)):
+        raise BrowserTrustError("Cấu trúc manifest custom browser core không hợp lệ.")
+    target_norm = os.path.normcase(checked_exe_path)
+    matched = None
+    for entry in payload["cores"]:
+        if not isinstance(entry, dict):
+            raise BrowserTrustError("Mục cấu hình trong manifest custom browser core không hợp lệ.")
+        entry_abs = _checked_local_path_syntax(entry.get("path"), "Custom browser")
+        if os.path.basename(entry_abs).lower() not in _CUSTOM_ALLOWED_BASENAMES:
+            raise BrowserTrustError("Tên file custom browser core không được phép.")
+        sha256 = entry.get("sha256")
+        engine = entry.get("engine")
+        version = entry.get("version")
+        product = entry.get("product") or engine
+        if (not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256)
+                or engine not in _CUSTOM_ENGINES
+                or not isinstance(version, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", version)
+                or not isinstance(product, str) or not 1 <= len(product.strip()) <= 120):
+            raise BrowserTrustError("Metadata trong manifest custom browser core không hợp lệ.")
+        if os.path.normcase(entry_abs) == target_norm or (
+            os.path.exists(entry_abs)
+            and os.path.normcase(os.path.realpath(entry_abs)) == target_norm
+        ):
+            _reject_reparse_ancestors(entry_abs, allow_missing_leaf=False, label="browser")
+            matched = {
+                "sha256": sha256.lower(),
+                "engine": engine,
+                "version": version,
+                "product": product.strip(),
+            }
+    return matched
 
 
 class _FileInfo(ctypes.Structure):
@@ -269,13 +363,32 @@ def _version_info(path):
     return result
 
 
-def _attest(path, stream, handle, identity):
+def _attest(path, stream, handle, identity, *, custom_manifest_path=None):
     _validate_pe(stream)
     stream.seek(0)
     hasher = hashlib.sha256()
     for block in iter(lambda: stream.read(1024 * 1024), b""):
         hasher.update(block)
     digest = hasher.hexdigest()
+    pinned = _load_pinned_custom_core(custom_manifest_path, path)
+    if pinned is not None:
+        if digest.lower() != pinned["sha256"]:
+            raise BrowserTrustError("SHA-256 của custom browser core không khớp bản ghim local.")
+        return BrowserAttestation(
+            path,
+            digest,
+            "Local SHA-256 Pinned Core",
+            pinned["version"],
+            pinned["product"],
+            os.path.basename(path),
+            identity,
+            "",
+            verification_mode="local_sha256_pinned_custom_core",
+            engine=pinned["engine"],
+        )
+    basename = os.path.basename(path).lower()
+    if basename not in _ALLOWED:
+        raise BrowserTrustError("Chỉ hỗ trợ Chrome/Edge có chữ ký hợp lệ; Chromium/custom unsigned chưa được tin cậy.")
     key = (os.path.normcase(path), identity, digest)
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
@@ -284,7 +397,6 @@ def _attest(path, stream, handle, identity):
             return cached[1]
     publisher, certificate = _verified_signer(path, handle)
     metadata = _version_info(path)
-    basename = os.path.basename(path).lower()
     expected_publisher, products = _ALLOWED[basename]
     if (publisher != expected_publisher or metadata["CompanyName"] != expected_publisher
             or metadata["OriginalFilename"].lower() != basename or metadata["ProductName"] not in products
@@ -300,7 +412,7 @@ def _attest(path, stream, handle, identity):
 
 
 @contextmanager
-def hold_trusted_browser(path):
+def hold_trusted_browser(path, *, custom_manifest_path=None):
     """Validate the candidate and retain its write/delete-denying handle.
 
     Hold this context through subprocess.Popen/CreateProcess. The launcher must
@@ -308,11 +420,12 @@ def hold_trusted_browser(path):
     """
     if sys.platform != "win32":
         raise BrowserTrustError("Browser trust hiện chỉ được nghiệm thu trên Windows.")
-    checked = _checked_path(path)
+    allow_custom = custom_manifest_path is not None
+    checked = _checked_path(path, allow_custom_basenames=allow_custom)
     try:
         with _locked_file(checked) as (stream, handle, identity):
-            result = _attest(checked, stream, handle, identity)
-            if _checked_path(path) != checked:
+            result = _attest(checked, stream, handle, identity, custom_manifest_path=custom_manifest_path)
+            if _checked_path(path, allow_custom_basenames=allow_custom) != checked:
                 raise BrowserTrustError("Đường dẫn browser đổi trong lúc xác minh.")
             yield result
     except BrowserTrustError:
@@ -321,7 +434,7 @@ def hold_trusted_browser(path):
         raise BrowserTrustError("Không xác minh được executable browser; hãy chọn bản Chrome/Edge có chữ ký hợp lệ.") from None
 
 
-def verify_browser_executable(path):
+def verify_browser_executable(path, *, custom_manifest_path=None):
     """Return an immutable attestation; execution requires a new held context."""
-    with hold_trusted_browser(path) as result:
+    with hold_trusted_browser(path, custom_manifest_path=custom_manifest_path) as result:
         return result
