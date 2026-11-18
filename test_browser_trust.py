@@ -366,6 +366,14 @@ def test_native_brand_probe_closes_owned_socket_on_success_or_read_failure_and_r
     assert [message["method"] for message in messages] == ["Page.navigate", "Runtime.evaluate", "Browser.close"]
     assert sockets == [targets[0]["webSocketDebuggerUrl"]], "Cleanup must use the existing owned socket"
     assert observed_directories == [str(probe_directory)]
+    spawned_args = spawn.call_args[0][0]
+    for flag in (
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-domain-reliability",
+        "--disable-sync",
+    ):
+        assert flag in spawned_args
     proc.wait.assert_called_once_with(timeout=5)
     proc.terminate.assert_not_called()
     proc.kill.assert_not_called()

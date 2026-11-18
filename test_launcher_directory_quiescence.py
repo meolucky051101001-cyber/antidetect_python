@@ -140,3 +140,27 @@ def test_graceful_close_waits_and_skips_native_termination(directory_launcher, m
     assert launcher._runtime_store.get(profile_id) is None
     assert profile_id not in launcher.active_processes
     assert sentinel.exists()
+
+
+def test_default_directory_idle_tolerates_six_second_child_exit_and_fails_past_budget(tmp_path, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(launcher_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(launcher_module.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    def delayed_exit(_directory):
+        clock[0] += 2.8
+        return {424243} if clock[0] < 106.0 else set()
+
+    monkeypatch.setattr(launcher_module, "browser_pids_using_dir", delayed_exit)
+    assert BrowserLauncher._wait_directory_idle(str(tmp_path)) is True
+    assert 106.0 <= clock[0] < 115.0
+
+    clock[0] = 200.0
+
+    def stuck_child(_directory):
+        clock[0] += 3.0
+        return {424243}
+
+    monkeypatch.setattr(launcher_module, "browser_pids_using_dir", stuck_child)
+    assert BrowserLauncher._wait_directory_idle(str(tmp_path)) is False
+    assert clock[0] >= 215.0

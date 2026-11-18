@@ -593,7 +593,7 @@ class BrowserLauncher:
             return self._clear_process_locked(profile_id, expected_record=expected_record)
 
     @staticmethod
-    def _wait_directory_idle(user_data_dir, timeout=5.0):
+    def _wait_directory_idle(user_data_dir, timeout=15.0):
         """A parent exit alone does not prove Chromium children have stopped."""
         if not user_data_dir:
             return True
@@ -1066,6 +1066,10 @@ class BrowserLauncher:
                     f"--remote-debugging-port={port}",
                     "--no-first-run",
                     "--no-default-browser-check",
+                    "--disable-background-networking",
+                    "--disable-component-update",
+                    "--disable-domain-reliability",
+                    "--disable-sync",
                     "about:blank",
                     ],
                     stdout=subprocess.DEVNULL,
