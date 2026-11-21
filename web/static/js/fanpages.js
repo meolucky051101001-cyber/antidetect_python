@@ -501,12 +501,12 @@ function renderFanpageTable() {
 
         tr.innerHTML = `
             <td class="py-3 px-4 align-top">
-                <input type="checkbox" ${isChecked} onchange="toggleSelectPage('${safeInternalId}', this.checked)" class="accent-amber-500 rounded cursor-pointer">
+                <input type="checkbox" ${isChecked} ${actionAttrs('change', 'toggleSelectPage', item.internal_page_id, '$checked')} class="accent-amber-500 rounded cursor-pointer">
             </td>
             <td class="py-3 px-4 align-top">
                 <div class="space-y-1">
                     <div class="flex flex-wrap items-center gap-1.5">
-                        <button type="button" onclick="openPageDetailModal('${safeInternalId}')" class="text-sm font-semibold text-white hover:text-amber-400 transition text-left">
+                        <button type="button" ${actionAttrs('click', 'openPageDetailModal', item.internal_page_id)} class="text-sm font-semibold text-white hover:text-amber-400 transition text-left">
                             ${escapeHtml(item.page_name || '(Chưa có tên)')}
                         </button>
                         ${idBadge}
@@ -524,10 +524,10 @@ function renderFanpageTable() {
             <td class="py-3 px-4 align-top">${qualityConnHtml}</td>
             <td class="py-3 px-4 align-top text-right">
                 <div class="inline-flex items-center justify-end space-x-1.5">
-                    <button type="button" onclick="openPageDetailModal('${safeInternalId}')" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition" title="Xem chi tiết, gắn tag, ghi chú và lịch sử">
+                    <button type="button" ${actionAttrs('click', 'openPageDetailModal', item.internal_page_id)} class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition" title="Xem chi tiết, gắn tag, ghi chú và lịch sử">
                         Chi tiết
                     </button>
-                    <button type="button" onclick="quickOpenPageInProfile('${safeInternalId}')" class="px-2.5 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 rounded-lg text-xs font-medium transition flex items-center space-x-1" title="Mở fanpage này trong trình duyệt Antidetect của profile ưu tiên">
+                    <button type="button" ${actionAttrs('click', 'quickOpenPageInProfile', item.internal_page_id)} class="px-2.5 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 rounded-lg text-xs font-medium transition flex items-center space-x-1" title="Mở fanpage này trong trình duyệt Antidetect của profile ưu tiên">
                         <i data-lucide="play" class="w-3 h-3"></i>
                         <span>Mở Profile</span>
                     </button>
@@ -783,7 +783,7 @@ function renderPageDetailModal(page) {
                         </div>
                     </div>
                     ${lk.link_status !== 'profile_deleted' && !lk.profile_missing ? `
-                        <button type="button" onclick="quickOpenPageInProfile('${escapeHtml(page.internal_page_id)}', '${escapeHtml(lk.profile_id)}', 'page')" class="px-2.5 py-1 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 rounded-lg text-[11px] font-medium transition">
+                        <button type="button" ${actionAttrs('click', 'quickOpenPageInProfile', page.internal_page_id, lk.profile_id, 'page')} class="px-2.5 py-1 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 rounded-lg text-[11px] font-medium transition">
                             Mở bằng profile này
                         </button>
                     ` : ''}
@@ -1031,12 +1031,12 @@ function renderSyncJobsList(jobs) {
                     </div>
                     <div class="flex items-center space-x-2">
                         ${isActive ? `
-                            <button type="button" onclick="cancelSyncJobById('${escapeHtml(job.id)}')" class="px-2.5 py-1 bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/30 rounded-lg text-[11px] font-medium transition">
+                            <button type="button" ${actionAttrs('click', 'cancelSyncJobById', job.id)} class="px-2.5 py-1 bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/30 rounded-lg text-[11px] font-medium transition">
                                 Hủy Job
                             </button>
                         ` : ''}
                         ${hasRetryable ? `
-                            <button type="button" onclick="retrySyncJobById('${escapeHtml(job.id)}')" class="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 rounded-lg text-[11px] font-semibold transition">
+                            <button type="button" ${actionAttrs('click', 'retrySyncJobById', job.id)} class="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 rounded-lg text-[11px] font-semibold transition">
                                 Thử lại mục lỗi / bỏ qua
                             </button>
                         ` : ''}
@@ -1353,21 +1353,21 @@ function renderAlertsList(items) {
                 </div>
                 <div class="flex flex-wrap items-center gap-1.5 shrink-0">
                     ${a.status === 'open' ? `
-                        <button type="button" onclick="updateAlertAction(${Number(a.alert_id)}, 'acknowledge')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-[11px] transition">
+                        <button type="button" ${actionAttrs('click', 'updateAlertAction', Number(a.alert_id), 'acknowledge')} class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-[11px] transition">
                             Đã xem
                         </button>
                     ` : ''}
                     ${a.status !== 'snoozed' && a.status !== 'resolved' ? `
-                        <button type="button" onclick="updateAlertAction(${Number(a.alert_id)}, 'snooze', 24)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 rounded-lg text-[11px] transition">
+                        <button type="button" ${actionAttrs('click', 'updateAlertAction', Number(a.alert_id), 'snooze', 24)} class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 rounded-lg text-[11px] transition">
                             Tạm ẩn 24h
                         </button>
                     ` : ''}
                     ${a.status !== 'resolved' ? `
-                        <button type="button" onclick="updateAlertAction(${Number(a.alert_id)}, 'resolve')" class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 rounded-lg text-[11px] transition">
+                        <button type="button" ${actionAttrs('click', 'updateAlertAction', Number(a.alert_id), 'resolve')} class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 rounded-lg text-[11px] transition">
                             Đóng
                         </button>
                     ` : `
-                        <button type="button" onclick="updateAlertAction(${Number(a.alert_id)}, 'reopen')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-borderBg rounded-lg text-[11px] transition">
+                        <button type="button" ${actionAttrs('click', 'updateAlertAction', Number(a.alert_id), 'reopen')} class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-borderBg rounded-lg text-[11px] transition">
                             Mở lại
                         </button>
                     `}

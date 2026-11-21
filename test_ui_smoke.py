@@ -240,7 +240,7 @@ def test_dashboard_ui_smoke(live_server):
             with page.expect_response(
                 lambda r: "/api/fingerprint/random" in r.url and r.request.method == "GET"
             ):
-                page.click("button[onclick='openCreateModal()']")
+                page.click("button[data-on-click='openCreateModal']")
             page.wait_for_selector("#createModal:not(.hidden)")
             page.wait_for_function(
                 "() => document.getElementById('create-adv-canvas').value !== ''"
@@ -250,7 +250,7 @@ def test_dashboard_ui_smoke(live_server):
                 lambda r: r.url.rstrip("/").endswith("/api/profiles")
                 and r.request.method == "POST"
             ) as create_response:
-                page.click("#createModal button[onclick='submitCreateProfile()']")
+                page.click("#createModal button[data-on-click='submitCreateProfile']")
             assert create_response.value.status == 200, "Tạo profile qua UI thất bại"
 
             page.locator("tr[data-profile-id]").filter(has_text=created_name).wait_for()
@@ -259,13 +259,13 @@ def test_dashboard_ui_smoke(live_server):
             assert profile_id, "Không lấy được id profile từ bảng"
 
             # --- Sửa profile (Edit + expected_revision) ---
-            row.locator("button[onclick^='openEditModal']").click()
+            row.locator("button[data-on-click='openEditModal']").click()
             page.wait_for_selector("#editModal:not(.hidden)")
             page.fill("#edit-name", edited_name)
             with page.expect_response(
                 lambda r: r.request.method == "PUT" and r.url.endswith(f"/api/profiles/{profile_id}")
             ) as update_response:
-                page.click("#editModal button[onclick='submitSaveProfileEdit()']")
+                page.click("#editModal button[data-on-click='submitSaveProfileEdit']")
             assert update_response.value.status == 200, "Lưu profile qua UI thất bại"
             _profile_row(page, profile_id).filter(has_text=edited_name).wait_for()
 
@@ -287,14 +287,14 @@ def test_dashboard_ui_smoke(live_server):
             # --- Import qua modal (JSON lấy từ file export) ---
             entry = json.loads(json.dumps(exported["profiles"][0]))
             entry["name"] = imported_name
-            page.click("button[onclick='openImportModal()']")
+            page.click("button[data-on-click='openImportModal']")
             page.wait_for_selector("#importModal:not(.hidden)")
             page.fill("#import-text", json.dumps({"version": 1, "profiles": [entry]}))
             with page.expect_response(
                 lambda r: r.url.rstrip("/").endswith("/api/profiles/import")
                 and r.request.method == "POST"
             ) as import_response:
-                page.click("#importModal button[onclick=\"doImport('text')\"]")
+                page.click("#importModal button[data-on-click='doImport'][data-on-click-args='[\"text\"]']")
             assert import_response.value.status == 200, "Import qua UI thất bại"
             import_payload = import_response.value.json() or {}
             assert import_payload.get("imported_count") == 1, import_payload
@@ -305,11 +305,11 @@ def test_dashboard_ui_smoke(live_server):
             imported_row.wait_for()
             imported_id = imported_row.get_attribute("data-profile-id")
             assert imported_id, "Không lấy được id profile import"
-            page.click("#importModal button[onclick='closeImportModal()']")
+            page.click("#importModal button[data-on-click='closeImportModal']")
 
             # --- Lịch tự động: scope profile + sửa lịch + recent runs ---
             assert _profile_row(page, profile_id).locator("text=Pin: mặc định").count() == 1
-            page.click("button[onclick='openSchedulesModal()']")
+            page.click("button[data-on-click='openSchedulesModal']")
             page.wait_for_selector("#schedulesModal:not(.hidden)")
             assert page.locator("#schedule-runs").count() == 1
             schedule_time = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
@@ -323,7 +323,7 @@ def test_dashboard_ui_smoke(live_server):
                 lambda r: r.url.rstrip("/").endswith("/api/schedules")
                 and r.request.method == "POST"
             ) as schedule_response:
-                page.click("#schedulesModal button[onclick='createSchedule()']")
+                page.click("#schedulesModal button[data-on-click='createSchedule']")
             assert schedule_response.value.status == 200, "Tạo lịch qua UI thất bại"
             schedule_row = (
                 page.locator("#schedules-list > div").filter(has_text="UI Smoke Schedule").first
@@ -336,7 +336,7 @@ def test_dashboard_ui_smoke(live_server):
             assert ours and ours[0]["profile_ids"] == [profile_id], ours
 
             # Sửa lịch: nạp đúng scope cũ, đổi về "tất cả".
-            schedule_row.locator("button[onclick^='editSchedule']").click()
+            schedule_row.locator("button[data-on-click='editSchedule']").click()
             page.wait_for_function(
                 "() => document.getElementById('sched-submit').innerText.trim() === 'Lưu'"
             )
@@ -346,7 +346,7 @@ def test_dashboard_ui_smoke(live_server):
             with page.expect_response(
                 lambda r: "/api/schedules/" in r.url and r.request.method == "PUT"
             ) as edit_response:
-                page.click("#schedulesModal button[onclick='createSchedule()']")
+                page.click("#schedulesModal button[data-on-click='createSchedule']")
             assert edit_response.value.status == 200, "Sửa lịch qua UI thất bại"
             rules = page.evaluate(
                 "async () => (await (await fetch('/api/schedules')).json()).rules"
@@ -367,14 +367,14 @@ def test_dashboard_ui_smoke(live_server):
             )
             ours = [rule for rule in rules if rule.get("name") == "UI Smoke Schedule"]
             assert ours and ours[0]["enabled"] is False, ours
-            page.click("#schedulesModal button[onclick='closeSchedulesModal()']")
+            page.click("#schedulesModal button[data-on-click='closeSchedulesModal']")
 
             # --- Fingerprint Health Center: audit tĩnh + sửa an toàn qua UI ---
             with page.expect_response(
                 lambda r: r.url.rstrip("/").endswith("/api/profiles/audit")
                 and r.request.method == "GET"
             ) as audit_response:
-                page.click("button[onclick='openAuditModal()']")
+                page.click("button[data-on-click='openAuditModal']")
             assert audit_response.value.status == 200, "Audit qua UI thất bại"
             audit_payload = audit_response.value.json() or {}
             assert audit_payload.get("summary", {}).get("total") == 2, audit_payload
@@ -383,11 +383,11 @@ def test_dashboard_ui_smoke(live_server):
             page.locator("#audit-list").filter(has_text=imported_name).wait_for()
 
             fix_button = page.locator(
-                f"#audit-list button[onclick=\"fixAuditProfile('{imported_id}')\"]"
+                f"#audit-list button[data-on-click='fixAuditProfile'][data-on-click-args='[\"{imported_id}\"]']"
             )
             if not fix_button.count():
                 fix_button = page.locator(
-                    f"#audit-list button[onclick=\"fixAuditProfile('{profile_id}')\"]"
+                    f"#audit-list button[data-on-click='fixAuditProfile'][data-on-click-args='[\"{profile_id}\"]']"
                 )
             assert fix_button.count(), "Không có nút sửa an toàn dù có profile trùng dấu vân tay"
             page.once("dialog", lambda dialog: dialog.accept())
@@ -409,7 +409,7 @@ def test_dashboard_ui_smoke(live_server):
                 codes = {issue.get("code") for issue in item.get("issues", [])}
                 assert "duplicate_canvas_seed" not in codes, item
                 assert "duplicate_audio_seed" not in codes, item
-            page.click("#auditModal button[onclick='closeAuditModal()']")
+            page.click("#auditModal button[data-on-click='closeAuditModal']")
 
             # --- Start/stop browser thật qua nút trong bảng ---
             row = _profile_row(page, profile_id)
@@ -418,7 +418,7 @@ def test_dashboard_ui_smoke(live_server):
                 and r.url.endswith(f"/api/profiles/{profile_id}/start"),
                 timeout=180000,
             ) as start_response:
-                row.locator("button[onclick^='startProfile']").click()
+                row.locator("button[data-on-click='startProfile']").click()
             assert start_response.value.status == 200, "Start qua UI thất bại"
             start_payload = start_response.value.json() or {}
             assert start_payload.get("success") is True, start_payload
@@ -437,7 +437,7 @@ def test_dashboard_ui_smoke(live_server):
                 timeout=60000,
             )
             _profile_row(page, profile_id).locator(
-                "button[onclick^='stopProfile']"
+                "button[data-on-click='stopProfile']"
             ).wait_for(timeout=60000)
 
             with page.expect_response(
@@ -446,7 +446,7 @@ def test_dashboard_ui_smoke(live_server):
                 timeout=90000,
             ) as stop_response:
                 _profile_row(page, profile_id).locator(
-                    "button[onclick^='stopProfile']"
+                    "button[data-on-click='stopProfile']"
                 ).click()
             assert stop_response.value.status == 200, "Stop qua UI thất bại"
             assert (stop_response.value.json() or {}).get("success") is True
@@ -462,7 +462,7 @@ def test_dashboard_ui_smoke(live_server):
                 timeout=60000,
             )
             _profile_row(page, profile_id).locator(
-                "button[onclick^='startProfile']"
+                "button[data-on-click='startProfile']"
             ).wait_for(timeout=30000)
 
             assert _profile_status(page, profile_id) == "stopped"

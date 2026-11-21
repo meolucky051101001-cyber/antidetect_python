@@ -6,7 +6,6 @@ Playwright pages, then compares what the page sees with the normalized
 fingerprint that the launcher would use.
 """
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -281,9 +280,9 @@ def main():
                 def check(name, actual, expected=None, ok=None):
                     if ok is None:
                         ok = actual == expected
-                    checks.append({"name": name, "ok": bool(ok), "actual": actual, "expected": expected})
+                    checks.append({"name": name, "ok": bool(ok), "actual": actual, "expected": expected})  # noqa: B023 - called within the same iteration
                     if not ok:
-                        failures.append(f"{profile.name}: {name}: got {actual!r}, expected {expected!r}")
+                        failures.append(f"{profile.name}: {name}: got {actual!r}, expected {expected!r}")  # noqa: B023 - called within the same iteration
 
                 check("userAgent", data.get("ua"), fp.user_agent)
                 check("platform", data.get("platform"), "MacIntel" if fp.os == "macos" else (
@@ -335,7 +334,9 @@ def main():
                 check("matchMedia device-width", match.get("deviceWidth"), True)
                 check("matchMedia device-height", match.get("deviceHeight"), True)
                 check("canvas toDataURL stable", data.get("canvasUrl"), data.get("canvasUrl2"))
-                diff_bytes = sum(1 for a, b in zip(decoded or [], canvas_pixels) if a != b)
+                diff_bytes = sum(
+                    1 for a, b in zip(decoded or [], canvas_pixels, strict=False) if a != b
+                )
                 check("canvas toDataURL/getImageData bytes", diff_bytes, 0)
                 noise_pixels = sum(
                     1 for i in range(0, min(len(native_pixels), len(canvas_pixels)), 4)

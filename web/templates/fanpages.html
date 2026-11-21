@@ -45,27 +45,27 @@
         </div>
 
         <div class="flex items-center space-x-2">
-            <button onclick="toggleTheme()" class="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition" title="Chuyển Dark / Light mode">
+            <button data-on-click="toggleTheme" class="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition" title="Chuyển Dark / Light mode">
                 <span class="theme-icon-moon inline-block"><i data-lucide="moon" class="w-4 h-4"></i></span>
                 <span class="theme-icon-sun inline-block"><i data-lucide="sun" class="w-4 h-4"></i></span>
             </button>
-            <button onclick="reloadFanpageCatalog()" class="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition" title="Đồng bộ lại từ cache profile & làm mới bảng">
+            <button data-on-click="reloadFanpageCatalog" class="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition" title="Đồng bộ lại từ cache profile & làm mới bảng">
                 <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             </button>
-            <button onclick="openAlertsModal()" class="relative flex items-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg text-xs font-medium rounded-lg transition" title="Trung tâm cảnh báo Fanpage (chống trùng, đã xem, tạm ẩn)">
+            <button data-on-click="openAlertsModal" class="relative flex items-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg text-xs font-medium rounded-lg transition" title="Trung tâm cảnh báo Fanpage (chống trùng, đã xem, tạm ẩn)">
                 <i data-lucide="bell" class="w-4 h-4 text-rose-400"></i>
                 <span>Cảnh Báo</span>
                 <span id="header-alert-badge" class="hidden px-1.5 py-0.5 text-[10px] font-bold bg-rose-500 text-white rounded-full leading-none">0</span>
             </button>
-            <button onclick="createDatabaseBackup()" class="flex items-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg text-xs font-medium rounded-lg transition" title="Sao lưu an toàn SQLite WAL của danh mục fanpage">
+            <button data-on-click="createDatabaseBackup" class="flex items-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg text-xs font-medium rounded-lg transition" title="Sao lưu an toàn SQLite WAL của danh mục fanpage">
                 <i data-lucide="database-backup" class="w-4 h-4 text-sky-400"></i>
                 <span class="hidden lg:inline">Sao Lưu DB</span>
             </button>
-            <button onclick="openSyncJobModal()" class="flex items-center space-x-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-semibold rounded-lg shadow-md shadow-amber-500/20 transition" title="Mở hàng đợi đồng bộ Fanpage bất đồng bộ (Discovery / Basic)">
+            <button data-on-click="openSyncJobModal" class="flex items-center space-x-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-semibold rounded-lg shadow-md shadow-amber-500/20 transition" title="Mở hàng đợi đồng bộ Fanpage bất đồng bộ (Discovery / Basic)">
                 <i data-lucide="layers" class="w-4 h-4"></i>
                 <span>Đồng Bộ Fanpage</span>
             </button>
-            <button onclick="exportCurrentCsv()" class="flex items-center space-x-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg text-xs font-medium rounded-lg transition" title="Xuất danh sách theo bộ lọc hiện tại ra CSV (UTF-8 BOM, mở trực tiếp bằng Excel)">
+            <button data-on-click="exportCurrentCsv" class="flex items-center space-x-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg text-xs font-medium rounded-lg transition" title="Xuất danh sách theo bộ lọc hiện tại ra CSV (UTF-8 BOM, mở trực tiếp bằng Excel)">
                 <i data-lucide="download" class="w-4 h-4 text-emerald-400"></i>
                 <span>Xuất CSV</span>
             </button>
@@ -89,10 +89,10 @@
                 </div>
             </div>
             <div class="flex items-center space-x-2 shrink-0">
-                <button type="button" onclick="openSyncJobModal()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition">
+                <button type="button" data-on-click="openSyncJobModal" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition">
                     Chi tiết tiến độ
                 </button>
-                <button type="button" onclick="cancelActiveSyncJob()" class="px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/30 rounded-lg text-xs font-medium transition">
+                <button type="button" data-on-click="cancelActiveSyncJob" class="px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/30 rounded-lg text-xs font-medium transition">
                     Hủy Job
                 </button>
             </div>
@@ -160,11 +160,11 @@
                     </div>
                 </div>
                 <div class="flex items-baseline space-x-3">
-                    <button type="button" onclick="quickFilterAttention()" class="text-left group" title="Bấm để lọc các page cần kiểm tra">
+                    <button type="button" data-on-click="quickFilterAttention" class="text-left group" title="Bấm để lọc các page cần kiểm tra">
                         <span id="kpi-attention-pages" class="text-2xl font-bold text-rose-400 group-hover:underline">0</span>
                         <span class="text-[11px] text-slate-400 ml-1">cần chú ý</span>
                     </button>
-                    <button type="button" onclick="quickFilterAgeReady()" class="text-left group" title="Bấm để lọc các page đủ ngưỡng tuổi nội bộ ≥ 30 ngày">
+                    <button type="button" data-on-click="quickFilterAgeReady" class="text-left group" title="Bấm để lọc các page đủ ngưỡng tuổi nội bộ ≥ 30 ngày">
                         <span id="kpi-age-ready-pages" class="text-lg font-semibold text-sky-400 group-hover:underline">0</span>
                         <span class="text-[11px] text-slate-400 ml-1">đủ tuổi ≥30d</span>
                     </button>
@@ -179,19 +179,19 @@
                 <!-- Search -->
                 <div class="relative">
                     <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-                    <input type="text" id="filter-q" oninput="onSearchInput()" placeholder="Tìm tên page, FB ID, URL, ghi chú..." class="w-full bg-slate-900 border border-borderBg rounded-lg pl-9 pr-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500">
+                    <input type="text" id="filter-q" data-on-input="onSearchInput" placeholder="Tìm tên page, FB ID, URL, ghi chú..." class="w-full bg-slate-900 border border-borderBg rounded-lg pl-9 pr-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500">
                 </div>
 
                 <!-- Profile filter -->
                 <div>
-                    <select id="filter-profile" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                    <select id="filter-profile" data-on-change="applyFilters" data-on-change-args='[1]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
                         <option value="">Profile: Tất cả</option>
                     </select>
                 </div>
 
                 <!-- Activity status filter -->
                 <div>
-                    <select id="filter-activity" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                    <select id="filter-activity" data-on-change="applyFilters" data-on-change-args='[1]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
                         <option value="">Hoạt động đăng bài: Tất cả</option>
                         <option value="active">Đang đăng (≤ 7 ngày)</option>
                         <option value="long_absent">Lâu chưa thấy bài mới (&gt; 7 ngày)</option>
@@ -203,7 +203,7 @@
 
                 <!-- Connection status filter -->
                 <div>
-                    <select id="filter-connection" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                    <select id="filter-connection" data-on-change="applyFilters" data-on-change-args='[1]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
                         <option value="">Trạng thái kết nối: Tất cả</option>
                         <option value="ok">Kết nối đầy đủ</option>
                         <option value="needs_relogin">Cần đăng nhập lại Facebook</option>
@@ -218,7 +218,7 @@
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 pt-1">
                 <!-- Data quality filter -->
                 <div>
-                    <select id="filter-quality" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                    <select id="filter-quality" data-on-change="applyFilters" data-on-change-args='[1]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
                         <option value="">Chất lượng dữ liệu: Tất cả</option>
                         <option value="verified">Đã xác minh (verified)</option>
                         <option value="partial">Một phần (partial)</option>
@@ -229,7 +229,7 @@
 
                 <!-- Internal Age Threshold filter -->
                 <div>
-                    <select id="filter-age-ready" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                    <select id="filter-age-ready" data-on-change="applyFilters" data-on-change-args='[1]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
                         <option value="">Ngưỡng tuổi nội bộ: Tất cả</option>
                         <option value="true">Đủ ngưỡng tuổi nội bộ (≥ 30 ngày)</option>
                         <option value="false">Chưa đủ 30 ngày</option>
@@ -239,14 +239,14 @@
 
                 <!-- Tag filter -->
                 <div>
-                    <select id="filter-tag" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                    <select id="filter-tag" data-on-change="applyFilters" data-on-change-args='[1]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
                         <option value="">Tag: Tất cả</option>
                     </select>
                 </div>
 
                 <!-- Archived filter -->
                 <div>
-                    <select id="filter-archived" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                    <select id="filter-archived" data-on-change="applyFilters" data-on-change-args='[1]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
                         <option value="active">Trạng thái: Đang quản lý</option>
                         <option value="archived">Trạng thái: Đã lưu trữ</option>
                         <option value="all">Trạng thái: Tất cả (kể cả lưu trữ)</option>
@@ -255,7 +255,7 @@
 
                 <!-- Sort -->
                 <div>
-                    <select id="filter-sort" onchange="applyFilters(1)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                    <select id="filter-sort" data-on-change="applyFilters" data-on-change-args='[1]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
                         <option value="page_name:asc">Sắp xếp: Tên A → Z</option>
                         <option value="page_name:desc">Sắp xếp: Tên Z → A</option>
                         <option value="followers:desc">Follower: Cao → Thấp</option>
@@ -272,12 +272,12 @@
 
                 <!-- Page size & Reset -->
                 <div class="flex items-center space-x-2">
-                    <select id="filter-page-size" onchange="applyFilters(1)" class="flex-1 bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
+                    <select id="filter-page-size" data-on-change="applyFilters" data-on-change-args='[1]' class="flex-1 bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500">
                         <option value="25">25 / trang</option>
                         <option value="50" selected>50 / trang</option>
                         <option value="100">100 / trang</option>
                     </select>
-                    <button type="button" onclick="resetFilters()" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition" title="Xóa toàn bộ bộ lọc">
+                    <button type="button" data-on-click="resetFilters" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition" title="Xóa toàn bộ bộ lọc">
                         Đặt lại
                     </button>
                 </div>
@@ -288,26 +288,26 @@
         <div id="fanpage-bulk-bar" class="hidden bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
             <div class="flex items-center space-x-2 text-xs">
                 <span id="fanpage-bulk-count" class="font-semibold text-amber-300">0 đã chọn</span>
-                <button type="button" onclick="clearPageSelection()" class="text-slate-400 hover:text-white underline">Bỏ chọn</button>
+                <button type="button" data-on-click="clearPageSelection" class="text-slate-400 hover:text-white underline">Bỏ chọn</button>
             </div>
             <div class="flex flex-wrap items-center gap-2">
-                <button type="button" onclick="enqueueSyncForSelectedPages()" class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 rounded-lg text-xs font-semibold transition flex items-center space-x-1">
+                <button type="button" data-on-click="enqueueSyncForSelectedPages" class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 rounded-lg text-xs font-semibold transition flex items-center space-x-1">
                     <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
                     <span>Đồng bộ chi tiết (Basic)</span>
                 </button>
-                <button type="button" onclick="bulkAddTagPrompt()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                <button type="button" data-on-click="bulkAddTagPrompt" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition flex items-center space-x-1">
                     <i data-lucide="tag" class="w-3.5 h-3.5 text-amber-400"></i>
                     <span>Gắn Tag</span>
                 </button>
-                <button type="button" onclick="bulkRemoveTagPrompt()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                <button type="button" data-on-click="bulkRemoveTagPrompt" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-borderBg rounded-lg text-xs font-medium transition flex items-center space-x-1">
                     <i data-lucide="x-circle" class="w-3.5 h-3.5 text-slate-400"></i>
                     <span>Gỡ Tag</span>
                 </button>
-                <button type="button" onclick="bulkArchiveAction(true)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                <button type="button" data-on-click="bulkArchiveAction" data-on-click-args='[true]' class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 rounded-lg text-xs font-medium transition flex items-center space-x-1">
                     <i data-lucide="archive" class="w-3.5 h-3.5"></i>
                     <span>Lưu trữ</span>
                 </button>
-                <button type="button" onclick="bulkArchiveAction(false)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30 rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                <button type="button" data-on-click="bulkArchiveAction" data-on-click-args='[false]' class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30 rounded-lg text-xs font-medium transition flex items-center space-x-1">
                     <i data-lucide="archive-restore" class="w-3.5 h-3.5"></i>
                     <span>Khôi phục</span>
                 </button>
@@ -330,7 +330,7 @@
                     <thead>
                         <tr class="border-b border-borderBg bg-slate-900/60 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                             <th class="py-3 px-4 w-9">
-                                <input type="checkbox" id="select-all-pages" onchange="toggleSelectAllPages(this.checked)" class="accent-amber-500 rounded cursor-pointer">
+                                <input type="checkbox" id="select-all-pages" data-on-change="toggleSelectAllPages" data-on-change-args='["$checked"]' class="accent-amber-500 rounded cursor-pointer">
                             </th>
                             <th class="py-3 px-4">Fanpage &amp; Định Danh</th>
                             <th class="py-3 px-4">Profile Quản Lý</th>
@@ -360,10 +360,10 @@
             <div class="px-4 py-3 border-t border-borderBg flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/40 text-xs">
                 <div id="pagination-info" class="text-slate-400">Trang 1 / 1</div>
                 <div class="flex items-center space-x-2">
-                    <button type="button" id="btn-prev-page" onclick="changePage(-1)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 rounded-lg transition">
+                    <button type="button" id="btn-prev-page" data-on-click="changePage" data-on-click-args='[-1]' class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 rounded-lg transition">
                         Trước
                     </button>
-                    <button type="button" id="btn-next-page" onclick="changePage(1)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 rounded-lg transition">
+                    <button type="button" id="btn-next-page" data-on-click="changePage" data-on-click-args='[1]' class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 rounded-lg transition">
                         Sau
                     </button>
                 </div>
@@ -382,7 +382,7 @@
                         <p id="detail-page-subtitle" class="text-[11px] text-slate-400 truncate"></p>
                     </div>
                 </div>
-                <button type="button" onclick="closePageDetailModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                <button type="button" data-on-click="closePageDetailModal" class="text-slate-400 hover:text-white p-1 rounded-lg">
                     <i data-lucide="x" class="w-4 h-4"></i>
                 </button>
             </div>
@@ -399,14 +399,14 @@
                     </div>
                     <div class="flex flex-wrap items-center gap-2 shrink-0">
                         <select id="detail-open-profile-select" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200"></select>
-                        <button type="button" onclick="openPageInBrowserFromDetail('page')" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition flex items-center space-x-1.5">
+                        <button type="button" data-on-click="openPageInBrowserFromDetail" data-on-click-args='["page"]' class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition flex items-center space-x-1.5">
                             <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
                             <span>Mở Trang</span>
                         </button>
-                        <button type="button" onclick="openPageInBrowserFromDetail('transparency')" class="px-3 py-1.5 bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white border border-violet-500/30 font-medium rounded-lg transition" title="Mở mục Tính minh bạch của Trang (about_profile_transparency)">
+                        <button type="button" data-on-click="openPageInBrowserFromDetail" data-on-click-args='["transparency"]' class="px-3 py-1.5 bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white border border-violet-500/30 font-medium rounded-lg transition" title="Mở mục Tính minh bạch của Trang (about_profile_transparency)">
                             <span>Tính minh bạch</span>
                         </button>
-                        <button type="button" onclick="enqueueSyncForDetailPage()" class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 font-semibold rounded-lg transition flex items-center space-x-1" title="Đưa profile của fanpage này vào hàng đợi quét chi tiết (Basic)">
+                        <button type="button" data-on-click="enqueueSyncForDetailPage" class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 font-semibold rounded-lg transition flex items-center space-x-1" title="Đưa profile của fanpage này vào hàng đợi quét chi tiết (Basic)">
                             <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
                             <span>Quét Basic</span>
                         </button>
@@ -432,7 +432,7 @@
                             <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Chuỗi Thời Gian &amp; Chênh Lệch Kỳ (Stage 3)</div>
                             <div class="text-[10px] text-slate-500">Chỉ vẽ các điểm quan sát thật sự tồn tại — không bịa số 0 cho ngày chưa quét</div>
                         </div>
-                        <select id="detail-metrics-days" onchange="onDetailMetricsWindowChange()" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1 text-xs text-slate-200">
+                        <select id="detail-metrics-days" data-on-change="onDetailMetricsWindowChange" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1 text-xs text-slate-200">
                             <option value="7">7 ngày gần nhất</option>
                             <option value="28" selected>28 ngày gần nhất</option>
                             <option value="90">90 ngày gần nhất</option>
@@ -469,7 +469,7 @@
                             <input type="checkbox" id="detail-archived" class="accent-amber-500 rounded">
                             <span>Lưu trữ page này (ẩn khỏi danh sách Đang quản lý mặc định)</span>
                         </label>
-                        <button type="button" onclick="savePageDetail()" class="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg transition">
+                        <button type="button" data-on-click="savePageDetail" class="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg transition">
                             Lưu Thay Đổi
                         </button>
                     </div>
@@ -495,7 +495,7 @@
             </div>
 
             <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
-                <button type="button" onclick="closePageDetailModal()" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
+                <button type="button" data-on-click="closePageDetailModal" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
             </div>
         </div>
     </div>
@@ -511,7 +511,7 @@
                         <p class="text-[11px] text-slate-400">Quét danh sách (Discovery) hoặc chi tiết (Basic) bất đồng bộ · Giới hạn đồng thời · Không bao giờ tự đóng trình duyệt người dùng đang mở</p>
                     </div>
                 </div>
-                <button type="button" onclick="closeSyncJobModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                <button type="button" data-on-click="closeSyncJobModal" class="text-slate-400 hover:text-white p-1 rounded-lg">
                     <i data-lucide="x" class="w-4 h-4"></i>
                 </button>
             </div>
@@ -542,7 +542,7 @@
                             <input type="checkbox" id="sync-job-auto-start" class="accent-amber-500 rounded">
                             <span>Tự mở trình duyệt cho profile đang đóng (và tự đóng lại sau khi quét xong)</span>
                         </label>
-                        <button type="button" onclick="startNewSyncJob()" class="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg shadow-md shadow-amber-500/20 transition flex items-center space-x-1.5 shrink-0">
+                        <button type="button" data-on-click="startNewSyncJob" class="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg shadow-md shadow-amber-500/20 transition flex items-center space-x-1.5 shrink-0">
                             <i data-lucide="play" class="w-3.5 h-3.5"></i>
                             <span>Bắt Đầu Đồng Bộ</span>
                         </button>
@@ -553,7 +553,7 @@
                 <div class="space-y-3">
                     <div class="flex items-center justify-between">
                         <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Tiến Độ &amp; Lịch Sử Job Đồng Bộ</div>
-                        <button type="button" onclick="loadSyncJobs()" class="text-xs text-blue-400 hover:text-blue-300 flex items-center space-x-1">
+                        <button type="button" data-on-click="loadSyncJobs" class="text-xs text-blue-400 hover:text-blue-300 flex items-center space-x-1">
                             <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
                             <span>Làm mới</span>
                         </button>
@@ -565,7 +565,7 @@
             </div>
 
             <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
-                <button type="button" onclick="closeSyncJobModal()" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
+                <button type="button" data-on-click="closeSyncJobModal" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
             </div>
         </div>
     </div>
@@ -581,7 +581,7 @@
                         <p class="text-[11px] text-slate-400">Gộp theo khóa định danh chống spam · Tự đóng khi điều kiện đã hết · Hỗ trợ Đã xem &amp; Tạm ẩn</p>
                     </div>
                 </div>
-                <button type="button" onclick="closeAlertsModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                <button type="button" data-on-click="closeAlertsModal" class="text-slate-400 hover:text-white p-1 rounded-lg">
                     <i data-lucide="x" class="w-4 h-4"></i>
                 </button>
             </div>
@@ -589,7 +589,7 @@
             <div class="p-5 overflow-y-auto space-y-4 flex-1 text-xs">
                 <div class="flex flex-wrap items-center justify-between gap-2 bg-slate-900/50 border border-borderBg rounded-xl p-3">
                     <div class="flex flex-wrap items-center gap-2">
-                        <select id="alert-filter-status" onchange="loadAlertsList()" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                        <select id="alert-filter-status" data-on-change="loadAlertsList" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
                             <option value="active" selected>Trạng thái: Đang mở &amp; Đã xem</option>
                             <option value="open">Chỉ cảnh báo mới (Chưa xem)</option>
                             <option value="acknowledged">Đã đánh dấu xem</option>
@@ -597,7 +597,7 @@
                             <option value="resolved">Đã xử lý xong (Resolved)</option>
                             <option value="all">Tất cả cảnh báo</option>
                         </select>
-                        <select id="alert-filter-severity" onchange="loadAlertsList()" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
+                        <select id="alert-filter-severity" data-on-change="loadAlertsList" class="bg-slate-950 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200">
                             <option value="">Mức độ: Tất cả</option>
                             <option value="critical">Nghiêm trọng (Critical)</option>
                             <option value="warning">Cảnh báo (Warning)</option>
@@ -605,10 +605,10 @@
                         </select>
                     </div>
                     <div class="flex items-center space-x-2">
-                        <button type="button" onclick="acknowledgeAllAlerts()" class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 font-semibold rounded-lg transition">
+                        <button type="button" data-on-click="acknowledgeAllAlerts" class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 font-semibold rounded-lg transition">
                             Đánh dấu đã xem tất cả
                         </button>
-                        <button type="button" onclick="loadAlertsList()" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition">
+                        <button type="button" data-on-click="loadAlertsList" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition">
                             Làm mới
                         </button>
                     </div>
@@ -620,7 +620,7 @@
             </div>
 
             <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
-                <button type="button" onclick="closeAlertsModal()" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
+                <button type="button" data-on-click="closeAlertsModal" class="px-4 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition">Đóng</button>
             </div>
         </div>
     </div>
@@ -631,6 +631,7 @@
         <span id="toast-message"></span>
     </div>
 
+    <script src="/static/js/actions.js"></script>
     <script src="/static/js/fanpages.js"></script>
 </body>
 </html>

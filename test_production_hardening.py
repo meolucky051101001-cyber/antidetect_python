@@ -30,7 +30,7 @@ atexit.register(shutil.rmtree, TEST_DATA_DIR, True)
 
 from antidetect.models import Profile, FingerprintConfig
 from antidetect.storage import ProfileManager, ReentrantInterProcessLock
-from antidetect.secrets import set_proxy_password, get_proxy_password, _write_all_secrets, _read_all_secrets
+from antidetect.secrets import set_proxy_password, get_proxy_password
 import antidetect.secrets as secrets_module
 import antidetect.storage as storage_module
 import antidetect.launcher as launcher_module
@@ -263,6 +263,7 @@ def test_identity_unknown_is_not_cached(monkeypatch):
     record = {"Name": "chrome.exe", "CommandLine": "synthetic", "CreationDate": "birth-A"}
     process_identity.invalidate_identity()
     monkeypatch.setattr(process_identity, "_kernel32", FakeKernel32)
+    monkeypatch.setattr(process_identity, "_native_record", lambda *_: None)
     monkeypatch.setattr(process_identity, "windows_argv", lambda _: [
         "chrome.exe", "--user-data-dir=" + user_data_dir, "--remote-debugging-port=9333",
     ])
@@ -843,7 +844,7 @@ def test_facebook_pages_deep_endpoint(monkeypatch):
         "/auth/login",
         headers={"Authorization": "Bearer " + app_module.app.state.access_key},
     )
-    m = ProfileManager()
+    ProfileManager()
     r = client.post("/api/profiles", json={"name": "FB Deep Test", "os": "windows"})
     pid = r.json()["id"]
     try:
@@ -946,7 +947,7 @@ def test_facebook_deep_ui_present():
     js = open(
         os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
     ).read()
-    assert "refreshFanpages(true)" in html
+    assert """data-on-click="refreshFanpages" data-on-click-args='[true]'""" in html
     assert "deep=1" in js
     assert "Đang đăng" in js and "Lâu chưa thấy bài mới" in js and "Sẵn sàng" in js
     assert "Dữ liệu cũ, cần đồng bộ" in js
@@ -2109,7 +2110,7 @@ def test_phase4_human_key_events_include_code_and_vk():
         vn["key"], vn["text"], vn["code"], vn["windowsVirtualKeyCode"]
     ) == ("ế", "ế", "", 0)
 
-    for down, up in zip(downs, ups):
+    for down, up in zip(downs, ups, strict=True):
         assert down["key"] == up["key"]
         assert down["code"] == up["code"]
         assert up["windowsVirtualKeyCode"] == down["windowsVirtualKeyCode"]

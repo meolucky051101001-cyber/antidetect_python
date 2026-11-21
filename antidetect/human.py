@@ -30,7 +30,6 @@ import json
 import math
 import random
 import time
-import urllib.request
 from .loopback import connect_loopback, open_loopback
 from typing import List, Optional, Tuple
 
@@ -185,7 +184,6 @@ class HumanInput:
         return None
 
     async def _connect(self):
-        import websockets
 
         ws_url = self._find_page_ws()
         if not ws_url:

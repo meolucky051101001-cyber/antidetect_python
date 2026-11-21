@@ -123,7 +123,7 @@ def _replace_with_retry(src: str, dst: str, attempts: int = 6) -> None:
                 try:
                     os.remove(src)
                 except OSError:
-                    pass
+                    log.debug("Failed to remove replaced temporary file", exc_info=True)
                 raise
             time.sleep(delay)
             delay = min(delay * 2, 0.8)
@@ -155,7 +155,7 @@ class InterProcessLock:
                     try:
                         os.close(self.fd)
                     except OSError:
-                        pass
+                        log.debug("Failed to close inter-process lock file", exc_info=True)
                     self.fd = None
                 time.sleep(0.05)
         # Fail closed: callers must not write metadata without a real lock.
@@ -173,11 +173,11 @@ class InterProcessLock:
                     import fcntl
                     fcntl.flock(self.fd, fcntl.LOCK_UN)
             except Exception:
-                pass
+                log.debug("Failed to unlock inter-process lock file", exc_info=True)
             try:
                 os.close(self.fd)
             except OSError:
-                pass
+                log.debug("Failed to close inter-process lock file", exc_info=True)
             self.fd = None
 
 
@@ -297,7 +297,7 @@ class ProfileManager:
                         shutil.copy2(PROFILES_JSON, backup_path)
                         backed_up = True
                 except Exception:
-                    pass
+                    log.warning("Failed to back up corrupted profiles file", exc_info=True)
                 self._corrupted = True  # Đặt cờ chống ghi đè
                 raise RuntimeError(
                     "profiles.json bị hỏng hoặc sai cấu trúc. Đã khóa ghi và giữ nguyên file gốc. "
@@ -330,7 +330,7 @@ class ProfileManager:
                 try:
                     os.remove(oldest)
                 except OSError:
-                    pass
+                    log.debug("Failed to remove expired profile backup", exc_info=True)
         except Exception as e:
             _safe_log(f"[Storage] Cảnh báo tạo backup: {type(e).__name__}: {e}")
 

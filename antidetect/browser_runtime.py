@@ -5,6 +5,7 @@ pid, port). This store is the source of truth for reconnecting to or stopping
 browsers after the FastAPI process restarts.
 """
 import json
+import logging
 import os
 import threading
 import time
@@ -12,6 +13,8 @@ import uuid
 from typing import Any, Dict, Optional
 
 from .storage import InterProcessLock
+
+log = logging.getLogger(__name__)
 
 
 class BrowserRuntimeStore:
@@ -88,7 +91,7 @@ class BrowserRuntimeStore:
                 try:
                     os.remove(temp)
                 except OSError:
-                    pass
+                    log.debug("Failed to remove temporary browser runtime file", exc_info=True)
 
     def all(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:

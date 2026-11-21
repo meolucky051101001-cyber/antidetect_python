@@ -3,6 +3,8 @@ target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
-# Start with correctness-only checks. Expand deliberately after the
-# launcher/stealth/web monoliths are split into smaller modules.
-select = ["E9", "F63", "F7", "F82"]
+# Enable critical syntax, pyflakes, and bugbear checks.
+select = ["E9", "F", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"test_ui_release_errors.py" = ["F811"]

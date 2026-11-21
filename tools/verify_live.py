@@ -44,7 +44,6 @@ from antidetect.launcher import BrowserLauncher, find_browser_executable  # noqa
 from antidetect.storage import DATA_DIR, ProfileManager  # noqa: E402
 from antidetect.stealth import (  # noqa: E402
     _battery_profile,
-    _connection_profile,
     _screen_work_area,
     _webgl_limits,
     _effective_disabled_groups,

@@ -17,18 +17,13 @@ import os
 import re
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from antidetect.facebook import (
-    classify_facebook_page,
-    parse_fb_created_date,
-    fb_unit_to_days,
-)
-from antidetect.storage import DATA_DIR, ProfileManager, PROFILES_JSON
+from antidetect.storage import ProfileManager
 from antidetect.launcher import BrowserLauncher
 
 
@@ -379,11 +374,11 @@ def main():
         res = audit_cache_data()
         print(f"- Tổng số profiles: {res['total_profiles']} (Có fanpage: {res['profiles_with_pages']})")
         print(f"- Tổng số fanpage entries: {res['total_page_entries']} (Unique IDs: {res['unique_page_ids']})")
-        print(f"- Trạng thái tuổi page nội bộ:")
+        print("- Trạng thái tuổi page nội bộ:")
         print(f"  + Đủ ngưỡng tuổi (>=30 ngày): {res['readiness_summary']['ready_age_30d']}")
         print(f"  + Chưa đủ ngưỡng tuổi: {res['readiness_summary']['not_ready']}")
         print(f"  + Chưa xác định ngày tạo: {res['readiness_summary']['unknown_age']}")
-        print(f"- Trạng thái hoạt động (dựa trên parser cũ):")
+        print("- Trạng thái hoạt động (dựa trên parser cũ):")
         print(f"  + Active (bài <= 7 ngày): {res['activity_summary']['active']}")
         print(f"  + Stopped (bài > 7 ngày): {res['activity_summary']['stopped']}")
         print(f"  + Unknown (chưa đọc được bài): {res['activity_summary']['unknown']}")
@@ -408,10 +403,10 @@ def main():
         port = launcher.active_ports.get(target_prof.id)
 
         if not is_running or not port:
-            print(f"[-] Profile hiện ĐANG DỪNG (stopped).")
-            print(f"[*] Để đảm bảo an toàn tuyệt đối, vui lòng mở profile này từ Dashboard hoặc dùng lệnh:")
+            print("[-] Profile hiện ĐANG DỪNG (stopped).")
+            print("[*] Để đảm bảo an toàn tuyệt đối, vui lòng mở profile này từ Dashboard hoặc dùng lệnh:")
             print(f"    python -m antidetect.cli start {target_prof.id}")
-            print(f"    Sau đó chạy lại script probe để kiểm tra trực tiếp tab đang chạy.")
+            print("    Sau đó chạy lại script probe để kiểm tra trực tiếp tab đang chạy.")
             return
 
         print(f"[+] Profile đang chạy trên CDP Port: {port}")
