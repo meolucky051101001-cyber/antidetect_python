@@ -449,9 +449,6 @@ def _signature(profile: Profile) -> Tuple[Any, ...]:
     )
 
 
-_profile_signature = _signature
-
-
 def audit_profiles(
     profiles: Sequence[Profile],
     browser_paths: Optional[Dict[str, Optional[str]]] = None,
@@ -899,7 +896,7 @@ def audit_profiles(
                     fixable=True,
                 )
 
-    for _signature, group in group_by(_profile_signature).items():
+    for _sig, group in group_by(_signature).items():
         if len(group) > 1:
             for profile in group:
                 others = [p for p in group if p.id != profile.id]
