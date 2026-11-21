@@ -1,3 +1,9 @@
 Set WshShell = CreateObject("WScript.Shell")
-WshShell.CurrentDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
-WshShell.Run "pythonw.exe run.py", 0, False
+Set Fso = CreateObject("Scripting.FileSystemObject")
+BaseDir = Fso.GetParentFolderName(WScript.ScriptFullName)
+WshShell.CurrentDirectory = BaseDir
+PythonW = "pythonw.exe"
+If Fso.FileExists(BaseDir & "\.venv\Scripts\pythonw.exe") Then
+    PythonW = """" & BaseDir & "\.venv\Scripts\pythonw.exe"""
+End If
+WshShell.Run PythonW & " run.py", 0, False
