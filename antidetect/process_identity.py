@@ -308,6 +308,11 @@ def _browser_pids_using_dir_cim(user_data_dir, exclude_pids=None):
         return None
 
 
+def _is_kernel_minimal_process(pid, process):
+    # Kernel-created minimal processes have no image and cannot be Chromium.
+    return pid in (0, 4) or process.ppid() in (0, 4)
+
+
 def browser_pids_using_dir(user_data_dir, exclude_pids=None):
     """Return matching PIDs, or None if the scan cannot prove completeness."""
     if sys.platform != "win32" or not user_data_dir:
@@ -319,12 +324,23 @@ def browser_pids_using_dir(user_data_dir, exclude_pids=None):
         for pid in psutil.pids():
             try:
                 process = psutil.Process(pid)
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.AccessDenied:
+                if pid in (0, 4):
+                    continue
+                return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
+            try:
                 name = process.name()
             except psutil.NoSuchProcess:
                 continue
             except psutil.AccessDenied:
+                if _is_kernel_minimal_process(pid, process):
+                    continue
                 return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
             if not name:
+                if _is_kernel_minimal_process(pid, process):
+                    continue
                 return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
             name = name.lower()
             if name not in _BROWSER_NAMES:

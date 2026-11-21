@@ -256,11 +256,17 @@ def test_fast_process_scan_skips_process_that_exits_during_scan(monkeypatch, tmp
 
 
 @pytest.mark.parametrize(
-    "failure",
-    ["name-access-denied", "empty-name", "cmdline-access-denied", "empty-cmdline"],
+    ("failure", "parent_pid", "fallback"),
+    [
+        ("name-access-denied", "denied", True),
+        ("empty-name", 4, False),
+        ("empty-name", 1234, True),
+        ("cmdline-access-denied", None, True),
+        ("empty-cmdline", None, True),
+    ],
 )
 def test_fast_process_scan_defers_to_cim_on_incomplete_process(
-    monkeypatch, tmp_path, failure,
+    monkeypatch, tmp_path, failure, parent_pid, fallback,
 ):
     monkeypatch.setattr(process_identity.sys, "platform", "win32")
 
@@ -271,6 +277,11 @@ def test_fast_process_scan_defers_to_cim_on_incomplete_process(
             if failure == "empty-name":
                 return ""
             return "chrome.exe"
+
+        def ppid(self):
+            if parent_pid == "denied":
+                raise process_identity.psutil.AccessDenied(pid=101)
+            return parent_pid
 
         def cmdline(self):
             if failure == "cmdline-access-denied":
@@ -287,8 +298,13 @@ def test_fast_process_scan_defers_to_cim_on_incomplete_process(
         lambda directory, excluded: calls.append((directory, excluded)) or {101},
     )
 
-    assert process_identity.browser_pids_using_dir(str(tmp_path), {102}) == {101}
-    assert calls == [(str(tmp_path), {102})]
+    result = process_identity.browser_pids_using_dir(str(tmp_path), {102})
+    if fallback:
+        assert result == {101}
+        assert calls == [(str(tmp_path), {102})]
+    else:
+        assert result == set()
+        assert calls == []
 
 
 def test_fast_process_scan_uses_fresh_process_object_for_reused_pid(monkeypatch, tmp_path):
