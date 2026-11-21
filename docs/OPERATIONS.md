@@ -251,8 +251,8 @@ Chrome sạch của máy** (đo 1 lần, ghi lại — không so với 0%).
 - Không dùng profile cross-OS cho tài khoản quan trọng.
 - Chạy lại detector audit định kỳ (site đổi UI/điểm chấm bất cứ lúc nào).
 - Không hỗ trợ Firefox.
-- CSP đã bỏ inline `<script>` nhưng còn `script-src-attr 'unsafe-inline'`
-  (~68 handler `onclick` trong `index.html`) và `style-src 'unsafe-inline'`.
+- CSP đã bỏ inline `<script>` và inline handler (`script-src-attr 'none'`);
+  còn `style-src 'unsafe-inline'`.
 - Playwright UI smoke chưa chạy trong CI (Playwright không nằm trong
   `requirements-dev.txt`) nhưng **bắt buộc trong checklist pre-release** khi
   thay đổi UI; metrics là process-local (reset khi restart), không thay thế log

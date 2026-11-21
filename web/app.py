@@ -363,9 +363,9 @@ async def local_origin_check_middleware(request: Request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     # P2-04: Content Security Policy chống XSS và script injection.
-    # Inline <script> đã chuyển ra /static (P1-8); chỉ còn inline handler
-    # (onclick=) nên script-src-attr vẫn cần 'unsafe-inline'. Các directive
-    # dưới đây chặn plugin, base tag và form gửi ra ngoài.
+    # Không còn inline <script> hay inline handler (onclick=): sự kiện đi qua
+    # /static/js/actions.js, nên script-src-attr là 'none'. connect-src/img-src
+    # chỉ 'self' để script lạ (nếu có) không gửi dữ liệu ra host ngoài.
     # Swagger UI/ReDoc mặc định tải bundle từ jsdelivr và font từ Google
     # Fonts; chỉ nới CSP trên đúng trang docs (đã yêu cầu phiên), dashboard
     # vẫn giữ CSP siết.
@@ -387,11 +387,11 @@ async def local_origin_check_middleware(request: Request, call_next):
         response.headers['Content-Security-Policy'] = (
             "default-src 'self'; "
             "script-src 'self'; "
-            "script-src-attr 'unsafe-inline'; "
+            "script-src-attr 'none'; "
             "style-src 'self' 'unsafe-inline'; "
             "font-src 'self' data:; "
-            "img-src 'self' data: https:; "
-            "connect-src 'self' https:; "
+            "img-src 'self' data:; "
+            "connect-src 'self'; "
             "object-src 'none'; "
             "base-uri 'self'; "
             "form-action 'self'; "
