@@ -253,7 +253,7 @@ def test_real_ownership_replacement_disconnect_and_restart(live_environment):
         # Chromium renderers also carry --user-data-dir; count browser roots,
         # while cleanup continues to inspect all processes of the fixture.
         roots = [proc for proc in _fixture_browser_processes(data_dir)
-                 if not any(arg.startswith("--type=") for arg in proc.cmdline())]
+                 if not any(arg.startswith("--type=") for arg in (proc.info["cmdline"] or []))]
         assert len(roots) == 1
         return record
 
