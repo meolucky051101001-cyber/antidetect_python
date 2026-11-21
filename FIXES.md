@@ -31,7 +31,7 @@ isolation, một lần chạy test đã ghi nhầm vào `data/profiles.json` và
 `secrets.dpapi` thật; đã khôi phục từ ZIP delivery và xác nhận lại hash
 (xem P0-7).
 
-Chi tiết lệnh và output: [docs/VERIFICATION_2026-10-23.md](docs/VERIFICATION_2026-10-23.md).
+Chi tiết lệnh và output: [docs/history/VERIFICATION_2026-10-23.md](docs/history/VERIFICATION_2026-10-23.md).
 
 ---
 
@@ -269,7 +269,7 @@ vào fixture session. ZIP delivery cũ chứa data thật, không được phân
   `AS45899`.
 - Kết quả Proxy 2: IP/WebRTC `PASS` sau vá; DNS vẫn `FAIL/review` do resolver
   Google lệch ASN với egress Viettel. Endpoint mới `27.76.87.148:46787` timeout
-  (chi tiết mục 8.6 của `docs/VERIFICATION_2026-10-23.md`).
+  (chi tiết mục 8.6 của `docs/history/VERIFICATION_2026-10-23.md`).
 
 ### P1-10. Detector baseline có evidence
 
@@ -378,7 +378,7 @@ cho tài khoản có giá trị cao.
 ## 7. Cập nhật R1–R4 + P0 (2026-10-23, sau mục 6)
 
 Đợt sửa tiếp theo trong cùng ngày, sau khi baseline ở mục 1 được ghi. Chi tiết
-lệnh/output: `docs/VERIFICATION_2026-10-23.md` mục 12.
+lệnh/output: `docs/history/VERIFICATION_2026-10-23.md` mục 12.
 
 | Fix | Nội dung | Kiểm chứng |
 |---|---|---|
@@ -396,7 +396,7 @@ regression trong `test_cdp_regressions.py`). SHA256 `data/profiles.json` không
 
 ## 8. Review toàn diện + hardening production (2026-10-24)
 
-Chi tiết lệnh/output và bằng chứng bisect: `docs/VERIFICATION_2026-10-24.md`.
+Chi tiết lệnh/output và bằng chứng bisect: `docs/history/VERIFICATION_2026-10-24.md`.
 Runbook vận hành: `docs/OPERATIONS.md`.
 
 | Fix | Nội dung | Kiểm chứng |
@@ -421,7 +421,7 @@ trước (L3); xóa dead code `_clear_process` (L5); `expected_revision` wire v�
 `PUT /api/profiles/{id}` (stale → 409); DELETE trả đúng 404/400 thay vì
 409/500; UI thêm badge **Authentic/Partial** cho chế độ stealth của từng
 profile. **73 passed** sau đợt này; `verify_live.py` PASS không regression. Chi
-tiết: `docs/VERIFICATION_2026-10-24.md` mục 8.
+tiết: `docs/history/VERIFICATION_2026-10-24.md` mục 8.
 
 ### 8.2. Đợt kiểm tra cuối (E2E đầy đủ)
 
@@ -431,7 +431,7 @@ cookies export, switch-all, shutdown sạch. CLI chạy song song server xác nh
 trên thực tế: browser sống sau khi CLI thoát (H1), profile CLI tạo không mất
 khi server ghi (B1). Fingerprint bản cuối: verify_live PASS, audit 44/44,
 CreepJS 0% stealth, Pixelscan masking not detected, keepalive 100s stable.
-Chi tiết: `docs/VERIFICATION_2026-10-24.md` mục 9.
+Chi tiết: `docs/history/VERIFICATION_2026-10-24.md` mục 9.
 
 ### 8.3. Tính năng liệt kê fanpage Facebook của profile (2026-10-24)
 
@@ -442,7 +442,7 @@ sẵn sàng), đóng tab trong `finally`. API
 `profile.facebook_pages`; UI có nút cờ + modal. Kiểm chứng: unit (mock) +
 live trên profile tạm (redirect login.php nhận diện đúng trong 1.3s);
 **75 passed** + E2E 24/24 không regression. Chi tiết:
-`docs/VERIFICATION_2026-10-24.md` mục 10.
+`docs/history/VERIFICATION_2026-10-24.md` mục 10.
 
 ### 8.4. Tối ưu quy mô ~20 profile (2026-10-24, cuối ngày)
 
@@ -452,7 +452,7 @@ ThreadPoolExecutor song song + auto max_concurrent theo RAM (8GB→4/16GB→6/
 ≥32GB→8) + API thread-pool 64 worker + double-check lock cho native-brands
 probe. Kiểm chứng: **80 passed**; scale test 8 profile batch 4 mở xong trong
 **8.1 giây** (trước fix kẹt vô hạn), 0 degraded, stop-all sạch. Chi tiết:
-`docs/VERIFICATION_2026-10-24.md` mục 12; runbook: `docs/OPERATIONS.md` 4.1.
+`docs/history/VERIFICATION_2026-10-24.md` mục 12; runbook: `docs/OPERATIONS.md` 4.1.
 
 ### 8.5. Quản lý fanpage nâng cao (2026-10-24, cuối ngày)
 
@@ -460,7 +460,7 @@ probe. Kiểm chứng: **80 passed**; scale test 8 profile batch 4 mở xong tro
 trạng thái Đang đăng/Dừng (≤7 ngày) và Sẵn sàng (tuổi ≥30 ngày). Pure helpers
 có unit test boundary; JS payload verify runtime trên Chrome thật; smoke
 server thật với deep=1 an toàn khi chưa login. **83 passed**. Chi tiết:
-`docs/VERIFICATION_2026-10-24.md` mục 13.
+`docs/history/VERIFICATION_2026-10-24.md` mục 13.
 
 ### 8.6. Vòng review thứ tư (2026-10-24, cuối ngày)
 
@@ -468,7 +468,7 @@ Bắt 2 bug thật qua regression: (1) record runtime stale của profile đã x
 chặn shutdown vĩnh viễn — `stop` giờ xử lý ghost profile + dọn record; (2)
 verify_live so exact connection native dao động → đổi sang structural check.
 **85 passed**; E2E 24/24; verify_live PASS. Chi tiết:
-`docs/VERIFICATION_2026-10-24.md` mục 14.
+`docs/history/VERIFICATION_2026-10-24.md` mục 14.
 
 ### 8.7. Giai đoạn 1 anti-detection (2026-10-24, cuối ngày)
 
@@ -479,7 +479,7 @@ thêm test `node --check` payload vĩnh viễn. Live probe chứng minh: 2 seed 
 DOMRect/MediaDevices khác nhau với instanceof nguyên vẹn. CreepJS Unique và
 Authentic đều **bằng đúng baseline Chrome sạch của máy (25% like-headless —
 đã đo trực tiếp trên Chrome không hook)**; Pixelscan authentic not detected.
-**90 passed**; E2E 24/24. Chi tiết: `docs/VERIFICATION_2026-10-24.md` mục 15.
+**90 passed**; E2E 24/24. Chi tiết: `docs/history/VERIFICATION_2026-10-24.md` mục 15.
 
 ### 8.8. Giai đoạn 2 (2026-10-24, cuối ngày)
 
@@ -488,7 +488,7 @@ per-profile STRICT → env → browsers/ mới nhất → installed; đã cài t
 155.0.8059.84 và E2E 24/24 chạy trọn trên pin), verify_live drift baseline
 (`--save-baseline` + tự so — ua đổi = Chrome update → re-audit farm), detector
 matrix + Iphey (chạy thật: "Trustworthy") + Fingerprint demo. Cascade test phát hiện test cũ giả lập sai 'missing browser' khi pin tồn tại — đã sửa. **95 passed**.
-Chi tiết: `docs/VERIFICATION_2026-10-24.md` mục 16; runbook
+Chi tiết: `docs/history/VERIFICATION_2026-10-24.md` mục 16; runbook
 `docs/OPERATIONS.md` mục 4.2.
 
 ### 8.9. Giai đoạn 3 (2026-10-24, cuối ngày)
@@ -500,7 +500,7 @@ TLS diversity qua browser pin + JA3/JA4 probe trong leak_audit (đo thật: pin
 WebGPU preset bỏ (same-OS user). Mock test còn bắt 1 bug thật
 (`new_page` ngoài try). **97 passed**; detector sau rework: CreepJS 0%/0%/0%,
 Pixelscan not detected, Iphey Trustworthy. Chi tiết:
-`docs/VERIFICATION_2026-10-24.md` mục 17.
+`docs/history/VERIFICATION_2026-10-24.md` mục 17.
 
 ### 8.10. Giai đoạn 4 (2026-10-24, cuối ngày)
 
@@ -509,7 +509,7 @@ qua CDP Input domain với mô hình người thật (keystroke lognormal + thin
 pause, bezier + overshoot, scroll gia tốc) — không inject JS. Fork Chromium
 dành sau (không cần khi detector sạch; roadmap đã ghi). Live probe: gõ 46 ký
 tự tiếng Việt chính xác, 46 keyup events, 17.6s. **98 passed**. Chi tiết:
-`docs/VERIFICATION_2026-10-24.md` mục 18; hướng dẫn `docs/OPERATIONS.md` 4.4.
+`docs/history/VERIFICATION_2026-10-24.md` mục 18; hướng dẫn `docs/OPERATIONS.md` 4.4.
 
 ### 8.11. Dashboard nâng cấp (2026-10-24, cuối ngày)
 

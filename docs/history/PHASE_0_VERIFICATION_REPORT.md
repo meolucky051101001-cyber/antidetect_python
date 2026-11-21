@@ -2,7 +2,7 @@
 
 Ngày hoàn thành: **05/11/2026**  
 Dự án: **Antidetect Python — Fanpage Manager**  
-Tài liệu tham chiếu: [FANPAGE_MANAGER_PLAN_2026-11-05.md](file:///C:/Projects/Tools/Antidetect%20Python/docs/FANPAGE_MANAGER_PLAN_2026-11-05.md)
+Tài liệu tham chiếu: [FANPAGE_MANAGER_PLAN_2026-11-05.md](file:///C:/Projects/Tools/Antidetect%20Python/FANPAGE_MANAGER_PLAN_2026-11-05.md)
 
 ---
 

@@ -83,7 +83,7 @@ STATUS PASS failures 0 warnings 0
 
 Hai profile có canvas hash và WebGL pixel hash khác nhau; không có warning
 collision. Đây là bằng chứng cho hai profile tạo ngẫu nhiên, **không** phải
-chứng minh không bao giờ xảy ra collision (xem `docs/LIMITATIONS.md`).
+chứng minh không bao giờ xảy ra collision (xem `../LIMITATIONS.md`).
 
 ---
 
@@ -459,7 +459,7 @@ có DNS riêng; không sửa được chỉ bằng flag Chrome. Endpoint mới
 - DPAPI cùng Windows user có thể giải mã; đây là giới hạn của DPAPI.
 - `server_control` phụ thuộc PowerShell CIM; nếu bị chặn, identity fail-closed.
 
-Các giới hạn chi tiết nằm trong [LIMITATIONS.md](LIMITATIONS.md).
+Các giới hạn chi tiết nằm trong [../LIMITATIONS.md](../LIMITATIONS.md).
 
 ---
 
