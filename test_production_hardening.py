@@ -263,6 +263,7 @@ def test_identity_unknown_is_not_cached(monkeypatch):
     record = {"Name": "chrome.exe", "CommandLine": "synthetic", "CreationDate": "birth-A"}
     process_identity.invalidate_identity()
     monkeypatch.setattr(process_identity, "_kernel32", FakeKernel32)
+    monkeypatch.setattr(process_identity, "_native_record", lambda *_: None)
     monkeypatch.setattr(process_identity, "windows_argv", lambda _: [
         "chrome.exe", "--user-data-dir=" + user_data_dir, "--remote-debugging-port=9333",
     ])

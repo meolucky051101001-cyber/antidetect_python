@@ -8,6 +8,8 @@ import time
 from ctypes import wintypes
 from typing import Any, Dict, Tuple
 
+import psutil
+
 _identity_cache: Dict[Tuple[int, str], Tuple[float, Dict[str, Any]]] = {}
 _BROWSER_NAMES = {"chrome.exe", "msedge.exe", "chromium.exe"}
 _QUERY = 0x1000
@@ -112,11 +114,29 @@ def _query_record(pid):
     return json.loads(result.stdout)
 
 
+def _cim_creation_date(ticks):
+    return f"/Date({(ticks - 116444736000000000) // 10000})/"
+
+
+def _native_record(pid, birth_ticks):
+    try:
+        process = psutil.Process(pid)
+        return {
+            "Name": process.name(),
+            "Argv": process.cmdline(),
+            "CreationDate": _cim_creation_date(birth_ticks),
+        }
+    except (psutil.Error, OSError):
+        return None
+
+
 def _identity_on_handle(api, handle, pid, expected_dir):
     before = _handle_snapshot(api, handle)
     if before["state"] != "candidate":
         return before
-    record = _query_record(pid)
+    record = _native_record(pid, before["birth_ticks"])
+    if record is None:
+        record = _query_record(pid)
     # Keep the original handle open throughout the command-line query. A
     # process that exits during CIM cannot lend its identity to a reused PID.
     after = _handle_snapshot(api, handle)
@@ -124,11 +144,15 @@ def _identity_on_handle(api, handle, pid, expected_dir):
         return after
     if before["birth_ticks"] != after["birth_ticks"]:
         return {"state": "unknown", "reason": "process_changed"}
-    if not isinstance(record, dict) or not record.get("CommandLine") or not record.get("CreationDate"):
+    if not isinstance(record, dict) or not record.get("CreationDate"):
+        return {"state": "unknown", "reason": "incomplete_process_query"}
+    argv = record.get("Argv")
+    command_line = record.get("CommandLine")
+    if not (isinstance(argv, list) and argv) and not command_line:
         return {"state": "unknown", "reason": "incomplete_process_query"}
     if record.get("Name", "").lower() not in _BROWSER_NAMES:
         return {"state": "unknown", "reason": "inconsistent_process_query"}
-    options = _options(windows_argv(record["CommandLine"]))
+    options = _options(argv if isinstance(argv, list) and argv else windows_argv(command_line))
     actual = options.get("user-data-dir")
     if not actual or os.path.normcase(os.path.realpath(actual)) != expected_dir:
         return {"state": "mismatch", "reason": "directory_mismatch"}
@@ -234,8 +258,7 @@ def terminate_verified_browser(pid, user_data_dir, expected_identity, timeout=8.
         invalidate_identity(pid)
 
 
-def browser_pids_using_dir(user_data_dir, exclude_pids=None):
-    """Return matching PIDs, or None if the scan cannot prove completeness."""
+def _browser_pids_using_dir_cim(user_data_dir, exclude_pids=None):
     if sys.platform != "win32" or not user_data_dir:
         return None
     try:
@@ -283,3 +306,37 @@ def browser_pids_using_dir(user_data_dir, exclude_pids=None):
         return pids
     except Exception:
         return None
+
+
+def browser_pids_using_dir(user_data_dir, exclude_pids=None):
+    """Return matching PIDs, or None if the scan cannot prove completeness."""
+    if sys.platform != "win32" or not user_data_dir:
+        return None
+    try:
+        expected = os.path.normcase(os.path.realpath(user_data_dir))
+        excluded = {int(pid) for pid in (exclude_pids or [])}
+        pids = set()
+        for process in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                record = process.info
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.AccessDenied:
+                return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
+            name = (record.get("name") or "").lower()
+            if name not in _BROWSER_NAMES:
+                continue
+            pid = int(record.get("pid"))
+            if pid <= 0:
+                return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
+            if pid in excluded:
+                continue
+            argv = record.get("cmdline")
+            if not argv:
+                return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
+            actual = _options(argv).get("user-data-dir")
+            if actual and os.path.normcase(os.path.realpath(actual)) == expected:
+                pids.add(pid)
+        return pids
+    except Exception:
+        return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
