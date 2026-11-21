@@ -229,10 +229,8 @@ Chi tiết và bằng chứng: `docs/VERIFICATION_2026-10-24.md`.
   `web/static/`. Phần lõi vẫn lớn: `launcher.py` còn ~1.9k dòng (launch/CDP) và
   `web/app.py` ~1.4k dòng với route + singleton khởi tạo lúc import; chưa có
   router/DTO/service đầy đủ, chưa bỏ hết singleton.
-- **Inline handler:** `index.html` còn ~68 handler `onclick=...`, nên CSP vẫn
-  phải giữ `script-src-attr 'unsafe-inline'` (inline `<script>` đã bỏ hẳn,
-  `script-src 'self'`). Bỏ nốt cần chuyển toàn bộ handler sang
-  `addEventListener` trong `dashboard.js`.
+- **Inline handler:** đã bỏ hết; sự kiện đi qua `web/static/js/actions.js`
+  và CSP dùng `script-src-attr 'none'`.
 - **UI automation:** Playwright smoke (`test_ui_smoke.py`) đã có, phủ tạo/sửa/
   export/import/lịch/start/stop trên Chrome thật + data tạm. Test **không chạy
   trong CI** (Playwright là dependency tùy chọn) nhưng **bắt buộc trong checklist
@@ -317,10 +315,10 @@ Chi tiết và bằng chứng: `docs/VERIFICATION_2026-10-24.md`.
 ## 7. Bảo mật & vận hành
 
 - DPAPI bảo vệ secret theo tài khoản Windows; cùng user có thể giải mã.
-- CSP non-docs: `script-src 'self'`, `script-src-attr 'unsafe-inline'`,
-  `style-src 'self' 'unsafe-inline'`. Không còn inline `<script>` (script
-  `/unlock` nằm ở `/static/js/unlock.js`), nhưng ~68 inline event handler vẫn
-  buộc phải cho phép attribute; docs routes nới lỏng cho Swagger CDN.
+- CSP non-docs: `script-src 'self'`, `script-src-attr 'none'`,
+  `connect-src 'self'`, `img-src 'self' data:`, còn
+  `style-src 'self' 'unsafe-inline'`. Không còn inline `<script>` hay inline
+  event handler; docs routes nới lỏng cho Swagger CDN.
 - Metadata profile (tên, proxy host, fingerprint) không được mã hóa at-rest.
 - `server_control`/`process_identity` dùng PowerShell CIM để lấy command line và
   creation time. Nếu PowerShell bị chặn, identity fail-closed (không kill) và có

@@ -946,7 +946,7 @@ def test_facebook_deep_ui_present():
     js = open(
         os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
     ).read()
-    assert "refreshFanpages(true)" in html
+    assert """data-on-click="refreshFanpages" data-on-click-args='[true]'""" in html
     assert "deep=1" in js
     assert "Đang đăng" in js and "Lâu chưa thấy bài mới" in js and "Sẵn sàng" in js
     assert "Dữ liệu cũ, cần đồng bộ" in js

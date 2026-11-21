@@ -74,14 +74,14 @@ def _create_profile(page, server, name):
     with page.expect_response(
         lambda r: "/api/fingerprint/random" in r.url and r.request.method == "GET"
     ):
-        page.click("button[onclick='openCreateModal()']")
+        page.click("button[data-on-click='openCreateModal']")
     page.wait_for_selector("#createModal:not(.hidden)")
     page.wait_for_function("() => document.getElementById('create-adv-canvas').value !== ''")
     page.fill("#p-name", name)
     with page.expect_response(
         lambda r: r.url.endswith("/api/profiles") and r.request.method == "POST"
     ) as result:
-        page.click("#createModal button[onclick='submitCreateProfile()']")
+        page.click("#createModal button[data-on-click='submitCreateProfile']")
     assert result.value.status == 200, result.value.text()
     row = page.locator("tr[data-profile-id]").filter(has_text=name)
     row.wait_for()
@@ -101,13 +101,13 @@ def test_malformed_batch_import_has_no_partial_profiles(dashboard, live_server, 
         {"name": "UI invalid sync time", "facebook_pages_synced_at": "not a timestamp"},
         ["not an object"],
     ]
-    page.click("button[onclick='openImportModal()']")
+    page.click("button[data-on-click='openImportModal']")
     page.wait_for_selector("#importModal:not(.hidden)")
     page.fill("#import-text", json.dumps({"version": 1, "profiles": entries}))
     with page.expect_response(
         lambda r: r.url.endswith("/api/profiles/import") and r.request.method == "POST"
     ) as response:
-        page.click("#importModal button[onclick=\"doImport('text')\"]")
+        page.click("#importModal button[data-on-click='doImport'][data-on-click-args='[\"text\"]']")
     assert response.value.status == 200
     result = response.value.json()
     assert result["success"] is False
@@ -127,7 +127,7 @@ def test_malformed_batch_import_has_no_partial_profiles(dashboard, live_server, 
     assert {profile["id"] for profile in persisted} == expected_ids
     assert next(p for p in persisted if p["id"] == valid_id)["notes"] == entries[0]["notes"]
     assert {item.name for item in profile_dir.iterdir()} == before_dirs
-    page.click("#importModal button[onclick='closeImportModal()']")
+    page.click("#importModal button[data-on-click='closeImportModal']")
     _profile_row(page, valid_id).filter(has_text=entries[0]["name"]).wait_for()
     record_property("observed", "HTTP 200 batch: 1 committed, 3 rejected; UI counts and errors; no orphan directories")
 
@@ -136,7 +136,7 @@ def test_stale_edit_shows_conflict_and_preserves_newer_data(dashboard, live_serv
     page = dashboard
     original = _create_profile(page, live_server, "UI revision original")
     profile_id = original["id"]
-    _profile_row(page, profile_id).locator("button[onclick^='openEditModal']").click()
+    _profile_row(page, profile_id).locator("button[data-on-click='openEditModal']").click()
     page.wait_for_selector("#editModal:not(.hidden)")
     page.fill("#edit-name", "UI stale edit must not win")
     page.fill("#edit-notes", "Stale notes must not overwrite.")
@@ -151,7 +151,7 @@ def test_stale_edit_shows_conflict_and_preserves_newer_data(dashboard, live_serv
     with page.expect_response(
         lambda r: r.url.endswith(f"/api/profiles/{profile_id}") and r.request.method == "PUT"
     ) as response:
-        page.click("#editModal button[onclick='submitSaveProfileEdit()']")
+        page.click("#editModal button[data-on-click='submitSaveProfileEdit']")
     assert response.value.status == 409, response.value.text()
     stale_payload = response.value.request.post_data_json
     assert stale_payload["expected_revision"] == original["revision"]
@@ -163,7 +163,7 @@ def test_stale_edit_shows_conflict_and_preserves_newer_data(dashboard, live_serv
     for key in ("name", "notes", "tags", "revision", "fingerprint"):
         assert fresh[key] == latest[key], key
         assert persisted[key] == latest[key], key
-    _profile_row(page, profile_id).locator("button[onclick^='openEditModal']").click()
+    _profile_row(page, profile_id).locator("button[data-on-click='openEditModal']").click()
     page.wait_for_selector("#editModal:not(.hidden)")
     assert page.input_value("#edit-name") == latest["name"]
     assert page.input_value("#edit-notes") == latest["notes"]
@@ -184,12 +184,12 @@ def test_fingerprint_revision_and_verification_controls_preserve_then_migrate(
     legacy = _api(page, live_server, "PUT", f"/api/profiles/{profile_id}", {
         "fingerprint": fingerprint, "expected_revision": created["revision"],
     })
-    page.click("button[onclick='refreshProfiles()']")
+    page.click("button[data-on-click='refreshProfiles']")
     page.wait_for_function("""([id, revision]) => currentProfiles.some(
         p => p.id === id && p.revision === revision)""", arg=[profile_id, legacy["revision"]])
 
     def edit_and_save(algorithm, mode, expected_revision, *, migrate=False):
-        _profile_row(page, profile_id).locator("button[onclick^='openEditModal']").click()
+        _profile_row(page, profile_id).locator("button[data-on-click='openEditModal']").click()
         page.wait_for_selector("#editModal:not(.hidden)")
         assert page.input_value("#edit-fp-algorithm") == "1"
         assert page.input_value("#edit-fp-verification") == "compatibility"
@@ -201,7 +201,7 @@ def test_fingerprint_revision_and_verification_controls_preserve_then_migrate(
         with page.expect_response(
             lambda r: r.url.endswith(f"/api/profiles/{profile_id}") and r.request.method == "PUT"
         ) as response:
-            page.click("#editModal button[onclick='submitSaveProfileEdit()']")
+            page.click("#editModal button[data-on-click='submitSaveProfileEdit']")
         assert response.value.status == 200, response.value.text()
         payload = response.value.request.post_data_json
         assert payload["expected_revision"] == expected_revision
@@ -271,9 +271,9 @@ def test_real_scheduler_failure_and_accepted_job_are_distinct(dashboard, live_se
         assert any(issue["code"] == "ua_os_mismatch" and issue["severity"] == "critical"
                    for issue in audited["issues"]), audited
 
-        page.click("button[onclick='refreshProfiles()']")
+        page.click("button[data-on-click='refreshProfiles']")
         _profile_row(page, blocked_profile["id"]).wait_for()
-        page.click("button[onclick='openSchedulesModal()']")
+        page.click("button[data-on-click='openSchedulesModal']")
         page.wait_for_selector("#schedulesModal:not(.hidden)")
         names = ("UI real proxy failure", "UI real accepted fanpage")
         rule_ids = []
@@ -303,9 +303,9 @@ def test_real_scheduler_failure_and_accepted_job_are_distinct(dashboard, live_se
             assert _api(page, live_server, "GET", f"/api/profiles/{blocked_profile['id']}")["status"] == "stopped"
 
             # Reopen through UI so the real GET /api/schedules drives rendering.
-            page.click("#schedulesModal button[onclick='closeSchedulesModal()']")
+            page.click("#schedulesModal button[data-on-click='closeSchedulesModal']")
             with page.expect_response(lambda r: r.url.endswith("/api/schedules") and r.request.method == "GET"):
-                page.click("button[onclick='openSchedulesModal()']")
+                page.click("button[data-on-click='openSchedulesModal']")
             failed_row = page.locator("#schedule-runs > div").filter(has_text=names[0])
             failed_row.filter(has_text="Thất bại").wait_for()
             assert "Có lịch thử lại" in failed_row.inner_text()

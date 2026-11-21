@@ -726,9 +726,11 @@ def test_docs_csp_allows_cdn_while_dashboard_stays_strict():
     dashboard_csp = client.get("/").headers["content-security-policy"]
     assert "cdn.jsdelivr.net" not in dashboard_csp
     assert "fonts.googleapis.com" not in dashboard_csp
-    # P1-8: script block nằm ở /static; inline handler vẫn được phép riêng.
     assert "script-src 'self';" in dashboard_csp
-    assert "script-src-attr 'unsafe-inline';" in dashboard_csp
+    assert "script-src-attr 'none';" in dashboard_csp
+    assert "unsafe-inline';" not in dashboard_csp.split("style-src")[0]
+    assert "connect-src 'self';" in dashboard_csp
+    assert "img-src 'self' data:;" in dashboard_csp
 
 
 def test_login_non_ascii_token_returns_401_not_500():

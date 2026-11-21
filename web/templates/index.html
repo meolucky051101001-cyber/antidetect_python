@@ -48,30 +48,30 @@
             <div class="hidden md:flex items-center space-x-2 px-3 py-1.5 bg-slate-800/80 border border-slate-700/60 rounded-xl text-xs" id="network-ip-pill" title="Bấm để kiểm tra lại địa chỉ IP mạng thật">
                 <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                 <span class="text-slate-400">IP Mạng:</span>
-                <span id="current-ip-display" class="font-mono font-semibold text-slate-200 cursor-pointer hover:text-blue-400 transition" onclick="checkCurrentNetworkIp()">Đang kiểm tra...</span>
+                <span id="current-ip-display" class="font-mono font-semibold text-slate-200 cursor-pointer hover:text-blue-400 transition" data-on-click="checkCurrentNetworkIp">Đang kiểm tra...</span>
                 <span id="current-ip-location" class="text-[11px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 font-medium">📍 Hà Nội</span>
             </div>
 
-            <button onclick="toggleTheme()" class="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition" title="Chuyển Dark / Light mode">
+            <button data-on-click="toggleTheme" class="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition" title="Chuyển Dark / Light mode">
                 <span class="theme-icon-moon inline-block"><i data-lucide="moon" class="w-4 h-4"></i></span>
                 <span class="theme-icon-sun inline-block"><i data-lucide="sun" class="w-4 h-4"></i></span>
             </button>
-            <button onclick="openSchedulesModal()" class="p-2 text-slate-400 hover:text-violet-400 hover:bg-slate-800 rounded-lg transition" title="Lịch tự động (mở/đóng/sync vị trí theo giờ)">
+            <button data-on-click="openSchedulesModal" class="p-2 text-slate-400 hover:text-violet-400 hover:bg-slate-800 rounded-lg transition" title="Lịch tự động (mở/đóng/sync vị trí theo giờ)">
                 <i data-lucide="calendar-clock" class="w-4 h-4"></i>
             </button>
-            <button onclick="openTokenModal()" class="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition" title="API token dài hạn cho automation">
+            <button data-on-click="openTokenModal" class="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition" title="API token dài hạn cho automation">
                 <i data-lucide="key-round" class="w-4 h-4"></i>
             </button>
-            <button onclick="openLogsModal()" class="p-2 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition" title="Nhật ký hệ thống (app.log)">
+            <button data-on-click="openLogsModal" class="p-2 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition" title="Nhật ký hệ thống (app.log)">
                 <i data-lucide="scroll-text" class="w-4 h-4"></i>
             </button>
-            <button onclick="refreshProfiles()" class="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition" title="Làm mới danh sách">
+            <button data-on-click="refreshProfiles" class="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition" title="Làm mới danh sách">
                 <i data-lucide="refresh-cw" class="w-4 h-4"></i>
             </button>
-            <button onclick="shutdownServer()" class="p-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition" title="Tắt hoàn toàn ứng dụng chạy ngầm">
+            <button data-on-click="shutdownServer" class="p-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition" title="Tắt hoàn toàn ứng dụng chạy ngầm">
                 <i data-lucide="power" class="w-4 h-4"></i>
             </button>
-            <button onclick="openCreateModal()" class="flex items-center space-x-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg shadow-md shadow-blue-600/20 transition">
+            <button data-on-click="openCreateModal" class="flex items-center space-x-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg shadow-md shadow-blue-600/20 transition">
                 <i data-lucide="plus" class="w-4 h-4"></i>
                 <span>Tạo Profile Mới</span>
             </button>
@@ -103,7 +103,7 @@
                 </div>
             </div>
 
-            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex items-center space-x-4 cursor-pointer hover:border-blue-500/40 transition" onclick="showFilter('proxy')" title="Bấm để lọc profile có proxy">
+            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex items-center space-x-4 cursor-pointer hover:border-blue-500/40 transition" data-on-click="showFilter" data-on-click-args='["proxy"]' title="Bấm để lọc profile có proxy">
                 <div class="p-3 bg-purple-500/10 text-purple-400 rounded-lg">
                     <i data-lucide="globe" class="w-6 h-6"></i>
                 </div>
@@ -113,7 +113,7 @@
                 </div>
             </div>
 
-            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex items-center space-x-4 cursor-pointer hover:border-amber-500/40 transition" onclick="window.location.href='/fanpages'" title="Bấm để mở Fanpage Manager — quản lý danh mục fanpage hợp nhất">
+            <div class="bg-cardBg border border-borderBg rounded-xl p-4 flex items-center space-x-4 cursor-pointer hover:border-amber-500/40 transition" data-on-click="navigateTo" data-on-click-args='["/fanpages"]' title="Bấm để mở Fanpage Manager — quản lý danh mục fanpage hợp nhất">
                 <div class="p-3 bg-amber-500/10 text-amber-400 rounded-lg">
                     <i data-lucide="flag" class="w-6 h-6"></i>
                 </div>
@@ -132,45 +132,45 @@
                     <p class="text-xs text-slate-400">Mỗi profile sở hữu thư mục dữ liệu (User Data Dir) và dấu vân tay cô lập hoàn toàn.</p>
                 </div>
                 <div class="flex items-center space-x-2.5">
-                    <button onclick="startAllProfiles()" class="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Khởi chạy toàn bộ profile cùng lúc">
+                    <button data-on-click="startAllProfiles" class="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Khởi chạy toàn bộ profile cùng lúc">
                         <i data-lucide="play-circle" class="w-4 h-4"></i>
                         <span>Mở Tất Cả</span>
                     </button>
-                    <button onclick="stopAllProfiles()" class="px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Dừng toàn bộ trình duyệt đang chạy">
+                    <button data-on-click="stopAllProfiles" class="px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Dừng toàn bộ trình duyệt đang chạy">
                         <i data-lucide="stop-circle" class="w-4 h-4"></i>
                         <span>Đóng Tất Cả</span>
                     </button>
-                    <button onclick="switchAllLocationModal()" class="px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600 text-amber-400 hover:text-white border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Chuyển vùng vị trí tất cả profile sang Hà Nội hoặc thành phố khác">
+                    <button data-on-click="switchAllLocationModal" class="px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600 text-amber-400 hover:text-white border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Chuyển vùng vị trí tất cả profile sang Hà Nội hoặc thành phố khác">
                         <i data-lucide="map-pin" class="w-4 h-4"></i>
                         <span>Chuyển Vị Trí</span>
                     </button>
-                    <button onclick="openWizardModal()" class="px-3 py-1.5 bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white border border-violet-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Tạo hàng loạt profile cùng cấu hình, fingerprint riêng từng profile">
+                    <button data-on-click="openWizardModal" class="px-3 py-1.5 bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white border border-violet-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Tạo hàng loạt profile cùng cấu hình, fingerprint riêng từng profile">
                         <i data-lucide="wand-2" class="w-4 h-4"></i>
                         <span>Tạo Hàng Loạt</span>
                     </button>
-                    <button onclick="openAuditModal()" class="px-3 py-1.5 bg-sky-600/20 hover:bg-sky-600 text-sky-300 hover:text-white border border-sky-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Kiểm tra sức khoẻ dấu vân tay, phát hiện trùng lặp và sửa an toàn">
+                    <button data-on-click="openAuditModal" class="px-3 py-1.5 bg-sky-600/20 hover:bg-sky-600 text-sky-300 hover:text-white border border-sky-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm" title="Kiểm tra sức khoẻ dấu vân tay, phát hiện trùng lặp và sửa an toàn">
                         <i data-lucide="shield-check" class="w-4 h-4"></i>
                         <span>Kiểm Tra FP</span>
                     </button>
-                    <button onclick="exportProfiles()" class="p-2 text-slate-400 hover:text-emerald-400 hover:bg-slate-800 rounded-lg transition" title="Xuất toàn bộ profile ra JSON (không kèm mật khẩu)" id="btn-export">
+                    <button data-on-click="exportProfiles" class="p-2 text-slate-400 hover:text-emerald-400 hover:bg-slate-800 rounded-lg transition" title="Xuất toàn bộ profile ra JSON (không kèm mật khẩu)" id="btn-export">
                         <i data-lucide="download" class="w-4 h-4"></i>
                     </button>
-                    <button onclick="openImportModal()" class="p-2 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition" title="Nhập profiles từ JSON export">
+                    <button data-on-click="openImportModal" class="p-2 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition" title="Nhập profiles từ JSON export">
                         <i data-lucide="upload" class="w-4 h-4"></i>
                     </button>
                     <div class="relative">
                         <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-                        <input type="text" id="searchInput" oninput="filterProfiles()" placeholder="Tìm kiếm profile..." class="bg-slate-900 border border-borderBg rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-56">
+                        <input type="text" id="searchInput" data-on-input="filterProfiles" placeholder="Tìm kiếm profile..." class="bg-slate-900 border border-borderBg rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 w-56">
                     </div>
                 </div>
                 <!-- Bộ lọc nhanh -->
                 <div class="flex flex-wrap items-center gap-1.5" id="filter-chips">
-                    <button data-filter-chip="all" onclick="setFilter('all')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Tất cả</button>
-                    <button data-filter-chip="running" onclick="setFilter('running')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Đang chạy</button>
-                    <button data-filter-chip="stopped" onclick="setFilter('stopped')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Đã dừng</button>
-                    <button data-filter-chip="proxy" onclick="setFilter('proxy')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Có proxy</button>
-                    <button data-filter-chip="authentic" onclick="setFilter('authentic')" class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition" title="Chế độ Authentic: tắt các hook đã chọn, có thể chia sẻ đặc điểm máy">Authentic</button>
-                    <select id="tag-filter" onchange="filterProfiles()" class="bg-slate-900 border border-borderBg rounded-lg px-2 py-1 text-[11px] text-slate-300">
+                    <button data-filter-chip="all" data-on-click="setFilter" data-on-click-args='["all"]' class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Tất cả</button>
+                    <button data-filter-chip="running" data-on-click="setFilter" data-on-click-args='["running"]' class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Đang chạy</button>
+                    <button data-filter-chip="stopped" data-on-click="setFilter" data-on-click-args='["stopped"]' class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Đã dừng</button>
+                    <button data-filter-chip="proxy" data-on-click="setFilter" data-on-click-args='["proxy"]' class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition">Có proxy</button>
+                    <button data-filter-chip="authentic" data-on-click="setFilter" data-on-click-args='["authentic"]' class="filter-chip px-2.5 py-1 rounded-lg text-[11px] font-medium border transition" title="Chế độ Authentic: tắt các hook đã chọn, có thể chia sẻ đặc điểm máy">Authentic</button>
+                    <select id="tag-filter" data-on-change="filterProfiles" class="bg-slate-900 border border-borderBg rounded-lg px-2 py-1 text-[11px] text-slate-300">
                         <option value="">Tag: tất cả</option>
                     </select>
                     <span class="text-[11px] text-slate-500 ml-1" id="filter-count"></span>
@@ -178,11 +178,11 @@
                 <!-- Bulk action bar (Đợt B) -->
                 <div id="bulk-bar" class="hidden w-full flex flex-wrap items-center gap-2 px-3 py-2 bg-blue-500/10 border border-blue-500/30 rounded-lg text-xs">
                     <span class="text-blue-400 font-semibold" id="bulk-count">0 đã chọn</span>
-                    <button onclick="bulkStart()" class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/30 rounded-lg font-medium transition">Bật đã chọn</button>
-                    <button onclick="bulkStop()" class="px-2.5 py-1 bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 rounded-lg font-medium transition">Đóng đã chọn</button>
-                    <button onclick="bulkResetFp()" class="px-2.5 py-1 bg-amber-600/20 hover:bg-amber-600 text-amber-400 hover:text-white border border-amber-500/30 rounded-lg font-medium transition">Reset FP</button>
-                    <button onclick="bulkDelete()" class="px-2.5 py-1 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 rounded-lg font-medium transition">Xóa</button>
-                    <button onclick="clearSelection()" class="ml-auto text-slate-400 hover:text-white px-2 py-1 transition">Bỏ chọn</button>
+                    <button data-on-click="bulkStart" class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/30 rounded-lg font-medium transition">Bật đã chọn</button>
+                    <button data-on-click="bulkStop" class="px-2.5 py-1 bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 rounded-lg font-medium transition">Đóng đã chọn</button>
+                    <button data-on-click="bulkResetFp" class="px-2.5 py-1 bg-amber-600/20 hover:bg-amber-600 text-amber-400 hover:text-white border border-amber-500/30 rounded-lg font-medium transition">Reset FP</button>
+                    <button data-on-click="bulkDelete" class="px-2.5 py-1 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 rounded-lg font-medium transition">Xóa</button>
+                    <button data-on-click="clearSelection" class="ml-auto text-slate-400 hover:text-white px-2 py-1 transition">Bỏ chọn</button>
                 </div>
             </div>
 
@@ -198,7 +198,7 @@
                         <div id="start-all-progress-bar" class="bg-blue-500 h-full rounded-full transition-all duration-300" style="width: 0%"></div>
                     </div>
                 </div>
-                <button onclick="cancelStartAllJob()" class="px-2.5 py-1 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white rounded-lg text-[11px] font-medium transition flex items-center space-x-1">
+                <button data-on-click="cancelStartAllJob" class="px-2.5 py-1 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white rounded-lg text-[11px] font-medium transition flex items-center space-x-1">
                     <i data-lucide="x-circle" class="w-3.5 h-3.5"></i>
                     <span>Hủy Hàng Đợi</span>
                 </button>
@@ -209,7 +209,7 @@
                     <thead class="bg-slate-900/50 text-slate-400 uppercase font-semibold text-[11px] border-b border-borderBg">
                         <tr>
                             <th class="py-3.5 px-3 w-8">
-                                <input type="checkbox" id="select-all-chk" onchange="toggleSelectAll(this.checked)" class="accent-blue-500 cursor-pointer" title="Chọn tất cả (trong bộ lọc)">
+                                <input type="checkbox" id="select-all-chk" data-on-change="toggleSelectAll" data-on-change-args='["$checked"]' class="accent-blue-500 cursor-pointer" title="Chọn tất cả (trong bộ lọc)">
                             </th>
                             <th class="py-3.5 px-4">Tên Profile</th>
                             <th class="py-3.5 px-4">Hệ Điều Hành & WebGL</th>
@@ -246,7 +246,7 @@
                     <i data-lucide="plus-circle" class="w-5 h-5 text-blue-400"></i>
                     <h3 class="font-bold text-base">Tạo Profile Mới</h3>
                 </div>
-                <button onclick="closeCreateModal()" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800">
+                <button data-on-click="closeCreateModal" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800">
                     <i data-lucide="x" class="w-5 h-5"></i>
                 </button>
             </div>
@@ -261,7 +261,7 @@
                     </div>
                     <div>
                         <label class="block font-medium text-slate-300 mb-1">Hệ điều hành giả lập</label>
-                        <select id="p-os" onchange="onOsChange()" class="w-full bg-cardBg border border-borderBg rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-blue-500">
+                        <select id="p-os" data-on-change="onOsChange" class="w-full bg-cardBg border border-borderBg rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-blue-500">
                             <option value="windows">Windows 10/11 (PC)</option>
                             <option value="macos">macOS (Apple Silicon / Intel)</option>
                             <option value="linux">Linux (Ubuntu/X11)</option>
@@ -277,7 +277,7 @@
                             <span class="font-semibold text-slate-200">Cấu Hình Proxy Tùy Chỉnh</span>
                         </div>
                         <label class="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" id="p-proxy-enable" onchange="toggleProxyInputs()" class="sr-only peer">
+                            <input type="checkbox" id="p-proxy-enable" data-on-change="toggleProxyInputs" class="sr-only peer">
                             <div class="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
                         </label>
                     </div>
@@ -313,7 +313,7 @@
                         </div>
 
                         <div class="flex items-center justify-between pt-1">
-                            <button type="button" onclick="testProxyInModal('create')" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg flex items-center space-x-1.5 transition">
+                            <button type="button" data-on-click="testProxyInModal" data-on-click-args='["create"]' class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg flex items-center space-x-1.5 transition">
                                 <i data-lucide="check-circle" class="w-3.5 h-3.5 text-blue-400"></i>
                                 <span>Kiểm tra Proxy & Lấy GeoIP</span>
                             </button>
@@ -330,11 +330,11 @@
                             <span class="font-semibold text-slate-200">Dấu Vân Tay (Fingerprint)</span>
                         </div>
                         <div class="flex items-center space-x-2">
-                            <button type="button" onclick="toggleAdvancedFp('create')" class="text-xs text-slate-400 hover:text-white flex items-center space-x-1">
+                            <button type="button" data-on-click="toggleAdvancedFp" data-on-click-args='["create"]' class="text-xs text-slate-400 hover:text-white flex items-center space-x-1">
                                 <i data-lucide="sliders" class="w-3.5 h-3.5"></i>
                                 <span id="create-adv-toggle-text">Tùy chỉnh sâu</span>
                             </button>
-                            <button type="button" onclick="regenerateFingerprintPreview()" class="text-blue-400 hover:text-blue-300 flex items-center space-x-1">
+                            <button type="button" data-on-click="regenerateFingerprintPreview" class="text-blue-400 hover:text-blue-300 flex items-center space-x-1">
                                 <i data-lucide="dice-5" class="w-3.5 h-3.5"></i>
                                 <span>Ngẫu nhiên lại</span>
                             </button>
@@ -344,7 +344,7 @@
                     <!-- Quick Preset Selector in Create Modal -->
                     <div>
                         <label class="block text-slate-400 mb-1">Chọn mẫu cấu hình dựng sẵn (1-Click Preset)</label>
-                        <select id="create-preset-select" onchange="applyPresetToCreate(this.value)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-2 text-xs text-amber-400 font-medium">
+                        <select id="create-preset-select" data-on-change="applyPresetToCreate" data-on-change-args='["$value"]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-2 text-xs text-amber-400 font-medium">
                             <option value="">-- Chọn cấu hình mẫu phần cứng --</option>
                         </select>
                     </div>
@@ -384,7 +384,7 @@
                         <div class="grid grid-cols-2 gap-3">
                             <div>
                                 <label class="block text-slate-400 mb-1">Độ phân giải màn hình</label>
-                                <select id="create-adv-res" onchange="onAdvResolutionChange('create')" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs">
+                                <select id="create-adv-res" data-on-change="onAdvResolutionChange" data-on-change-args='["create"]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs">
                                     <option value="1920,1080">1920 x 1080 (Full HD)</option>
                                     <option value="2560,1440">2560 x 1440 (2K QHD)</option>
                                     <option value="1536,864">1536 x 864 (Laptop 14")</option>
@@ -398,7 +398,7 @@
                                 <label class="block text-slate-400 mb-1">Canvas Noise Seed</label>
                                 <div class="flex space-x-1.5">
                                     <input type="number" id="create-adv-canvas" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs font-mono text-amber-400">
-                                    <button type="button" onclick="randomizeCanvasSeed('create')" class="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300" title="Random seed">
+                                    <button type="button" data-on-click="randomizeCanvasSeed" data-on-click-args='["create"]' class="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300" title="Random seed">
                                         <i data-lucide="dice-5" class="w-4 h-4"></i>
                                     </button>
                                 </div>
@@ -407,7 +407,7 @@
 
                         <div>
                             <label class="block text-slate-400 mb-1">Card Đồ Họa WebGL Renderer (GPU)</label>
-                            <select id="create-adv-gpu-select" onchange="onGpuSelectChange('create')" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs font-mono">
+                            <select id="create-adv-gpu-select" data-on-change="onGpuSelectChange" data-on-change-args='["create"]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs font-mono">
                                 <!-- Populated dynamically -->
                             </select>
                         </div>
@@ -442,7 +442,7 @@
                         <div class="grid grid-cols-2 gap-3">
                             <div>
                                 <label class="block text-slate-400 mb-1">Múi giờ (Timezone)</label>
-                                <select id="create-adv-tz-select" onchange="onTimezoneSelectChange('create')" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs">
+                                <select id="create-adv-tz-select" data-on-change="onTimezoneSelectChange" data-on-change-args='["create"]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs">
                                     <!-- Populated dynamically -->
                                 </select>
                             </div>
@@ -473,7 +473,7 @@
                             <div class="grid grid-cols-3 gap-2">
                                 <div>
                                     <label class="block text-[11px] text-slate-400 mb-1">Chọn thành phố</label>
-                                    <select id="create-adv-city" onchange="onCityChange('create', this.value)" class="w-full bg-slate-800 border border-borderBg rounded-lg px-2 py-1.5 text-xs text-amber-400 font-semibold">
+                                    <select id="create-adv-city" data-on-change="onCityChange" data-on-change-args='["create", "$value"]' class="w-full bg-slate-800 border border-borderBg rounded-lg px-2 py-1.5 text-xs text-amber-400 font-semibold">
                                         <option value="hanoi" selected>📍 Hà Nội (Khuyên dùng)</option>
                                         <option value="hcm">📍 TP. Hồ Chí Minh</option>
                                         <option value="danang">📍 Đà Nẵng</option>
@@ -505,8 +505,8 @@
 
             <!-- Modal Footer -->
             <div class="p-4 border-t border-borderBg bg-slate-900 flex justify-end space-x-3">
-                <button onclick="closeCreateModal()" class="px-4 py-2 text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition font-medium">Hủy bỏ</button>
-                <button onclick="submitCreateProfile()" class="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-lg shadow-blue-600/20 transition font-medium flex items-center space-x-2">
+                <button data-on-click="closeCreateModal" class="px-4 py-2 text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition font-medium">Hủy bỏ</button>
+                <button data-on-click="submitCreateProfile" class="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-lg shadow-blue-600/20 transition font-medium flex items-center space-x-2">
                     <i data-lucide="check" class="w-4 h-4"></i>
                     <span>Tạo Profile</span>
                 </button>
@@ -523,7 +523,7 @@
                     <i data-lucide="settings" class="w-5 h-5 text-blue-400"></i>
                     <h3 class="font-bold text-base">Tùy Chỉnh Cấu Hình Profile & Proxy</h3>
                 </div>
-                <button onclick="closeEditModal()" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800">
+                <button data-on-click="closeEditModal" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800">
                     <i data-lucide="x" class="w-5 h-5"></i>
                 </button>
             </div>
@@ -556,7 +556,7 @@
                             <span class="font-semibold text-slate-200">Proxy Tùy Chỉnh Cho Profile Này</span>
                         </div>
                         <label class="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" id="edit-proxy-enable" onchange="toggleEditProxyInputs()" class="sr-only peer">
+                            <input type="checkbox" id="edit-proxy-enable" data-on-change="toggleEditProxyInputs" class="sr-only peer">
                             <div class="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
                         </label>
                     </div>
@@ -592,7 +592,7 @@
                         </div>
 
                         <div class="flex items-center justify-between pt-1">
-                            <button type="button" onclick="testProxyInModal('edit')" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg flex items-center space-x-1.5 transition">
+                            <button type="button" data-on-click="testProxyInModal" data-on-click-args='["edit"]' class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg flex items-center space-x-1.5 transition">
                                 <i data-lucide="check-circle" class="w-3.5 h-3.5 text-blue-400"></i>
                                 <span>Kiểm tra Proxy & Cập nhật GeoIP</span>
                             </button>
@@ -608,7 +608,7 @@
                             <i data-lucide="fingerprint" class="w-4 h-4 text-amber-400"></i>
                             <span class="font-semibold text-slate-200">Tùy Chỉnh Dấu Vân Tay (Fingerprint)</span>
                         </div>
-                        <button type="button" onclick="resetFingerprintInEditModal()" class="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-lg flex items-center space-x-1.5 transition font-medium">
+                        <button type="button" data-on-click="resetFingerprintInEditModal" class="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-lg flex items-center space-x-1.5 transition font-medium">
                             <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
                             <span>Sinh Ngẫu Nhiên Lại (Reset)</span>
                         </button>
@@ -620,7 +620,7 @@
                             <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
                             <span>Chọn cấu hình mẫu dựng sẵn (Bấm là áp dụng ngay):</span>
                         </label>
-                        <select id="edit-preset-select" onchange="applyPresetToEdit(this.value)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-2 text-xs text-slate-200 font-medium">
+                        <select id="edit-preset-select" data-on-change="applyPresetToEdit" data-on-change-args='["$value"]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-2 text-xs text-slate-200 font-medium">
                             <option value="">-- Bấm chọn cấu hình mẫu phần cứng --</option>
                         </select>
                     </div>
@@ -630,7 +630,7 @@
                         <div class="grid grid-cols-2 gap-3">
                             <div>
                                 <label class="block text-slate-400 mb-1">Hệ điều hành</label>
-                                <select id="edit-fp-os" onchange="onEditOsChange(this.value)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5">
+                                <select id="edit-fp-os" data-on-change="onEditOsChange" data-on-change-args='["$value"]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5">
                                     <option value="windows">Windows 10/11</option>
                                     <option value="macos">macOS (Apple Silicon / Intel)</option>
                                     <option value="linux">Linux (Ubuntu/X11)</option>
@@ -638,7 +638,7 @@
                             </div>
                             <div>
                                 <label class="block text-slate-400 mb-1">Độ phân giải Màn hình</label>
-                                <select id="edit-fp-res-select" onchange="onEditResolutionSelect(this.value)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 font-mono">
+                                <select id="edit-fp-res-select" data-on-change="onEditResolutionSelect" data-on-change-args='["$value"]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 font-mono">
                                     <option value="1920,1080">1920 x 1080 (Full HD - Phổ biến nhất)</option>
                                     <option value="2560,1440">2560 x 1440 (2K QHD Gaming)</option>
                                     <option value="1536,864">1536 x 864 (Laptop 14 inch)</option>
@@ -658,7 +658,7 @@
 
                         <div>
                             <label class="block text-slate-400 mb-1">Card Đồ Họa WebGL Renderer (GPU)</label>
-                            <select id="edit-fp-gpu-select" onchange="onEditGpuSelect(this.value)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs font-mono">
+                            <select id="edit-fp-gpu-select" data-on-change="onEditGpuSelect" data-on-change-args='["$value"]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs font-mono">
                                 <!-- Populated dynamically -->
                             </select>
                             <input type="text" id="edit-fp-gpu-custom" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs font-mono mt-1.5 hidden" placeholder="Nhập tên GPU tuỳ biến...">
@@ -669,7 +669,7 @@
                                 <label class="block text-slate-400 mb-1">Canvas Seed</label>
                                 <div class="flex space-x-1">
                                     <input type="number" id="edit-fp-canvas" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1.5 text-xs font-mono text-amber-400">
-                                    <button type="button" onclick="randomizeCanvasSeed('edit')" class="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300" title="Đổi seed">
+                                    <button type="button" data-on-click="randomizeCanvasSeed" data-on-click-args='["edit"]' class="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300" title="Đổi seed">
                                         <i data-lucide="dice-5" class="w-3.5 h-3.5"></i>
                                     </button>
                                 </div>
@@ -703,7 +703,7 @@
                         <div class="grid grid-cols-2 gap-3">
                             <div>
                                 <label class="block text-slate-400 mb-1">Múi giờ (Timezone)</label>
-                                <select id="edit-fp-tz-select" onchange="onEditTimezoneSelect(this.value)" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs">
+                                <select id="edit-fp-tz-select" data-on-change="onEditTimezoneSelect" data-on-change-args='["$value"]' class="w-full bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs">
                                     <!-- Populated dynamically -->
                                 </select>
                                 <input type="text" id="edit-fp-tz-custom" class="w-full bg-slate-900 border border-borderBg rounded-lg px-2 py-1 text-xs mt-1.5 hidden" placeholder="Nhập múi giờ khác...">
@@ -736,7 +736,7 @@
                             <div class="grid grid-cols-3 gap-2">
                                 <div>
                                     <label class="block text-[11px] text-slate-400 mb-1">Chọn thành phố</label>
-                                    <select id="edit-fp-city" onchange="onCityChange('edit', this.value)" class="w-full bg-slate-800 border border-borderBg rounded-lg px-2 py-1.5 text-xs text-amber-400 font-semibold">
+                                    <select id="edit-fp-city" data-on-change="onCityChange" data-on-change-args='["edit", "$value"]' class="w-full bg-slate-800 border border-borderBg rounded-lg px-2 py-1.5 text-xs text-amber-400 font-semibold">
                                         <option value="hanoi">📍 Hà Nội (Khuyên dùng)</option>
                                         <option value="hcm">📍 TP. Hồ Chí Minh</option>
                                         <option value="danang">📍 Đà Nẵng</option>
@@ -755,7 +755,7 @@
                                     <input type="number" step="0.0001" id="edit-fp-lon" value="105.8542" class="w-full bg-slate-800 border border-borderBg rounded-lg px-2 py-1.5 text-xs font-mono text-slate-200">
                                 </div>
                             </div>
-                            <button onclick="syncLocationFromProxy()" class="w-full px-3 py-1.5 bg-emerald-600/15 hover:bg-emerald-600 text-emerald-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center justify-center space-x-1.5 border border-emerald-500/30" title="Hỏi GeoIP qua proxy của profile và cập nhật timezone/tọa độ/ngôn ngữ cho khớp IP">
+                            <button data-on-click="syncLocationFromProxy" class="w-full px-3 py-1.5 bg-emerald-600/15 hover:bg-emerald-600 text-emerald-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center justify-center space-x-1.5 border border-emerald-500/30" title="Hỏi GeoIP qua proxy của profile và cập nhật timezone/tọa độ/ngôn ngữ cho khớp IP">
                                 <i data-lucide="satellite-dish" class="w-3.5 h-3.5"></i>
                                 <span>Đồng bộ vị trí theo IP proxy</span>
                             </button>
@@ -813,8 +813,8 @@
 
             <!-- Modal Footer -->
             <div class="p-4 border-t border-borderBg bg-slate-900 flex justify-end space-x-3">
-                <button onclick="closeEditModal()" class="px-4 py-2 text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition font-medium">Hủy bỏ</button>
-                <button onclick="submitSaveProfileEdit()" class="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-lg shadow-blue-600/20 transition font-medium flex items-center space-x-2">
+                <button data-on-click="closeEditModal" class="px-4 py-2 text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition font-medium">Hủy bỏ</button>
+                <button data-on-click="submitSaveProfileEdit" class="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-lg shadow-blue-600/20 transition font-medium flex items-center space-x-2">
                     <i data-lucide="save" class="w-4 h-4"></i>
                     <span>Lưu Cấu Hình</span>
                 </button>
@@ -852,8 +852,8 @@
             </div>
 
             <div class="flex justify-end space-x-3 pt-2">
-                <button onclick="closeSwitchAllLocationModal()" class="px-4 py-2 text-slate-400 hover:text-white rounded-lg transition font-medium text-xs">Hủy</button>
-                <button onclick="confirmSwitchAllLocation()" class="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-medium text-xs shadow-md shadow-amber-600/30 flex items-center space-x-1.5">
+                <button data-on-click="closeSwitchAllLocationModal" class="px-4 py-2 text-slate-400 hover:text-white rounded-lg transition font-medium text-xs">Hủy</button>
+                <button data-on-click="confirmSwitchAllLocation" class="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-medium text-xs shadow-md shadow-amber-600/30 flex items-center space-x-1.5">
                     <i data-lucide="check" class="w-4 h-4"></i>
                     <span>Áp Dụng Cho Tất Cả</span>
                 </button>
@@ -869,7 +869,7 @@
                     <i data-lucide="cookie" class="w-5 h-5 text-amber-400"></i>
                     <h3 class="text-sm font-semibold text-white">Quản lý Cookies (FB/YouTube/Google)</h3>
                 </div>
-                <button onclick="closeCookieModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                <button data-on-click="closeCookieModal" class="text-slate-400 hover:text-white p-1 rounded-lg">
                     <i data-lucide="x" class="w-4 h-4"></i>
                 </button>
             </div>
@@ -881,15 +881,15 @@
                         <div id="cookie-count-display" class="text-xs font-mono text-amber-400 mt-1">Chưa nạp cookies</div>
                     </div>
                     <div class="flex space-x-2">
-                        <button onclick="fetchCookiesAction()" class="px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1" title="Đọc cookies phiên đăng nhập từ trình duyệt đang chạy">
+                        <button data-on-click="fetchCookiesAction" class="px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1" title="Đọc cookies phiên đăng nhập từ trình duyệt đang chạy">
                             <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
                             <span>Đọc Cookies</span>
                         </button>
-                        <button onclick="exportCookiesJson()" class="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                        <button data-on-click="exportCookiesJson" class="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1">
                             <i data-lucide="download" class="w-3.5 h-3.5"></i>
                             <span>Tải JSON</span>
                         </button>
-                        <button onclick="copyCookiesToClipboard()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                        <button data-on-click="copyCookiesToClipboard" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition flex items-center space-x-1">
                             <i data-lucide="copy" class="w-3.5 h-3.5"></i>
                             <span>Sao chép</span>
                         </button>
@@ -905,8 +905,8 @@
                 </div>
             </div>
             <div class="px-5 py-3 border-t border-borderBg flex justify-end space-x-2 bg-slate-900/40">
-                <button onclick="closeCookieModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
-                <button onclick="importCookiesAction()" class="px-4 py-1.5 text-xs bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg transition flex items-center space-x-1.5 shadow-lg shadow-amber-500/20">
+                <button data-on-click="closeCookieModal" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                <button data-on-click="importCookiesAction" class="px-4 py-1.5 text-xs bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg transition flex items-center space-x-1.5 shadow-lg shadow-amber-500/20">
                     <i data-lucide="upload" class="w-3.5 h-3.5"></i>
                     <span>Nạp Cookies Vào Profile</span>
                 </button>
@@ -921,7 +921,7 @@
                     <i data-lucide="flag" class="w-5 h-5 text-blue-400"></i>
                     <h3 class="text-sm font-semibold text-white">Fanpage Facebook của Profile</h3>
                 </div>
-                <button onclick="closeFanpagesModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                <button data-on-click="closeFanpagesModal" class="text-slate-400 hover:text-white p-1 rounded-lg">
                     <i data-lucide="x" class="w-4 h-4"></i>
                 </button>
             </div>
@@ -933,11 +933,11 @@
                         <div id="fanpages-meta" class="text-[11px] text-slate-500 mt-1">Chưa có dữ liệu</div>
                     </div>
                     <div class="flex space-x-2">
-                        <button onclick="refreshFanpages(false)" class="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1" title="Đọc lại danh sách fanpage từ phiên đang chạy">
+                        <button data-on-click="refreshFanpages" data-on-click-args='[false]' class="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1" title="Đọc lại danh sách fanpage từ phiên đang chạy">
                             <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
                             <span>Làm mới</span>
                         </button>
-                        <button onclick="refreshFanpages(true)" class="px-3 py-1.5 bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1" title="Quét từng fanpage: ngày tạo + khoảng thời gian bài gần nhất + độ tin cậy dữ liệu, sẵn sàng (ngâm ≥1 tháng). Mỗi trang ~4-8s.">
+                        <button data-on-click="refreshFanpages" data-on-click-args='[true]' class="px-3 py-1.5 bg-violet-600/20 hover:bg-violet-600 text-violet-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1" title="Quét từng fanpage: ngày tạo + khoảng thời gian bài gần nhất + độ tin cậy dữ liệu, sẵn sàng (ngâm ≥1 tháng). Mỗi trang ~4-8s.">
                             <i data-lucide="scan-search" class="w-3.5 h-3.5"></i>
                             <span>Cập nhật chi tiết</span>
                         </button>
@@ -947,13 +947,13 @@
                 <p class="text-[10px] text-slate-500">Danh sách đọc trực tiếp từ facebook.com/bookmarks/pages của phiên đang chạy (cần profile đã đăng nhập Facebook). Facebook có thể đổi giao diện — nếu danh sách thiếu, mở link để kiểm tra bằng mắt. Làm mới không tự xóa page vắng mặt; chỉ nút Xóa cache mới xóa lịch sử.</p>
             </div>
             <div class="px-5 py-3 border-t border-borderBg flex items-center justify-between bg-slate-900/40">
-                <button onclick="clearFanpageCache()" class="px-3.5 py-1.5 text-xs text-rose-300 hover:text-white hover:bg-rose-600/80 border border-rose-500/30 rounded-lg transition" title="Xóa toàn bộ danh sách fanpage đã lưu của profile này">Xóa cache</button>
+                <button data-on-click="clearFanpageCache" class="px-3.5 py-1.5 text-xs text-rose-300 hover:text-white hover:bg-rose-600/80 border border-rose-500/30 rounded-lg transition" title="Xóa toàn bộ danh sách fanpage đã lưu của profile này">Xóa cache</button>
                 <div class="flex items-center space-x-2">
-                    <button onclick="openFanpageManagerForCurrentProfile()" class="px-3.5 py-1.5 text-xs bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded-lg transition flex items-center space-x-1.5">
+                    <button data-on-click="openFanpageManagerForCurrentProfile" class="px-3.5 py-1.5 text-xs bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded-lg transition flex items-center space-x-1.5">
                         <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
                         <span>Mở trong Fanpage Manager</span>
                     </button>
-                    <button onclick="closeFanpagesModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                    <button data-on-click="closeFanpagesModal" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
                 </div>
             </div>
         </div>
@@ -966,7 +966,7 @@
                     <i data-lucide="scroll-text" class="w-5 h-5 text-blue-400"></i>
                     <h3 class="text-sm font-semibold text-white">Nhật Ký Hệ Thống (app.log)</h3>
                 </div>
-                <button onclick="closeLogsModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                <button data-on-click="closeLogsModal" class="text-slate-400 hover:text-white p-1 rounded-lg">
                     <i data-lucide="x" class="w-4 h-4"></i>
                 </button>
             </div>
@@ -974,12 +974,12 @@
                 <div class="flex items-center justify-between mb-3">
                     <span id="logs-meta" class="text-[11px] text-slate-500"></span>
                     <div class="flex items-center space-x-2">
-                        <select id="logs-lines" onchange="loadLogs()" class="bg-slate-900 border border-borderBg rounded-lg px-2 py-1 text-xs text-slate-200">
+                        <select id="logs-lines" data-on-change="loadLogs" class="bg-slate-900 border border-borderBg rounded-lg px-2 py-1 text-xs text-slate-200">
                             <option value="200">200 dòng</option>
                             <option value="500">500 dòng</option>
                             <option value="1000">1000 dòng</option>
                         </select>
-                        <button onclick="loadLogs()" class="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1">
+                        <button data-on-click="loadLogs" class="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white rounded-lg text-xs font-medium transition flex items-center space-x-1">
                             <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
                             <span>Làm mới</span>
                         </button>
@@ -988,7 +988,7 @@
                 <pre id="logs-content" class="bg-slate-900 border border-borderBg rounded-xl p-3 text-[11px] font-mono text-slate-300 whitespace-pre-wrap break-all max-h-[55vh] overflow-y-auto">Đang tải...</pre>
             </div>
             <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
-                <button onclick="closeLogsModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                <button data-on-click="closeLogsModal" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
             </div>
         </div>
     </div>
@@ -1000,7 +1000,7 @@
                     <i data-lucide="upload" class="w-5 h-5 text-blue-400"></i>
                     <h3 class="text-sm font-semibold text-white">Nhập Profiles từ JSON</h3>
                 </div>
-                <button onclick="closeImportModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
+                <button data-on-click="closeImportModal" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
             </div>
             <div class="p-5 overflow-y-auto space-y-3">
                 <p class="text-[11px] text-slate-500">Chấp nhận file/JSON từ Export. <span class="text-amber-400">Mật khẩu proxy không nằm trong export</span> — nhập lại qua Edit profile sau khi nhập. Id mới tự sinh.</p>
@@ -1009,9 +1009,9 @@
                 <div id="import-result"></div>
             </div>
             <div class="px-5 py-3 border-t border-borderBg flex justify-end space-x-2 bg-slate-900/40">
-                <button onclick="closeImportModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
-                <button onclick="doImport('file')" class="px-4 py-1.5 text-xs bg-blue-600/80 hover:bg-blue-500 text-white font-semibold rounded-lg transition">Nhập từ file</button>
-                <button onclick="doImport('text')" class="px-4 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition">Nhập từ JSON</button>
+                <button data-on-click="closeImportModal" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                <button data-on-click="doImport" data-on-click-args='["file"]' class="px-4 py-1.5 text-xs bg-blue-600/80 hover:bg-blue-500 text-white font-semibold rounded-lg transition">Nhập từ file</button>
+                <button data-on-click="doImport" data-on-click-args='["text"]' class="px-4 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition">Nhập từ JSON</button>
             </div>
         </div>
     </div>
@@ -1023,7 +1023,7 @@
                     <i data-lucide="wand-2" class="w-5 h-5 text-violet-400"></i>
                     <h3 class="text-sm font-semibold text-white">Tạo Profile Hàng Loạt</h3>
                 </div>
-                <button onclick="closeWizardModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
+                <button data-on-click="closeWizardModal" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
             </div>
             <div class="p-5 overflow-y-auto space-y-3">
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -1073,8 +1073,8 @@
                 <div id="wizard-result"></div>
             </div>
             <div class="px-5 py-3 border-t border-borderBg flex justify-end space-x-2 bg-slate-900/40">
-                <button onclick="closeWizardModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
-                <button onclick="doBulkCreate()" class="px-4 py-1.5 text-xs bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-lg transition flex items-center space-x-1.5">
+                <button data-on-click="closeWizardModal" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                <button data-on-click="doBulkCreate" class="px-4 py-1.5 text-xs bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-lg transition flex items-center space-x-1.5">
                     <i data-lucide="wand-2" class="w-3.5 h-3.5"></i><span>Tạo Ngay</span>
                 </button>
             </div>
@@ -1088,7 +1088,7 @@
                     <i data-lucide="calendar-clock" class="w-5 h-5 text-violet-400"></i>
                     <h3 class="text-sm font-semibold text-white">Lịch Tự Động</h3>
                 </div>
-                <button onclick="closeSchedulesModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
+                <button data-on-click="closeSchedulesModal" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
             </div>
             <div class="p-5 overflow-y-auto space-y-3">
                 <div class="space-y-2 bg-slate-900/50 p-3 rounded-xl border border-borderBg">
@@ -1102,13 +1102,13 @@
                             <option value="sync_fanpages_deep">Đồng bộ chi tiết Fanpage (Basic)</option>
                         </select>
                         <input type="text" id="sched-name" placeholder="Tên lịch (tuỳ chọn)" class="bg-slate-900 border border-borderBg rounded-lg px-2.5 py-1.5 text-xs text-slate-200 w-32">
-                        <button id="sched-cancel-edit" onclick="cancelScheduleEdit()" class="hidden px-2.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Hủy</button>
-                        <button onclick="createSchedule()" id="sched-submit" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-semibold transition">Thêm</button>
+                        <button id="sched-cancel-edit" data-on-click="cancelScheduleEdit" class="hidden px-2.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Hủy</button>
+                        <button data-on-click="createSchedule" id="sched-submit" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-semibold transition">Thêm</button>
                     </div>
                     <div class="flex items-center justify-between gap-2">
                         <span class="text-[11px] text-slate-400">Profile áp dụng</span>
                         <label class="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer">
-                            <input type="checkbox" id="sched-all" checked onchange="toggleScheduleScopeAll(this.checked)" class="accent-violet-500">
+                            <input type="checkbox" id="sched-all" checked data-on-change="toggleScheduleScopeAll" data-on-change-args='["$checked"]' class="accent-violet-500">
                             Tất cả profile
                         </label>
                     </div>
@@ -1123,7 +1123,7 @@
                 <p class="text-[10px] text-slate-500">Lịch chạy khi server đang mở; lỡ giờ trong vòng 60 phút (do restart) vẫn tự chạy bù một lần. Phạm vi: tất cả profile hoặc chọn từng profile.</p>
             </div>
             <div class="px-5 py-3 border-t border-borderBg flex justify-end bg-slate-900/40">
-                <button onclick="closeSchedulesModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                <button data-on-click="closeSchedulesModal" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
             </div>
         </div>
     </div>
@@ -1135,15 +1135,15 @@
                     <i data-lucide="key-round" class="w-5 h-5 text-amber-400"></i>
                     <h3 class="text-sm font-semibold text-white">API Token cho Automation</h3>
                 </div>
-                <button onclick="closeTokenModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
+                <button data-on-click="closeTokenModal" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
             </div>
             <div class="p-5 space-y-3">
                 <p class="text-xs text-slate-400">Token dùng làm <span class="font-mono">Authorization: Bearer &lt;token&gt;</span> cho REST API — không đổi khi server khởi động lại (khác access key). Chỉ lưu hash trên máy; plaintext chỉ hiển thị lúc tạo.</p>
                 <div id="token-display" class="hidden"></div>
             </div>
             <div class="px-5 py-3 border-t border-borderBg flex justify-end space-x-2 bg-slate-900/40">
-                <button onclick="revokeToken()" class="px-3.5 py-1.5 text-xs bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 rounded-lg transition">Thu hồi</button>
-                <button onclick="rotateToken()" class="px-4 py-1.5 text-xs bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg transition">Tạo / Rotate Token</button>
+                <button data-on-click="revokeToken" class="px-3.5 py-1.5 text-xs bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 rounded-lg transition">Thu hồi</button>
+                <button data-on-click="rotateToken" class="px-4 py-1.5 text-xs bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-lg transition">Tạo / Rotate Token</button>
             </div>
         </div>
     </div>
@@ -1158,7 +1158,7 @@
                         <p class="text-[11px] text-slate-500">Audit tĩnh toàn bộ profile: OS/UA/GPU/DPR, seed trùng, proxy trùng — không mở trình duyệt.</p>
                     </div>
                 </div>
-                <button onclick="closeAuditModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
+                <button data-on-click="closeAuditModal" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
             </div>
             <div class="p-5 overflow-y-auto space-y-4 flex-1">
                 <div id="audit-loading" class="py-10 text-center text-xs text-slate-400">
@@ -1170,7 +1170,7 @@
                     <div id="audit-summary"></div>
                     <div class="flex flex-wrap items-center justify-between gap-2">
                         <p class="text-[11px] text-slate-500">Sửa an toàn chỉ chuẩn hoá fingerprint. Không thay proxy, vị trí, múi giờ, mật khẩu hay browser pin.</p>
-                        <button onclick="fixAllAudit()" id="audit-fix-all" class="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 rounded-lg text-xs font-semibold transition">Sửa an toàn tất cả</button>
+                        <button data-on-click="fixAllAudit" id="audit-fix-all" class="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 rounded-lg text-xs font-semibold transition">Sửa an toàn tất cả</button>
                     </div>
                     <div id="audit-list" class="space-y-3"></div>
                 </div>
@@ -1178,7 +1178,7 @@
             <div class="px-5 py-3 border-t border-borderBg flex items-center justify-between bg-slate-900/40 gap-3 flex-wrap">
                 <div class="flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
                     <label for="launch-gate-mode">Cổng trước khi mở:</label>
-                    <select id="launch-gate-mode" onchange="setLaunchGateMode(this.value)" class="bg-slate-800 border border-borderBg rounded-lg px-2 py-1 text-[10px] text-slate-300 focus:outline-none">
+                    <select id="launch-gate-mode" data-on-change="setLaunchGateMode" data-on-change-args='["$value"]' class="bg-slate-800 border border-borderBg rounded-lg px-2 py-1 text-[10px] text-slate-300 focus:outline-none">
                         <option value="block">Chặn lỗi nghiêm trọng</option>
                         <option value="warn">Chỉ cảnh báo</option>
                         <option value="off">Tắt cổng</option>
@@ -1186,10 +1186,10 @@
                     <span class="hidden md:inline">· Mẹo: gắn proxy và đặt vị trí cùng thành phố proxy trước khi đăng nhập tài khoản quan trọng.</span>
                 </div>
                 <div class="flex items-center space-x-2">
-                    <button onclick="loadAuditReport()" class="px-3 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition flex items-center space-x-1.5">
+                    <button data-on-click="loadAuditReport" class="px-3 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition flex items-center space-x-1.5">
                         <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i><span>Quét lại</span>
                     </button>
-                    <button onclick="closeAuditModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                    <button data-on-click="closeAuditModal" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
                 </div>
             </div>
         </div>
@@ -1205,14 +1205,14 @@
                         <p class="text-[11px] text-slate-500"><span id="launch-gate-profile-name"></span> · Audit tĩnh, không tự sửa fingerprint.</p>
                     </div>
                 </div>
-                <button onclick="closeLaunchGateModal()" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
+                <button data-on-click="closeLaunchGateModal" class="text-slate-400 hover:text-white p-1 rounded-lg"><i data-lucide="x" class="w-4 h-4"></i></button>
             </div>
             <div id="launch-gate-body" class="p-5 overflow-y-auto space-y-4 flex-1"></div>
             <div class="px-5 py-3 border-t border-borderBg flex items-center justify-between bg-slate-900/40 gap-3 flex-wrap">
                 <span class="text-[10px] text-slate-500">Không có thay đổi nào được ghi. "Vẫn mở" chỉ áp dụng cho lần này.</span>
                 <div class="flex items-center space-x-2">
-                    <button onclick="closeLaunchGateModal()" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
-                    <button onclick="forceLaunchGate()" id="launch-gate-force" class="px-3.5 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-500 rounded-lg transition">Vẫn mở profile</button>
+                    <button data-on-click="closeLaunchGateModal" class="px-3.5 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition">Đóng</button>
+                    <button data-on-click="forceLaunchGate" id="launch-gate-force" class="px-3.5 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-500 rounded-lg transition">Vẫn mở profile</button>
                 </div>
             </div>
         </div>
@@ -1224,6 +1224,7 @@
         <span id="toast-message"></span>
     </div>
 
+    <script src="/static/js/actions.js"></script>
     <script src="/static/js/dashboard.js"></script>
 </body>
 </html>
