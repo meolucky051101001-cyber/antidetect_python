@@ -132,7 +132,11 @@ class LiveServer:
         from antidetect.runtime_auth import _crypt
 
         def ready():
-            assert self.proc.poll() is None, "Fixture server exited during startup."
+            rc = self.proc.poll()
+            if rc is not None:
+                self.log.flush()
+                tail = Path(self.log.name).read_text(encoding="utf-8", errors="replace")[-4000:]
+                assert rc is None, f"Fixture server exited during startup (code {rc}):\n{tail}"
             if not self.ready.exists():
                 return False
             try:
