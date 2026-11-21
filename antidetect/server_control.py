@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -8,6 +9,8 @@ import urllib.error
 import urllib.request
 from .loopback import open_loopback
 from typing import Any, Dict, Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -28,7 +31,7 @@ def _safe_log(message: str) -> None:
         try:
             print(message.encode("ascii", "backslashreplace").decode("ascii"))
         except Exception:
-            pass
+            log.debug("Failed to write fallback log message", exc_info=True)
 
 
 def get_process_image_name(pid: int) -> Optional[str]:
@@ -228,7 +231,7 @@ def remove_server_info(*, expected_instance_id=None, expected_info=None):
         try:
             os.remove(PID_FILE)
         except FileNotFoundError:
-            pass
+            log.debug("Server PID file was already removed", exc_info=True)
         return True
 
 
@@ -288,7 +291,7 @@ def check_server_health(port: int = 8000) -> Optional[Dict[str, Any]]:
             if resp.status == 200:
                 return json.loads(resp.read().decode("utf-8"))
     except Exception:
-        pass
+        log.debug("Server health request failed", exc_info=True)
     return None
 
 
