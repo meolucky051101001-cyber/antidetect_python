@@ -1,8 +1,7 @@
-from antidetect import launcher as core
+from typing import Any, Optional
 
-Any = core.Any
-Optional = core.Optional
-Profile = core.Profile
+from antidetect import launcher as core
+from antidetect.models import Profile
 
 
 class CdpStealthMixin:

@@ -18,10 +18,14 @@ def _effective_api_routes():
 
 def test_static_routes_are_not_shadowed():
     routes = list(_effective_api_routes())
+    assert len(routes) >= 67
+
+    static_paths_checked = 0
     for route in routes:
         if "{" in route.path:
             continue
         for method in route.methods or []:
+            static_paths_checked += 1
             scope = {
                 "type": "http",
                 "path": route.path,
@@ -39,3 +43,4 @@ def test_static_routes_are_not_shadowed():
                 None,
             )
             assert first_full is route, f"{method} {route.path} is shadowed by {first_full}"
+    assert static_paths_checked > 0

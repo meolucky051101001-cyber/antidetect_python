@@ -1,10 +1,8 @@
 from fastapi import APIRouter
 from web import app as core
+from web.schemas import ScheduleCreateRequest, ScheduleUpdateRequest
 
 router = APIRouter()
-
-ScheduleCreateRequest = core.ScheduleCreateRequest
-ScheduleUpdateRequest = core.ScheduleUpdateRequest
 
 
 @router.get("/api/schedules")

@@ -941,11 +941,6 @@ class BrowserLauncher(CdpStealthMixin):
             log.debug("Failed to write browser preferences", exc_info=True)
 
 
-
-
-
-
-
     def _resolve_browser_path(self, profile: Optional[Profile]) -> Optional[str]:
         """Chọn browser binary cho lần launch này (Giai đoạn 2).
 

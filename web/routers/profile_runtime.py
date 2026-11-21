@@ -1,11 +1,10 @@
+from typing import Optional
+
 from fastapi import APIRouter
 from web import app as core
+from web.schemas import StartAllBody, StopAllBody
 
 router = APIRouter()
-
-Optional = core.Optional
-StartAllBody = core.StartAllBody
-StopAllBody = core.StopAllBody
 
 
 @router.post("/api/profiles/start-all")

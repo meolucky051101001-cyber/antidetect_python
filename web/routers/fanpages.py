@@ -1,19 +1,20 @@
-from fastapi import APIRouter
+from typing import Optional
+
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse
 from web import app as core
+from web.schemas import (
+    FanpageAlertUpdateRequest,
+    FanpageBulkUpdateRequest,
+    FanpageMergeRequest,
+    FanpageOpenRequest,
+    FanpagePruneRequest,
+    FanpageSyncJobCreateRequest,
+    FanpageSyncJobRetryRequest,
+    FanpageUpdateRequest,
+)
 
 router = APIRouter()
-
-FanpageAlertUpdateRequest = core.FanpageAlertUpdateRequest
-FanpageBulkUpdateRequest = core.FanpageBulkUpdateRequest
-FanpageMergeRequest = core.FanpageMergeRequest
-FanpageOpenRequest = core.FanpageOpenRequest
-FanpagePruneRequest = core.FanpagePruneRequest
-FanpageSyncJobCreateRequest = core.FanpageSyncJobCreateRequest
-FanpageSyncJobRetryRequest = core.FanpageSyncJobRetryRequest
-FanpageUpdateRequest = core.FanpageUpdateRequest
-HTMLResponse = core.HTMLResponse
-Optional = core.Optional
-Request = core.Request
 
 
 @router.get("/fanpages", response_class=HTMLResponse)

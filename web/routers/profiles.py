@@ -1,21 +1,20 @@
-from fastapi import APIRouter
+from typing import List, Optional
+
+from fastapi import APIRouter, Request, Response
+from antidetect.models import Profile
 from web import app as core
+from web.schemas import (
+    AuditFixRequest,
+    BulkCreateRequest,
+    CreateProfileRequest,
+    ImportCookiesRequest,
+    ImportProfilesRequest,
+    ProfileRuntime,
+    SwitchLocationRequest,
+    UpdateProfileRequest,
+)
 
 router = APIRouter()
-
-AuditFixRequest = core.AuditFixRequest
-BulkCreateRequest = core.BulkCreateRequest
-CreateProfileRequest = core.CreateProfileRequest
-ImportCookiesRequest = core.ImportCookiesRequest
-ImportProfilesRequest = core.ImportProfilesRequest
-List = core.List
-Optional = core.Optional
-Profile = core.Profile
-ProfileRuntime = core.ProfileRuntime
-Request = core.Request
-Response = core.Response
-SwitchLocationRequest = core.SwitchLocationRequest
-UpdateProfileRequest = core.UpdateProfileRequest
 
 
 @router.get("/api/profiles", response_model=List[ProfileRuntime])

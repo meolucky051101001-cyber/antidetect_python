@@ -470,55 +470,9 @@ def _finish_bulk_job(
         log.warning("Không ghi được trạng thái bulk job: %s", exc)
 
 
-# --- Web Page Route ---
-
-
-
-
-
-
-
-
-
-
-
-
-# --- REST API Endpoints ---
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _resolve_browser_paths(profiles: List[Profile]) -> Dict[str, Optional[str]]:
     """Resolve the exact browser binary per profile without launching it."""
     return {p.id: launcher._resolve_browser_path(p) for p in profiles}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _scheduler_start_all(profile_ids=None):
@@ -768,12 +722,6 @@ def _scheduler_sync_fanpages_deep(profile_ids=None):
     return {"job_id": job.get("id"), "deduplicated": deduplicated}
 
 
-
-
-
-
-
-
 _token_rotate_lock = threading.Lock()
 _token_rotate_times: list = []
 
@@ -824,10 +772,6 @@ def _mutate_api_token(request: Request, *, revoke: bool):
         ) from None
 
 
-
-
-
-
 # --- Đợt C: Lịch tự động ---
 
 SCHEDULES_CORRUPT_DETAIL = (
@@ -861,26 +805,6 @@ def _schedule_history_with_jobs(limit=20):
         for event in pending:
             event["job_status"] = "unavailable"
     return events
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _scan_fields(scan: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1003,24 +927,6 @@ def _run_facebook_scan(
         }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # --- Fanpage Manager (Giai đoạn 1) ---
 
 _fanpage_service_cache: Dict[str, FanpageService] = {}
@@ -1072,55 +978,92 @@ def get_fanpage_service() -> FanpageService:
         return svc
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# --- Fanpage Sync Jobs (Giai đoạn 2) ---
-
-
-
-
-
-
-
-
-
-
-
-
-# --- Fanpage Alerts & Operational Health (Giai đoạn 3) ---
-
-
 from web.routers import system, profile_runtime, profiles, facebook, schedules, fanpages  # noqa: E402
 for _r in (system, profile_runtime, profiles, facebook, schedules, fanpages):
     app.include_router(_r.router)
 
-from web.routers.system import health, system_metrics, unlock, login, create_unlock_code_endpoint, home_page, get_launch_gate_settings, update_launch_gate_settings, get_fingerprint_options, get_system_logs, rotate_api_token, revoke_api_token, get_current_network_ip, shutdown_system, check_proxy_endpoint, random_fingerprint_endpoint  # noqa: E402,F401 - re-exported for web.app compatibility
-from web.routers.profile_runtime import start_all_profiles, get_start_all_status, cancel_start_all, stop_all_profiles, start_profile, stop_profile, stop_owned_profile  # noqa: E402,F401 - re-exported for web.app compatibility
-from web.routers.profiles import list_profiles, create_profile, export_profiles, audit_profiles_endpoint, fix_profiles_endpoint, get_profile, update_profile_endpoint, reset_fingerprint_endpoint, set_profile_location, sync_location_from_proxy, switch_all_profiles_location, delete_profile, duplicate_profile, export_profile_cookies, import_profile_cookies, import_profiles, bulk_create_profiles  # noqa: E402,F401 - re-exported for web.app compatibility
-from web.routers.facebook import get_facebook_pages, delete_facebook_pages  # noqa: E402,F401 - re-exported for web.app compatibility
-from web.routers.schedules import list_schedules, create_schedule, update_schedule, delete_schedule  # noqa: E402,F401 - re-exported for web.app compatibility
-from web.routers.fanpages import fanpages_page, get_fanpages_summary, export_fanpages_csv, bulk_update_fanpages, create_fanpages_backup_endpoint, list_fanpages_backups_endpoint, prune_fanpages_data_endpoint, list_fanpages_endpoint, get_fanpage_detail_endpoint, get_fanpage_metrics_endpoint, merge_fanpage_endpoint, update_fanpage_endpoint, open_fanpage_in_profile, create_fanpage_sync_job_endpoint, list_fanpage_sync_jobs_endpoint, get_fanpage_sync_job_endpoint, cancel_fanpage_sync_job_endpoint, retry_fanpage_sync_job_endpoint, list_fanpage_alerts_endpoint, acknowledge_all_fanpage_alerts_endpoint, update_fanpage_alert_endpoint  # noqa: E402,F401 - re-exported for web.app compatibility
+# Re-export router endpoints for callers that import them from web.app.
+from web.routers.system import (  # noqa: E402,F401
+    health,
+    system_metrics,
+    unlock,
+    login,
+    create_unlock_code_endpoint,
+    home_page,
+    get_launch_gate_settings,
+    update_launch_gate_settings,
+    get_fingerprint_options,
+    get_system_logs,
+    rotate_api_token,
+    revoke_api_token,
+    get_current_network_ip,
+    shutdown_system,
+    check_proxy_endpoint,
+    random_fingerprint_endpoint,
+)
+
+from web.routers.profile_runtime import (  # noqa: E402,F401
+    start_all_profiles,
+    get_start_all_status,
+    cancel_start_all,
+    stop_all_profiles,
+    start_profile,
+    stop_profile,
+    stop_owned_profile,
+)
+
+from web.routers.profiles import (  # noqa: E402,F401
+    list_profiles,
+    create_profile,
+    export_profiles,
+    audit_profiles_endpoint,
+    fix_profiles_endpoint,
+    get_profile,
+    update_profile_endpoint,
+    reset_fingerprint_endpoint,
+    set_profile_location,
+    sync_location_from_proxy,
+    switch_all_profiles_location,
+    delete_profile,
+    duplicate_profile,
+    export_profile_cookies,
+    import_profile_cookies,
+    import_profiles,
+    bulk_create_profiles,
+)
+
+from web.routers.facebook import (  # noqa: E402,F401
+    get_facebook_pages,
+    delete_facebook_pages,
+)
+
+from web.routers.schedules import (  # noqa: E402,F401
+    list_schedules,
+    create_schedule,
+    update_schedule,
+    delete_schedule,
+)
+
+from web.routers.fanpages import (  # noqa: E402,F401
+    fanpages_page,
+    get_fanpages_summary,
+    export_fanpages_csv,
+    bulk_update_fanpages,
+    create_fanpages_backup_endpoint,
+    list_fanpages_backups_endpoint,
+    prune_fanpages_data_endpoint,
+    list_fanpages_endpoint,
+    get_fanpage_detail_endpoint,
+    get_fanpage_metrics_endpoint,
+    merge_fanpage_endpoint,
+    update_fanpage_endpoint,
+    open_fanpage_in_profile,
+    create_fanpage_sync_job_endpoint,
+    list_fanpage_sync_jobs_endpoint,
+    get_fanpage_sync_job_endpoint,
+    cancel_fanpage_sync_job_endpoint,
+    retry_fanpage_sync_job_endpoint,
+    list_fanpage_alerts_endpoint,
+    acknowledge_all_fanpage_alerts_endpoint,
+    update_fanpage_alert_endpoint,
+)

@@ -1,12 +1,9 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse
 from web import app as core
+from web.schemas import CheckProxyRequest, LaunchGateSettingsRequest
 
 router = APIRouter()
-
-CheckProxyRequest = core.CheckProxyRequest
-HTMLResponse = core.HTMLResponse
-LaunchGateSettingsRequest = core.LaunchGateSettingsRequest
-Request = core.Request
 
 
 @router.get('/health')
