@@ -56,9 +56,15 @@ Công cụ quản lý nhiều profile Chrome/Edge độc lập trên Windows, ca
 
 Yêu cầu: Windows 10/11, Google Chrome hoặc Microsoft Edge. Bộ dependency khóa hash bên dưới dành riêng cho CPython 3.10 x64 trên Windows; Python/platform khác cần resolve và kiểm chứng bộ lock riêng.
 
+Cách khuyến nghị: chạy `setup.bat`. Script tìm CPython 3.10 x64 (`ANTIDETECT_PYTHON`, `py -3.10-64` hoặc `python`), tạo `.venv` riêng trong thư mục tool, cài lock khóa hash và chạy `pip check`. `start.bat`, `stop.bat` và `run_hidden.vbs` tự dùng `.venv` nếu có, nên package khác trên máy không đè được version đã khóa.
+
+Cài thủ công tương đương:
+
 ```bash
 cd antidetect_python
-python -m pip install --require-hashes --only-binary=:all: -r requirements-win-py310.lock.txt
+py -3.10-64 -m venv .venv
+.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r requirements-win-py310.lock.txt
+.venv\Scripts\python.exe -m pip check
 ```
 
 `requirements.txt` có `tzdata` để map timezone trên Windows sạch. Các range và constraints.txt là nguồn để tái tạo lock, không thay thế hash verification. Xem [quy trình cập nhật dependency](docs/DEPENDENCY_LOCKS.md).
@@ -83,7 +89,8 @@ Biến môi trường hữu ích:
 |---|---|
 | `ANTIDETECT_DATA_DIR` | Thư mục dữ liệu cách ly (dùng cho test/portable) |
 | `ANTIDETECT_NO_BROWSER=1` | Không tự mở UI; phù hợp smoke test/headless |
-| `ANTIDETECT_NO_PAUSE=1` | Không dừng chờ phím trong `stop.bat` |
+| `ANTIDETECT_NO_PAUSE=1` | Không dừng chờ phím trong `setup.bat`/`stop.bat` |
+| `ANTIDETECT_PYTHON` | Đường dẫn `python.exe` 3.10 x64 cho `setup.bat` dùng để tạo `.venv` |
 
 Dừng an toàn:
 

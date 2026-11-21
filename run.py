@@ -89,7 +89,7 @@ def read_access_key():
         return None
 
 
-def request_unlock_code_from_server(port: int = 8000) -> Optional[str]:
+def request_unlock_code_from_server(port: int = 8000, timeout: float = 3.0) -> Optional[str]:
     """Ask the already-running server for a one-time code.
 
     This is the only path a second instance may use: importing web.app in the
@@ -108,7 +108,7 @@ def request_unlock_code_from_server(port: int = 8000) -> Optional[str]:
             },
             method="POST",
         )
-        with open_loopback(req, timeout=1.0) as resp:
+        with open_loopback(req, timeout=timeout) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
                 code = data.get("unlock_code")
