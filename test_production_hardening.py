@@ -41,6 +41,15 @@ from antidetect.fingerprint import generate_fingerprint
 from antidetect.stealth import get_stealth_script, get_worker_stealth_script
 
 
+def _read_launcher_source():
+    sources = []
+    for filename in ("launcher.py", "launcher_cdp.py"):
+        path = os.path.join(BASE_DIR, "antidetect", filename)
+        with open(path, encoding="utf-8") as source:
+            sources.append(source.read())
+    return "\n".join(sources)
+
+
 manager = ProfileManager()
 
 
@@ -579,7 +588,7 @@ def test_native_brands_override_payload_brands():
 
 
 def test_launcher_measures_native_brands_before_overrides():
-    src = open(os.path.join(BASE_DIR, "antidetect", "launcher.py"), encoding="utf-8").read()
+    src = _read_launcher_source()
     # Đo bằng Chrome phụ riêng (setUserAgentOverride đè cả JS userAgentData,
     # nên phiên đã override không đo được) — phải chạy trước khi CDP thread
     # build stealth payload/ua_metadata.
@@ -2439,9 +2448,7 @@ def test_proxy_auth_uses_cdp_only():
     Extension MV3 cũ ghi mật khẩu plaintext vào thư mục profile và
     --load-extension đã bị Chrome 137+ bỏ — không được quay lại đường đó.
     """
-    launcher_src = open(
-        os.path.join(BASE_DIR, "antidetect", "launcher.py"), encoding="utf-8"
-    ).read()
+    launcher_src = _read_launcher_source()
     proxy_src = open(
         os.path.join(BASE_DIR, "antidetect", "proxy.py"), encoding="utf-8"
     ).read()

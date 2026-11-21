@@ -18,12 +18,17 @@ import pytest
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LAUNCHER_SRC = os.path.join(BASE_DIR, "antidetect", "launcher.py")
+LAUNCHER_CDP_SRC = os.path.join(BASE_DIR, "antidetect", "launcher_cdp.py")
 DASHBOARD_JS_SRC = os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js")
 
 
 def _read(path):
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def _read_launcher_source():
+    return _read(LAUNCHER_SRC) + _read(LAUNCHER_CDP_SRC)
 
 
 def _between(source, start_marker, end_marker):
@@ -33,28 +38,28 @@ def _between(source, start_marker, end_marker):
 
 
 def test_reader_loop_never_awaits_send():
-    src = _read(LAUNCHER_SRC)
+    src = _read_launcher_source()
     reader = _between(src, "async def reader_loop()", "async def keepalive_loop()")
     # The idle branch must only continue; awaiting send() here deadlocked
     # the reader after 30s and dropped the CDP session (P0).
     timeout_branch = _between(
-        reader, "except asyncio.TimeoutError:", "except Exception:"
+        reader, "except core.asyncio.TimeoutError:", "except Exception:"
     )
     assert "send(" not in timeout_branch
     assert "continue" in timeout_branch
 
 
 def test_keepalive_pings_from_a_separate_task():
-    src = _read(LAUNCHER_SRC)
+    src = _read_launcher_source()
     keepalive = _between(
-        src, "async def keepalive_loop()", "reader_task = asyncio.create_task"
+        src, "async def keepalive_loop()", "reader_task = core.asyncio.create_task"
     )
-    assert "asyncio.sleep(" in keepalive
+    assert "core.asyncio.sleep(" in keepalive
     assert 'await send("Browser.getVersion")' in keepalive
     # The reader stays the sole consumer of responses; the keepalive runs as
     # its own task and is cancelled when the reader loop exits.
     create_pos = src.index(
-        "keepalive_task = asyncio.create_task(keepalive_loop())"
+        "keepalive_task = core.asyncio.create_task(keepalive_loop())"
     )
     await_reader_pos = src.index("await reader_task", create_pos)
     cancel_pos = src.index("keepalive_task.cancel()", await_reader_pos)
@@ -62,7 +67,7 @@ def test_keepalive_pings_from_a_separate_task():
 
 
 def test_r4_handshake_waits_for_core_verification_before_navigation():
-    src = _read(LAUNCHER_SRC)
+    src = _read_launcher_source()
     configure = _between(
         src, "async def configure_page(", "async def configure_iframe("
     )
@@ -82,7 +87,7 @@ def test_r4_handshake_waits_for_core_verification_before_navigation():
 
 
 def test_r4_load_event_dispatch_feeds_navigation_wait():
-    src = _read(LAUNCHER_SRC)
+    src = _read_launcher_source()
     dispatch = _between(src, "async def dispatch_event(", "async def reader_loop()")
     assert 'method == "Page.loadEventFired"' in dispatch
     assert "self._page_load_events" in dispatch
@@ -98,7 +103,7 @@ def test_r4_load_event_dispatch_feeds_navigation_wait():
 
 
 def test_r4_https_launch_requires_client_hints():
-    src = _read(LAUNCHER_SRC)
+    src = _read_launcher_source()
     # Core verification on about:blank cannot see secure-context Client
     # Hints; only the post-navigation HTTPS pass may require them.
     assert "require_client_hints=False" in src  # _verify_emulation default
@@ -131,7 +136,7 @@ def test_r3_ui_shows_warnings_even_when_cdp_ready(fn):
 
 
 def test_session_tabs_restore_occurs_after_r4_core_verification():
-    src = _read(LAUNCHER_SRC)
+    src = _read_launcher_source()
     configure = _between(
         src, "async def configure_page(", "async def configure_iframe("
     )
@@ -257,4 +262,3 @@ def test_prepare_clean_chrome_preferences_clears_crash_flag(tmp_path):
     assert updated["profile"]["exit_type"] == "Normal"
     assert updated["profile"]["exited_cleanly"] is True
     assert updated["profile"]["name"] == "P1"
-
