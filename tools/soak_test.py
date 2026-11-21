@@ -248,7 +248,14 @@ def _chrome_processes(dirs):
         for profile_id in dirs
     }
     normalized = {
-        profile_id: os.path.normcase(os.path.realpath(path))
+        profile_id: {
+            candidate
+            for candidate in (
+                os.path.normcase(path),
+                os.path.normcase(os.path.realpath(path)),
+            )
+            if candidate
+        }
         for profile_id, path in dirs.items()
     }
     for proc in psutil.process_iter(["pid", "name", "cmdline", "memory_info"]):
@@ -260,8 +267,8 @@ def _chrome_processes(dirs):
             joined = os.path.normcase(" ".join(cmdline))
             if not joined:
                 continue
-            for profile_id, path in normalized.items():
-                if path and path in joined:
+            for profile_id, candidates in normalized.items():
+                if any(candidate in joined for candidate in candidates):
                     mem = proc.info.get("memory_info")
                     entry = result[profile_id]
                     entry["pids"].append(int(proc.info["pid"]))
@@ -422,8 +429,8 @@ class SoakRunner:
         )
         self.port = int(args.port or _free_port())
         self.base = f"http://127.0.0.1:{self.port}"
-        self.data_dir = os.path.abspath(args.data_dir)
-        self.results_dir = os.path.abspath(args.results_dir)
+        self.data_dir = os.path.realpath(os.path.abspath(args.data_dir))
+        self.results_dir = os.path.realpath(os.path.abspath(args.results_dir))
         self.state_path = os.path.join(self.results_dir, STATE_FILENAME)
         self.events_path = os.path.join(self.results_dir, EVENTS_FILENAME)
         self.metrics_path = os.path.join(self.results_dir, METRICS_FILENAME)
