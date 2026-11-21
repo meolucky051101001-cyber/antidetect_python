@@ -263,6 +263,7 @@ def test_identity_unknown_is_not_cached(monkeypatch):
     record = {"Name": "chrome.exe", "CommandLine": "synthetic", "CreationDate": "birth-A"}
     process_identity.invalidate_identity()
     monkeypatch.setattr(process_identity, "_kernel32", FakeKernel32)
+    monkeypatch.setattr(process_identity, "_native_record", lambda *_: None)
     monkeypatch.setattr(process_identity, "windows_argv", lambda _: [
         "chrome.exe", "--user-data-dir=" + user_data_dir, "--remote-debugging-port=9333",
     ])
@@ -946,7 +947,7 @@ def test_facebook_deep_ui_present():
     js = open(
         os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
     ).read()
-    assert "refreshFanpages(true)" in html
+    assert """data-on-click="refreshFanpages" data-on-click-args='[true]'""" in html
     assert "deep=1" in js
     assert "Đang đăng" in js and "Lâu chưa thấy bài mới" in js and "Sẵn sàng" in js
     assert "Dữ liệu cũ, cần đồng bộ" in js

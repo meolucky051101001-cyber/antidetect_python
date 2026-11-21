@@ -5,6 +5,7 @@ cùng process. Module không import storage để tránh vòng import.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
@@ -16,6 +17,7 @@ from typing import Iterator, List, Optional, Sequence
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _VALID_PROFILE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,63}$")
 _POLL_INTERVAL = 0.02
+log = logging.getLogger(__name__)
 
 
 class ProfileLockError(RuntimeError):
@@ -86,7 +88,7 @@ def _unlock_fd(fd: int) -> None:
 
             fcntl.flock(fd, fcntl.LOCK_UN)
     except OSError:
-        pass
+        log.debug("Failed to release profile file lock", exc_info=True)
 
 
 class _HeldProfileLock:
@@ -121,7 +123,7 @@ class _HeldProfileLock:
                 try:
                     os.close(fd)
                 except OSError:
-                    pass
+                    log.debug("Failed to close profile lock file", exc_info=True)
         state.thread_lock.release()
 
 
@@ -194,7 +196,7 @@ class ProfileLocks:
                         try:
                             os.close(fd)
                         except OSError:
-                            pass
+                            log.debug("Failed to close profile lock after acquisition failure", exc_info=True)
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise ProfileLockTimeout(profile_id, timeout) from last_error

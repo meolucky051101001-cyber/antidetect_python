@@ -176,11 +176,11 @@ Dashboard (mọi route thường):
 ```text
 default-src 'self';
 script-src 'self';
-script-src-attr 'unsafe-inline';
+script-src-attr 'none';
 style-src 'self' 'unsafe-inline';
 font-src 'self' data:;
-img-src 'self' data: https:;
-connect-src 'self' https:;
+img-src 'self' data:;
+connect-src 'self';
 object-src 'none';
 base-uri 'self';
 form-action 'self';
@@ -195,10 +195,11 @@ phiên hợp lệ.
   style hay font từ CDN** trên dashboard.
 - Có `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: no-referrer`, `Cache-Control: no-store`.
-- **Technical debt:** inline `<script>` đã bỏ hẳn (JS nằm trong `web/static/`;
-  script `/unlock` ở `web/static/js/unlock.js`). Vẫn còn ~68 inline handler
-  (`onclick=...`) nên phải giữ `script-src-attr 'unsafe-inline'`; bỏ được khi
-  chuyển hết sang `addEventListener` trong `dashboard.js`.
+- Không còn inline `<script>` hay inline handler (`onclick=...`). Template và
+  HTML render bằng JS khai báo `data-on-click="tenHam"` +
+  `data-on-click-args='[...]'` (JSON, không bao giờ được thực thi như code);
+  `web/static/js/actions.js` gắn listener ở `document` và gọi hàm tương ứng.
+  `test_csp_no_inline_handlers.py` chặn tái xuất hiện handler inline.
 
 ---
 
@@ -208,8 +209,8 @@ phiên hợp lệ.
 2. `server_control`/`process_identity` phụ thuộc PowerShell CIM cho command line
    và creation time. Nếu PowerShell bị chặn, hệ thống fail-closed (không kill)
    nhưng có thể cần xử lý thủ công.
-3. CSP còn `script-src-attr 'unsafe-inline'` (inline handler) và
-   `style-src 'unsafe-inline'`; chưa có nonce/hash cho style.
+3. CSP còn `style-src 'unsafe-inline'` (style attribute); chưa có nonce/hash
+   cho style.
 4. Chưa có mã hóa at-rest cho metadata profile (tên, proxy host, fingerprint).
 5. Chưa chống được kẻ tấn công có quyền admin, debug process hoặc đọc memory.
 6. Chưa hỗ trợ Firefox; hook fingerprint gắn với Chromium.

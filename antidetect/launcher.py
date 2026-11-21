@@ -209,7 +209,7 @@ class BrowserLauncher:
         try:
             atexit.unregister(self._cleanup_on_exit)
         except Exception:
-            pass
+            log.debug("Failed to unregister launcher cleanup handler", exc_info=True)
         self._cleanup_registered = False
         self.active_processes.clear()
         self.active_ports.clear()
@@ -225,7 +225,7 @@ class BrowserLauncher:
         try:
             self.stop_owned()
         except Exception:
-            pass
+            log.debug("Launcher cleanup on exit failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # CDP health plumbing
@@ -618,7 +618,7 @@ class BrowserLauncher:
             if os.path.exists(ext_dir):
                 shutil.rmtree(ext_dir, ignore_errors=True)
         except Exception:
-            pass
+            log.debug("Failed to remove proxy authentication extension", exc_info=True)
         return True
 
     def _identity(self, profile):
@@ -667,7 +667,11 @@ class BrowserLauncher:
                             profile_id, created=identity.get("created")
                         )
                 except Exception:
-                    pass
+                    log.warning(
+                        "Could not persist recovered runtime identity for %s",
+                        profile_id,
+                        exc_info=True,
+                    )
             self._recovery_required.add(profile_id)
             persisted = record.get("cdp_health") or {}
             persisted_reason = (
@@ -781,14 +785,14 @@ class BrowserLauncher:
                     try:
                         proc.wait(timeout=3)
                     except subprocess.TimeoutExpired:
-                        pass
+                        log.debug("Browser did not exit after graceful close", exc_info=True)
                 if proc.poll() is None:
                     proc.kill()
                     proc.wait(timeout=5)
             if proc.poll() is not None and self._clear_process(profile_id, expected_record=record):
                 return True
         except (OSError, subprocess.SubprocessError):
-            pass
+            log.debug("Native browser stop attempt failed", exc_info=True)
         self.cdp_health.mark_degraded(profile_id, launch_id, REASON_STOP_FAILED, restart_required=True)
         try:
             self._runtime_store.upsert_if_owner(
@@ -796,7 +800,10 @@ class BrowserLauncher:
                 cleanup_failed=True, cdp_health=self.cdp_health.snapshot(profile_id),
             )
         except Exception:
-            pass  # The live Popen handle is still retained in active_processes.
+            log.debug(
+                "Could not kill browser; live Popen handle remains in active_processes",
+                exc_info=True,
+            )
         return False
 
     # ------------------------------------------------------------------
@@ -858,7 +865,7 @@ class BrowserLauncher:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
             except Exception:
-                pass
+                log.debug("Failed to remove temporary session file", exc_info=True)
             return False
 
     def _load_session_tabs(self, user_data_dir: Optional[str]) -> List[str]:
@@ -876,7 +883,7 @@ class BrowserLauncher:
             if isinstance(data, list):
                 return self._filter_restorable_urls(data)
         except Exception:
-            pass
+            log.debug("Failed to read restorable session URLs", exc_info=True)
         return []
 
     def _snapshot_tabs_via_http(
@@ -934,7 +941,7 @@ class BrowserLauncher:
                 json.dump(prefs, f, ensure_ascii=False)
             os.replace(tmp_path, prefs_path)
         except Exception:
-            pass
+            log.debug("Failed to write browser preferences", exc_info=True)
 
     async def _probe_page_ready(self, port):
         """Confirm a page-domain reply without treating it as emulation validation."""
@@ -1073,7 +1080,7 @@ class BrowserLauncher:
                     try:
                         proc.kill()
                     except Exception:
-                        pass
+                        log.debug("Failed to kill browser after launch failure", exc_info=True)
             release_port(port)
             shutil.rmtree(user_data, ignore_errors=True)
 
@@ -1274,7 +1281,7 @@ class BrowserLauncher:
                             "actual": value,
                         }
             except Exception:
-                pass
+                log.debug("Failed to verify browser emulation", exc_info=True)
             await asyncio.sleep(0.25)
         return {"ok": False, "checks": {}, "actual": None, "error": "timeout"}
 
@@ -1358,9 +1365,9 @@ class BrowserLauncher:
                                             port=port, cdp_port_source="DevToolsActivePort",
                                         )
                                 except Exception:
-                                    pass
+                                    log.debug("Failed to persist discovered browser port", exc_info=True)
                     except Exception:
-                        pass
+                        log.debug("Failed to read DevTools active port", exc_info=True)
             try:
                 url = f"http://127.0.0.1:{port}/json/version"
                 req = urllib.request.Request(url)
@@ -1499,7 +1506,7 @@ class BrowserLauncher:
                                         session_id=session_id,
                                     )
                             except Exception:
-                                pass
+                                log.debug("Failed to resume browser target", exc_info=True)
                             finally:
                                 worker_pauses.pop(session_id, None)
                             raise
@@ -1591,7 +1598,7 @@ class BrowserLauncher:
                                     self._save_session_tabs, user_data_dir, urls
                                 )
                         except Exception:
-                            pass
+                            log.debug("Failed to save restored session tabs", exc_info=True)
 
                 async def apply_screen_emulation(session_id):
                     """S3: let Chrome's native layer set screen.* and CSS media.
@@ -1722,10 +1729,10 @@ class BrowserLauncher:
                                                     {"url": extra_url},
                                                 )
                                             except Exception:
-                                                pass
+                                                log.debug("Failed to open verification tab", exc_info=True)
                                         await asyncio.sleep(0.5)
                                     except Exception:
-                                        pass
+                                        log.debug("Failed to verify initial page load", exc_info=True)
                                 elif fp.verification_mode == "strict":
                                     # The transient verification server has stopped.
                                     # Do not leave its dead URL as the user's tab.
@@ -1743,7 +1750,7 @@ class BrowserLauncher:
                                     try:
                                         await asyncio.wait_for(load_event.wait(), timeout=10.0)
                                     except asyncio.TimeoutError:
-                                        pass
+                                        log.debug("Timed out waiting for page load", exc_info=True)
                                 finally:
                                     self._page_load_events.pop(session_id, None)
                                     nav_event = self._navigation_events.get(profile.id)
@@ -1879,7 +1886,7 @@ class BrowserLauncher:
                         except Exception:
                             # Worker targets reject some page-only domains; the
                             # worker JS still covers navigator values.
-                            pass
+                            log.debug("Worker rejected a page-only CDP domain", exc_info=True)
                     # Workers do not support Page.addScriptToEvaluateOnNewDocument.
                     # At waitForDebuggerOnStart they have a context but have not
                     # executed user code yet, so Runtime.evaluate is safe.
@@ -1910,7 +1917,7 @@ class BrowserLauncher:
                     except Exception:
                         # The duplicate may already have disappeared. Never
                         # resume or reinject through it on this cleanup path.
-                        pass
+                        log.debug("Failed to detach duplicate browser target", exc_info=True)
 
                 async def dispatch_event(event):
                     method = event.get("method", "")
@@ -2154,7 +2161,7 @@ class BrowserLauncher:
                     try:
                         await keepalive_task
                     except asyncio.CancelledError:
-                        pass
+                        log.debug("CDP keepalive task was cancelled", exc_info=True)
 
         except Exception as e:
             if (
@@ -2418,7 +2425,7 @@ class BrowserLauncher:
                 if os.path.exists(active_port_file):
                     os.remove(active_port_file)
             except Exception:
-                pass
+                log.debug("Failed to remove active port file", exc_info=True)
 
             port = get_free_port(exclude_ports=set(self.active_ports.values()))
             self._requested_ports[profile_id] = port
@@ -2891,7 +2898,7 @@ class BrowserLauncher:
                             try:
                                 proc.wait(timeout=5)
                             except subprocess.TimeoutExpired:
-                                pass
+                                log.debug("Browser did not exit after graceful close", exc_info=True)
                         if proc.poll() is None:
                             proc.terminate()
                             try:
@@ -3189,7 +3196,7 @@ class BrowserLauncher:
                 try:
                     progress_callback(p.id, res)
                 except Exception:
-                    pass
+                    log.debug("Launch progress callback failed for %s", p.id, exc_info=True)
             return {"profile_id": p.id, "name": p.name, "result": res}
 
         results: List[Dict[str, Any]] = []
@@ -3214,7 +3221,7 @@ class BrowserLauncher:
                         try:
                             progress_callback(p.id, item["result"])
                         except Exception:
-                            pass
+                            log.debug("Launch progress callback failed for %s", p.id, exc_info=True)
                     continue
                 futures.append(pool.submit(_launch_one, p))
                 if delay > 0:
