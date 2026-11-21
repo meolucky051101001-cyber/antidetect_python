@@ -171,12 +171,14 @@ def test_start_all_api_defaults_to_eight_and_reports_queue():
 
     try:
         with patch.object(app_module.launcher, "launch_all", side_effect=fake_launch_all):
+            profile_count = len(app_module.profile_manager.list_profiles())
+            assert profile_count >= 10
             response = client.post("/api/profiles/start-all")
             assert response.status_code == 200
             data = response.json()
             assert data["success"] is True
-            assert data["total"] == 10
-            assert data["starting_count"] == 10
+            assert data["total"] == profile_count
+            assert data["starting_count"] == profile_count
             # Mặc định giờ là auto theo RAM máy (4/6/8), không cố định 8.
             expected = app_module._auto_max_concurrent()
             assert data["max_concurrent"] == expected
