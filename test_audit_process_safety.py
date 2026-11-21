@@ -178,7 +178,7 @@ def test_delete_checks_directory_use_after_runtime_stopped(tmp_path):
 def test_process_scan_missing_command_line_is_unknown(monkeypatch, tmp_path):
     monkeypatch.setattr(process_identity.sys, "platform", "win32")
     monkeypatch.setattr(
-        process_identity.psutil, "process_iter",
+        process_identity.psutil, "pids",
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("defer to CIM")),
     )
     monkeypatch.setattr(process_identity.subprocess, "run", lambda *a, **k: SimpleNamespace(
@@ -190,7 +190,7 @@ def test_process_scan_missing_command_line_is_unknown(monkeypatch, tmp_path):
 def test_process_scan_missing_command_line_skips_only_confirmed_exited(monkeypatch, tmp_path):
     monkeypatch.setattr(process_identity.sys, "platform", "win32")
     monkeypatch.setattr(
-        process_identity.psutil, "process_iter",
+        process_identity.psutil, "pids",
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("defer to CIM")),
     )
     monkeypatch.setattr(process_identity.subprocess, "run", lambda *a, **k: SimpleNamespace(
@@ -209,25 +209,27 @@ def test_process_scan_missing_command_line_skips_only_confirmed_exited(monkeypat
 def test_fast_process_scan_matches_and_excludes_pids(monkeypatch, tmp_path):
     monkeypatch.setattr(process_identity.sys, "platform", "win32")
     directory = str(tmp_path)
-    processes = [
-        SimpleNamespace(info={
-            "pid": 101, "name": "chrome.exe",
-            "cmdline": ["chrome.exe", "--user-data-dir=" + directory],
-        }),
-        SimpleNamespace(info={
-            "pid": 102, "name": "msedge.exe",
-            "cmdline": ["msedge.exe", "--user-data-dir=" + directory],
-        }),
-        SimpleNamespace(info={
-            "pid": 103, "name": "chromium.exe",
-            "cmdline": ["chromium.exe", "--user-data-dir=" + directory + "-other"],
-        }),
-        SimpleNamespace(info={
-            "pid": 104, "name": "not-a-browser.exe",
-            "cmdline": ["not-a-browser.exe", "--user-data-dir=" + directory],
-        }),
-    ]
-    monkeypatch.setattr(process_identity.psutil, "process_iter", lambda *_a, **_k: processes)
+    processes = {
+        101: ("chrome.exe", ["chrome.exe", "--user-data-dir=" + directory]),
+        102: ("msedge.exe", ["msedge.exe", "--user-data-dir=" + directory]),
+        103: (
+            "chromium.exe",
+            ["chromium.exe", "--user-data-dir=" + directory + "-other"],
+        ),
+        104: (
+            "not-a-browser.exe",
+            ["not-a-browser.exe", "--user-data-dir=" + directory],
+        ),
+    }
+    monkeypatch.setattr(process_identity.psutil, "pids", lambda: list(processes))
+    monkeypatch.setattr(
+        process_identity.psutil,
+        "Process",
+        lambda pid: SimpleNamespace(
+            name=lambda: processes[pid][0],
+            cmdline=lambda: processes[pid][1],
+        ),
+    )
     monkeypatch.setattr(
         process_identity, "_browser_pids_using_dir_cim",
         lambda *_a, **_k: pytest.fail("complete native scan should not use CIM"),
@@ -239,39 +241,47 @@ def test_fast_process_scan_matches_and_excludes_pids(monkeypatch, tmp_path):
 def test_fast_process_scan_skips_process_that_exits_during_scan(monkeypatch, tmp_path):
     monkeypatch.setattr(process_identity.sys, "platform", "win32")
 
-    class ExitedProcess:
-        @property
-        def info(self):
-            raise process_identity.psutil.NoSuchProcess(pid=100)
+    def process(pid):
+        if pid == 100:
+            raise process_identity.psutil.NoSuchProcess(pid=pid)
+        return SimpleNamespace(
+            name=lambda: "chrome.exe",
+            cmdline=lambda: ["chrome.exe", "--user-data-dir=" + str(tmp_path)],
+        )
 
-    browser = SimpleNamespace(info={
-        "pid": 101,
-        "name": "chrome.exe",
-        "cmdline": ["chrome.exe", "--user-data-dir=" + str(tmp_path)],
-    })
-    monkeypatch.setattr(
-        process_identity.psutil, "process_iter",
-        lambda *_a, **_k: [ExitedProcess(), browser],
-    )
+    monkeypatch.setattr(process_identity.psutil, "pids", lambda: [100, 101])
+    monkeypatch.setattr(process_identity.psutil, "Process", process)
 
     assert process_identity.browser_pids_using_dir(str(tmp_path)) == {101}
 
 
-@pytest.mark.parametrize("access_denied, cmdline", [(True, None), (False, None), (False, [])])
+@pytest.mark.parametrize(
+    "failure",
+    ["name-access-denied", "empty-name", "cmdline-access-denied", "empty-cmdline"],
+)
 def test_fast_process_scan_defers_to_cim_on_incomplete_process(
-    monkeypatch, tmp_path, access_denied, cmdline,
+    monkeypatch, tmp_path, failure,
 ):
     monkeypatch.setattr(process_identity.sys, "platform", "win32")
 
     class Process:
-        @property
-        def info(self):
-            if access_denied:
+        def name(self):
+            if failure == "name-access-denied":
                 raise process_identity.psutil.AccessDenied(pid=101)
-            return {"pid": 101, "name": "chrome.exe", "cmdline": cmdline}
+            if failure == "empty-name":
+                return ""
+            return "chrome.exe"
+
+        def cmdline(self):
+            if failure == "cmdline-access-denied":
+                raise process_identity.psutil.AccessDenied(pid=101)
+            if failure == "empty-cmdline":
+                return []
+            return ["chrome.exe", "--user-data-dir=" + str(tmp_path)]
 
     calls = []
-    monkeypatch.setattr(process_identity.psutil, "process_iter", lambda *_a, **_k: [Process()])
+    monkeypatch.setattr(process_identity.psutil, "pids", lambda: [101])
+    monkeypatch.setattr(process_identity.psutil, "Process", lambda _pid: Process())
     monkeypatch.setattr(
         process_identity, "_browser_pids_using_dir_cim",
         lambda directory, excluded: calls.append((directory, excluded)) or {101},
@@ -279,6 +289,33 @@ def test_fast_process_scan_defers_to_cim_on_incomplete_process(
 
     assert process_identity.browser_pids_using_dir(str(tmp_path), {102}) == {101}
     assert calls == [(str(tmp_path), {102})]
+
+
+def test_fast_process_scan_uses_fresh_process_object_for_reused_pid(monkeypatch, tmp_path):
+    monkeypatch.setattr(process_identity.sys, "platform", "win32")
+    directory = str(tmp_path)
+    names = iter(["notepad.exe", "chrome.exe"])
+    process_objects = []
+
+    def process(pid):
+        instance = SimpleNamespace(
+            name=lambda: next(names),
+            cmdline=lambda: ["chrome.exe", "--user-data-dir=" + directory],
+        )
+        process_objects.append(instance)
+        return instance
+
+    monkeypatch.setattr(process_identity.psutil, "pids", lambda: [101])
+    monkeypatch.setattr(process_identity.psutil, "Process", process)
+    monkeypatch.setattr(
+        process_identity, "_browser_pids_using_dir_cim",
+        lambda *_a, **_k: pytest.fail("complete native scan should not use CIM"),
+    )
+
+    assert process_identity.browser_pids_using_dir(directory) == set()
+    assert process_identity.browser_pids_using_dir(directory) == {101}
+    assert len(process_objects) == 2
+    assert process_objects[0] is not process_objects[1]
 
 
 def test_failed_launch_cleanup_retains_live_handle_and_runtime(tmp_path):

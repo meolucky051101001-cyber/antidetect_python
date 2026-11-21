@@ -316,22 +316,27 @@ def browser_pids_using_dir(user_data_dir, exclude_pids=None):
         expected = os.path.normcase(os.path.realpath(user_data_dir))
         excluded = {int(pid) for pid in (exclude_pids or [])}
         pids = set()
-        for process in psutil.process_iter(["pid", "name", "cmdline"]):
+        for pid in psutil.pids():
             try:
-                record = process.info
+                process = psutil.Process(pid)
+                name = process.name()
             except psutil.NoSuchProcess:
                 continue
             except psutil.AccessDenied:
                 return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
-            name = (record.get("name") or "").lower()
+            if not name:
+                return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
+            name = name.lower()
             if name not in _BROWSER_NAMES:
                 continue
-            pid = int(record.get("pid"))
-            if pid <= 0:
-                return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
             if pid in excluded:
                 continue
-            argv = record.get("cmdline")
+            try:
+                argv = process.cmdline()
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.AccessDenied:
+                return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
             if not argv:
                 return _browser_pids_using_dir_cim(user_data_dir, exclude_pids)
             actual = _options(argv).get("user-data-dir")
