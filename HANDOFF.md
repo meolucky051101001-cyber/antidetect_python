@@ -1,9 +1,11 @@
-# HANDOFF — Antidetect Python (cập nhật 2026-11-15)
+# HANDOFF — Antidetect Python (cập nhật 2026-11-21)
 
 Điểm bắt đầu cho model/người tiếp nhận. Mô tả **trạng thái thật hiện tại**.
 Đọc hết mục "Quy tắc an toàn" trước khi sửa code.
 
-**Trạng thái hiện tại 15/11/2026:** các sửa R01–R11 đã được triển khai trên nhánh `codex/review-fixes-2026-11-15`, base HEAD `260f3cc`, giữ các thay đổi đã có trước review. Xem [báo cáo triển khai và kiểm chứng](docs/VERIFICATION_REVIEW_FIXES_2026-11-15.md) cho số test mới, migration và phạm vi còn chưa nghiệm thu. Các thay đổi ngoài phạm vi review có sẵn được giữ riêng trong workspace; các khẳng định “sạch/production-ready” và HEAD bên dưới chỉ mô tả baseline lịch sử 08/11, không phải trạng thái hiện tại.
+**Trạng thái hiện tại:** xem [docs/RELEASE_STATUS.md](docs/RELEASE_STATUS.md) — tài liệu trạng thái duy nhất cho quyết định triển khai (gate còn mở, bằng chứng đã có, giới hạn). Chuỗi nâng cấp GĐ 0–4 nằm ở các PR chờ merge; baseline `352186c` bên dưới là lịch sử 08/11, không phải trạng thái hiện tại.
+
+Các sửa R01–R11 đã được triển khai trên nhánh `codex/review-fixes-2026-11-15`, base HEAD `260f3cc` — xem [báo cáo triển khai và kiểm chứng](docs/history/VERIFICATION_REVIEW_FIXES_2026-11-15.md). Tài liệu đợt cũ được chuyển vào `docs/history/`.
 
 Quy tắc mới cần giữ: không xóa khi stop/liveness chưa xác minh; cleanup phải đúng owner/generation; proxy enabled sai không được fallback direct; patch dữ liệu chậm phải kiểm tra revision; scan worker mất token không được publish; cache giữ lại không tạo observation/history mới; scheduler accepted không có nghĩa scan completed. SQLite schema version 3 nâng cấp từ v1 trong một transaction; không chạy writer cũ và mới cùng data. Không tự migrate production trong test.
 
@@ -71,7 +73,7 @@ và **hệ thống Fanpages Giai đoạn 1-3** (`7de76f7`..`73ebff5`) đã hoàn
   - Unit/API/storage suite: **407 passed + 1 skipped**; ruff/compileall sạch;
     `data/profiles.json` giữ nguyên hash baseline
     `B26426E4E9945CEEB81D163637D589D25F7D98789D031D6DA21CD252410B8ABA` (xem thêm
-    `docs/VERIFICATION_STABILITY_FIX_2026-11-05.md`).
+    `docs/history/VERIFICATION_STABILITY_FIX_2026-11-05.md`).
   - **Soak 12h (2026-11-06 23:48:52 → 2026-11-07 11:49:03 UTC+7): PASS**
     (`passed=true`, `completed_duration=true`, `duration_seconds=43210.9`,
     `samples=1439`, `lifecycle_cycles=71`, `tab_cycles=143`, `copy_cycles=2`,
@@ -242,7 +244,7 @@ Lịch sử gần nhất:
    VI/EN) nhưng **chưa verify với page thật**; heuristic DOM/parse ngày có thể
    lệch khi FB đổi giao diện. Raw text được giữ để đối chiếu. Đợt F3/F4
    (2026-11-05) đã có contract + test fixture nhưng **vẫn chưa chạy page
-   thật**; xem `docs/VERIFICATION_STABILITY_FIX_2026-11-05.md`.
+   thật**; xem `docs/history/VERIFICATION_STABILITY_FIX_2026-11-05.md`.
 2. **Soak dài hạn 24–72h / >20 profile đồng thời / SOCKS5 thật / DataDome+Turnstile
    thật** — **Soak 12h trên data tạm cô lập đã PASS** (2026-11-07: `1439` samples,
    `71` lifecycle, `143` tab, `2` copy, `2` memory_shed, `0` lỗi, `0` orphan),
@@ -304,6 +306,6 @@ CI: `.github/workflows/ci.yml` (Windows, Python 3.10, cache pip, cài
 `requirements-dev.txt -c constraints.txt`, compileall → ruff → pytest + coverage
 gate 58%). Dependency pin: `constraints.txt`. Ruff config: `pyproject.toml`.
 
-Tài liệu chi tiết: `docs/VERIFICATION_2026-10-24.md` (mục 1-18, bằng chứng
+Tài liệu chi tiết: `docs/history/VERIFICATION_2026-10-24.md` (mục 1-18, bằng chứng
 từng fix), `docs/OPERATIONS.md` (runbook 4.1-4.7), `docs/LIMITATIONS.md`.
 Số liệu CreepJS 31%/noTaskbar trong `VERIFICATION_2026-10-23.md` đã stale.

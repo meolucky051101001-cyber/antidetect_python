@@ -2,7 +2,7 @@
 
 Ngày lập: 05/11/2026. Trạng thái: kế hoạch triển khai, chưa sửa mã ứng dụng.
 
-Tham chiếu: `docs/STABILITY_REVIEW_2026-11-05.md`. Baseline gần nhất: 301 pytest passed + 1 skipped; UI smoke chạy riêng đạt; E2E 24/24; coverage 71,09%; ruff và compileall đạt. Các kết quả này thuộc lượt review trước, không phải kiểm thử lại trong lần lập kế hoạch.
+Tham chiếu: `STABILITY_REVIEW_2026-11-05.md`. Baseline gần nhất: 301 pytest passed + 1 skipped; UI smoke chạy riêng đạt; E2E 24/24; coverage 71,09%; ruff và compileall đạt. Các kết quả này thuộc lượt review trước, không phải kiểm thử lại trong lần lập kế hoạch.
 
 ## 1. Phạm vi, thứ tự và mục tiêu
 

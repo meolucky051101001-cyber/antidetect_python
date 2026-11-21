@@ -2,13 +2,13 @@
 
 Cập nhật: **2026-11-05** (bổ sung vận hành CDP health, copy profile có
 transaction và fanpage F3/F4 — xem mục 4.8 và
-`VERIFICATION_STABILITY_FIX_2026-11-05.md`; đợt này **chưa commit**).
+`history/VERIFICATION_STABILITY_FIX_2026-11-05.md`; đợt này **chưa commit**).
 Bản 2026-10-26 mô tả roadmap P0 + P1 + P2: CI + coverage gate, scheduler
 lease heartbeat + run history, UI `expected_revision`; tách module launcher/web,
 JS/CSS ra asset ngoài + CSP `script-src 'self'`, logging xoay vòng + metrics,
 Playwright UI smoke; bulk job xuyên instance và nâng cấp/rollback có chữ ký.
 Bản 2026-10-24 mô tả đợt hardening production (xem
-`VERIFICATION_2026-10-24.md`). Tài liệu này là hướng dẫn vận hành hàng ngày để
+`history/VERIFICATION_2026-10-24.md`). Tài liệu này là hướng dẫn vận hành hàng ngày để
 giảm rủi ro khi dùng cho profile thật.
 
 ---
@@ -420,7 +420,7 @@ python tools\update.py rollback --stop-server --yes
 
 Đợt sửa ổn định F1–F4 thêm ba nhóm hành vi vận hành dưới đây. Đây là mô tả
 hành vi đã có test tự động; live test với Facebook/Chrome thật và soak vẫn
-**chưa chạy** (xem `VERIFICATION_STABILITY_FIX_2026-11-05.md`).
+**chưa chạy** (xem `history/VERIFICATION_STABILITY_FIX_2026-11-05.md`).
 
 ### 4.8.1. Chrome đang chạy ≠ CDP khỏe
 

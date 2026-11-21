@@ -169,7 +169,7 @@ chạy, không phải cam kết vượt mọi detector.
   CDP và làm Chrome reset device metrics/timezone/UA sau ~35–40 giây (fingerprint
   mâu thuẫn như `screen.height=1200` + `availHeight=1032`). Giờ keepalive chạy
   trong task riêng (`keepalive_loop`), reader là nơi duy nhất đọc response. Đã
-  verify 100 giây không reset (xem `docs/VERIFICATION_2026-10-23.md` mục 12).
+  verify 100 giây không reset (xem `docs/history/VERIFICATION_2026-10-23.md` mục 12).
 
 ### 6.2. Trade-off noise vs "masking detected" (2026-10-24)
 
@@ -207,7 +207,7 @@ căn bản của phương pháp inject JS, không phải bug. Chọn theo use-ca
   `is_running`/`list_profiles` chạy off event-loop (trước đó PowerShell block
   5s/lần có thể đóng băng API sau restart).
 
-Chi tiết và bằng chứng: `docs/VERIFICATION_2026-10-24.md`.
+Chi tiết và bằng chứng: `docs/history/VERIFICATION_2026-10-24.md`.
 
 ### 6.4. Trạng thái kiểm thử sau roadmap P0 + P1 + P2 (2026-10-26)
 

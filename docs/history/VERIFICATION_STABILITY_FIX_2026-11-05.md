@@ -6,10 +6,10 @@ cáo này là chứng nhận phát hành.
 
 Tài liệu liên quan:
 
-- Kế hoạch: `docs/STABILITY_FIX_PLAN_2026-11-05.md`
-- Review gốc: `docs/STABILITY_REVIEW_2026-11-05.md`
+- Kế hoạch: `STABILITY_FIX_PLAN_2026-11-05.md`
+- Review gốc: `STABILITY_REVIEW_2026-11-05.md`
 - Quy tắc dữ liệu: `HANDOFF.md` mục 4
-- Vận hành: `docs/OPERATIONS.md`
+- Vận hành: `../OPERATIONS.md`
 
 ## 1. Môi trường và kết quả đo
 

@@ -74,7 +74,7 @@ validator theo `STEALTH_GROUPS`, UI 5 checkbox trong edit modal, API tự nhận
 Chế độ khuyến nghị cho production = `"authentic"`: tắt cả 5 nhóm
 `canvas,webgl,audio,media,worker`.
 
-Trade-off phải hiểu rõ trước khi chọn (xem LIMITATIONS.md mục 6.2):
+Trade-off phải hiểu rõ trước khi chọn (xem ../LIMITATIONS.md mục 6.2):
 - **Unique (mặc định, như trước)**: mỗi profile có hash canvas/WebGL/audio
   riêng — chống liên kết profile qua fingerprint — nhưng Pixelscan-type detector
   chấm "masking detected".
@@ -297,7 +297,7 @@ sở hữu" — đọc **trực tiếp từ phiên Chrome đang chạy** của p
 
 Đọc DOM bằng heuristic (Facebook đổi UI thường xuyên → có thể thiếu mục, mỗi
 mục có link để kiểm tra); chỉ đọc, không thao tác tài khoản; cần profile đang
-chạy + đã đăng nhập FB để làm mới. Chi tiết: `LIMITATIONS.md` mục 8.
+chạy + đã đăng nhập FB để làm mới. Chi tiết: `../LIMITATIONS.md` mục 8.
 
 ---
 
@@ -398,7 +398,7 @@ Scale test thật (8 profile, batch 4, máy 16GB):
 Ngoại suy 20 profile (batch 6 tự động trên máy 16GB): ~25-35s start-all.
 ```
 
-Runbook vận hành quy mô 20 profile: `docs/OPERATIONS.md` mục 4.1.
+Runbook vận hành quy mô 20 profile: `../OPERATIONS.md` mục 4.1.
 
 ---
 
@@ -439,7 +439,7 @@ Runbook vận hành quy mô 20 profile: `docs/OPERATIONS.md` mục 4.1.
 - **Chưa verify với page thật** (không dùng dữ liệu thật để test): heuristic
   DOM/parse ngày có thể lệch khi Facebook đổi giao diện — mọi giá trị raw
   (`created_raw`, `last_post_raw`) được giữ lại để đối chiếu bằng mắt. Ghi
-  `LIMITATIONS.md` mục 8.
+  `../LIMITATIONS.md` mục 8.
 
 
 ---
@@ -592,7 +592,7 @@ Cài/upgrade browser pin: `python tools\install_browser.py --major <N>`; pin
 per-profile: Edit profile qua API (`browser_path`) — UI sẽ bổ sung sau nếu
 cần. Lịch tuần: `verify_live --profile <id>` (tự so drift) +
 `detector_audit` 7 targets (so dọc JSON theo tuần). Chi tiết:
-`docs/OPERATIONS.md` mục 4.2.
+`../OPERATIONS.md` mục 4.2.
 
 
 ---
@@ -697,6 +697,6 @@ smoke test     đã sửa chuẩn hóa theo tổng trọng số + test tổng ==
 
 ### 18.4. Hướng dẫn automation
 
-Xem `docs/OPERATIONS.md` mục 4.4 — thay `page.fill()`/`page.type()` của
+Xem `../OPERATIONS.md` mục 4.4 — thay `page.fill()`/`page.type()` của
 Playwright bằng HumanInput khi site mục tiêu nhạy behavior (đăng nhập, form
 quan trọng); page.fill() instant 0ms/field là dấu hiệu bot điển hình.

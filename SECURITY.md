@@ -223,4 +223,4 @@ phiên hợp lệ.
     distributed lock nhiều máy; file hỏng thì fail-closed (HTTP 503).
 
 Xem thêm [docs/LIMITATIONS.md](docs/LIMITATIONS.md) và
-[docs/VERIFICATION_2026-10-23.md](docs/VERIFICATION_2026-10-23.md).
+[docs/history/VERIFICATION_2026-10-23.md](docs/history/VERIFICATION_2026-10-23.md).
