@@ -7,7 +7,7 @@ import uuid
 import pytest
 
 import antidetect.storage as storage
-from antidetect.models import Profile, ProxyConfig
+from antidetect.models import ProxyConfig
 from antidetect.profile_copy import (
     CopyJournal,
     CopyNoSpaceError,

@@ -1,11 +1,8 @@
 import os
-import re
 import sys
 import json
 import time
 import uuid
-import datetime
-import socket
 import shutil
 import asyncio
 import threading
@@ -33,7 +30,6 @@ from .cdp_health import (
     REASON_SOCKET_SEND_FAILED,
     REASON_STOP_FAILED,
     REASON_TARGET_CONFIG_FAILED,
-    REASON_USER_STOP,
     REASON_VERIFICATION_FAILED,
     STATE_DEGRADED,
     STATE_HEALTHY,
@@ -71,12 +67,12 @@ from .facebook import (
     DEEP_NAVIGATION_TIMEOUT_S,
     TRANSIENT_TARGET_IDS,
     ScanAborted,
-    classify_facebook_page,
-    fb_unit_to_days as _fb_unit_to_days,
+    classify_facebook_page,  # noqa: F401 - re-exported for test_production_hardening
+    fb_unit_to_days as _fb_unit_to_days,  # noqa: F401 - re-exported for test_production_hardening
     fetch_pages_cdp,
     fetch_pages_deep_cdp,
     merge_page_details,
-    parse_fb_created_date as _parse_fb_created_date,
+    parse_fb_created_date as _parse_fb_created_date,  # noqa: F401 - re-exported for test_production_hardening
 )
 
 log = get_logger("launcher")
@@ -945,7 +941,6 @@ class BrowserLauncher:
 
     async def _probe_page_ready(self, port):
         """Confirm a page-domain reply without treating it as emulation validation."""
-        import websockets
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
             try:
@@ -980,7 +975,6 @@ class BrowserLauncher:
         if not browser_path:
             return None
         import tempfile
-        import websockets
 
         user_data = tempfile.mkdtemp(prefix="antidetect-brand-probe-")
         port = get_free_port()
@@ -1094,7 +1088,6 @@ class BrowserLauncher:
         a secure context. A second call after navigation can require Client
         Hints, which are absent on about:blank.
         """
-        import websockets
         deadline = time.monotonic() + max(0.5, float(deadline_seconds))
         expr = r"""
 (async () => {
@@ -1316,7 +1309,6 @@ class BrowserLauncher:
         launch_id: Optional[str] = None,
     ):
         """Inject stealth into every page/worker/OOPIF target via CDP."""
-        import websockets
 
         session = None
         if launch_id:

@@ -1,7 +1,6 @@
 """F4 — hợp đồng discovery, tích lũy ngoài DOM và hợp nhất cache theo trường."""
 import threading
 
-import pytest
 
 from antidetect.fanpage_scan import (
     PageAccumulator,

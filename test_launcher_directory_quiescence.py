@@ -675,7 +675,7 @@ def test_stop_impl_terminates_synthetic_local_process(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher_module.sys, "platform", "win32")
     launch_id = launcher.cdp_health.begin_launch("profile-1", launcher.instance_id)
     launcher.cdp_health.set_process("profile-1", launch_id, 424242)
-    record = launcher._runtime_store.upsert(
+    launcher._runtime_store.upsert(
         "profile-1",
         launch_id=launch_id,
         owner_instance=launcher.instance_id,

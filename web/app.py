@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 import time
 import uuid
 import asyncio
@@ -23,8 +22,6 @@ if BASE_DIR not in sys.path:
 from antidetect.models import Profile, FingerprintConfig, ProxyConfig, REDACTED_SECRET
 from antidetect.storage import (
     ProfileManager,
-    ProfileBusyError,
-    ProfileDeletionError,
     ProfileRevisionConflict,
     DATA_DIR,
     PROFILES_DATA_DIR,
@@ -37,7 +34,6 @@ from antidetect.profile_copy import (
 from antidetect.profile_import import prepare_import_profile
 from antidetect.fingerprint import (
     generate_fingerprint,
-    get_host_device_memory,
     locale_for_country,
     detect_browser_brand,
 )
@@ -1611,7 +1607,7 @@ async def get_system_logs(lines: int = 200):
     try:
         tail = await asyncio.to_thread(read_tail)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Không đọc được app.log: {e}")
+        raise HTTPException(status_code=500, detail=f"Không đọc được app.log: {e}") from e
     return {"success": True, "lines": tail, "count": len(tail)}
 
 
@@ -1943,11 +1939,11 @@ async def import_profile_cookies(profile_id: str, req: ImportCookiesRequest):
 
     try:
         success = await asyncio.to_thread(_import)
-    except ProfileLockTimeout:
+    except ProfileLockTimeout as e:
         raise HTTPException(
             status_code=409,
             detail="Đang có lượt quét fanpage cho profile này. Hãy chờ lượt đó xong.",
-        )
+        ) from e
     except CdpUnavailable as e:
         return _cdp_conflict_response(e)
     if not success:
@@ -2123,7 +2119,7 @@ async def get_facebook_pages(
                 bool(force),
                 stale_after_hours,
             )
-        except ProfileLockTimeout as e:
+        except ProfileLockTimeout:
             return JSONResponse(
                 status_code=409,
                 content={
@@ -2292,7 +2288,7 @@ async def bulk_create_profiles(req: BulkCreateRequest):
             if i < len(req.proxies):
                 try:
                     proxy = parse_proxy_line(req.proxies[i])
-                except ValueError as exc:
+                except ValueError:
                     warnings.append(f"{name}: proxy dòng {i + 1} không hợp lệ; không tạo profile")
                     continue
             else:
@@ -2944,6 +2940,5 @@ async def update_fanpage_alert_endpoint(
     if alert is None:
         raise HTTPException(status_code=404, detail="Cảnh báo không tồn tại.")
     return {"success": True, "alert": alert}
-
 
 

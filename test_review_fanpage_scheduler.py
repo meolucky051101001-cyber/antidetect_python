@@ -1,6 +1,6 @@
 """Regression coverage for review R04, R07, R08 and R09, using only temp data."""
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 import multiprocessing

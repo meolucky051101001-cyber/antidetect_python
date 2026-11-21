@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pytest
 
 from antidetect import process_identity
-from antidetect.launcher import BrowserLauncher
 from antidetect.profile_lifecycle import stop_and_delete
 from test_runtime_generation_cleanup import fixture_launcher
 
@@ -198,8 +197,8 @@ def test_process_scan_missing_command_line_skips_only_confirmed_exited(monkeypat
     for state in ("owned", "unknown", "mismatch", "absent"):
         calls = []
         def identity(pid, directory, *, fresh):
-            calls.append((pid, directory, fresh))
-            return {"state": state}
+            calls.append((pid, directory, fresh))  # noqa: B023 - called within the same iteration
+            return {"state": state}  # noqa: B023 - called within the same iteration
         monkeypatch.setattr(process_identity, "read_browser_identity", identity)
         result = process_identity.browser_pids_using_dir(str(tmp_path))
         assert calls == [(424242, str(tmp_path), True)]

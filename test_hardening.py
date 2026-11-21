@@ -4,7 +4,6 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 
 import pytest
 
@@ -16,7 +15,7 @@ TEST_DATA_DIR = tempfile.mkdtemp(prefix="antidetect-hardening-")
 os.environ["ANTIDETECT_DATA_DIR"] = TEST_DATA_DIR
 atexit.register(shutil.rmtree, TEST_DATA_DIR, True)
 
-from antidetect.models import Profile, ProxyConfig
+from antidetect.models import ProxyConfig
 from antidetect.storage import ProfileManager, ProfileDeletionError
 from antidetect.secrets import (
     SecretStoreCorruption,

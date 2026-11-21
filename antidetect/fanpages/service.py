@@ -22,7 +22,6 @@ from antidetect.facebook import (
 from antidetect.fanpage_scan import (
     REASON_LOGIN_IDENTITY_MISMATCH,
     REASON_LOGIN_LOST,
-    STATUS_COMPLETE,
     STATUS_FAILED,
     STATUS_PARTIAL,
 )

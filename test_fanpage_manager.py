@@ -13,7 +13,6 @@ if BASE_DIR not in sys.path:
 
 from antidetect.fanpages.repository import (  # noqa: E402
     FanpageRepository,
-    FanpageRevisionConflictError,
     parse_compact_metric,
 )
 from antidetect.fanpages.service import (  # noqa: E402

@@ -4,7 +4,7 @@ import math
 import random
 import ctypes
 from functools import lru_cache
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Optional, List, Tuple
 from .models import FingerprintConfig
 
 DEVICE_MEMORY_BUCKETS = (2, 4, 8, 16, 32)
@@ -106,7 +106,6 @@ def get_host_screen_info() -> Tuple[int, int, float]:
     """
     if sys.platform == "win32":
         try:
-            from ctypes import wintypes
 
             # Use the modern per-monitor context; on a headless Python process
             # this succeeds before any window is created, so GetSystemMetrics
@@ -878,7 +877,7 @@ def generate_fingerprint(
         width = preset["width"]
         height = preset["height"]
         cores = preset["cores"]
-        ram = preset["ram"]
+        _ram = preset["ram"]
     else:
         gpu_list = GPU_PROFILES.get(target_os, GPU_PROFILES["windows"])
         gpu = random.choice(gpu_list)
@@ -886,7 +885,8 @@ def generate_fingerprint(
         gpu_renderer = gpu["renderer"]
         width, height = random.choice(SCREEN_RESOLUTIONS)
         cores = random.choice([4, 8, 12])
-        ram = random.choice([8, 16])
+        # Keep this draw to preserve seeded fingerprint RNG sequences.
+        _ram = random.choice([8, 16])
 
     # The HTTP Sec-CH-Device-Memory header always reports the real host RAM.
     # Use that same bucket in JS; profile-specific RAM cannot be kept consistent

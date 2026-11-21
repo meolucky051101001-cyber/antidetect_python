@@ -11,7 +11,6 @@ Tests 8 critical fingerprint surfaces across isolated browser instances:
 8. WebRTC ICE Candidate & SDP private IP leak check
 """
 import argparse
-import hashlib
 import json
 import os
 import sys

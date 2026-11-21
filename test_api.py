@@ -477,7 +477,7 @@ def test_facebook_pages_endpoint(monkeypatch):
         assert body["success"] and body["source"] == "live"
         assert body["login_status"] is True and body["logged_in"] is True
         # Endpoint enrich thêm status/ready/age_days cho từng page.
-        for orig, got in zip(fake_pages, body["pages"]):
+        for orig, got in zip(fake_pages, body["pages"], strict=True):
             assert all(got.get(k) == v for k, v in orig.items())
             assert {"status", "ready", "age_days"} <= set(got)
         assert body["synced_at"] > 0
@@ -490,7 +490,7 @@ def test_facebook_pages_endpoint(monkeypatch):
         body = r.json()
         assert body["source"] == "cache"
         assert body["login_status"] == "unknown" and body["logged_in"] is None
-        for orig, got in zip(fake_pages, body["pages"]):
+        for orig, got in zip(fake_pages, body["pages"], strict=True):
             assert all(got.get(k) == v for k, v in orig.items())
 
         # 5. Chưa đăng nhập FB → logged_in=false + hướng dẫn, không coi là lỗi server.
@@ -1102,7 +1102,7 @@ def test_import_profiles_strips_unsafe_fanpage_urls():
 def test_worker_pool_is_sized_for_parallel_launch():
     pool = app_module._worker_pool()
     try:
-        assert getattr(pool, "_max_workers") == 64
+        assert pool._max_workers == 64
     finally:
         pool.shutdown(wait=False)
 
