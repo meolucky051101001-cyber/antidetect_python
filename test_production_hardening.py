@@ -30,7 +30,7 @@ atexit.register(shutil.rmtree, TEST_DATA_DIR, True)
 
 from antidetect.models import Profile, FingerprintConfig
 from antidetect.storage import ProfileManager, ReentrantInterProcessLock
-from antidetect.secrets import set_proxy_password, get_proxy_password, _write_all_secrets, _read_all_secrets
+from antidetect.secrets import set_proxy_password, get_proxy_password
 import antidetect.secrets as secrets_module
 import antidetect.storage as storage_module
 import antidetect.launcher as launcher_module
@@ -39,6 +39,15 @@ from antidetect.browser_runtime import BrowserRuntimeStore
 from antidetect.launcher import BrowserLauncher
 from antidetect.fingerprint import generate_fingerprint
 from antidetect.stealth import get_stealth_script, get_worker_stealth_script
+
+
+def _read_launcher_source():
+    sources = []
+    for filename in ("launcher.py", "launcher_cdp.py"):
+        path = os.path.join(BASE_DIR, "antidetect", filename)
+        with open(path, encoding="utf-8") as source:
+            sources.append(source.read())
+    return "\n".join(sources)
 
 
 manager = ProfileManager()
@@ -263,6 +272,7 @@ def test_identity_unknown_is_not_cached(monkeypatch):
     record = {"Name": "chrome.exe", "CommandLine": "synthetic", "CreationDate": "birth-A"}
     process_identity.invalidate_identity()
     monkeypatch.setattr(process_identity, "_kernel32", FakeKernel32)
+    monkeypatch.setattr(process_identity, "_native_record", lambda *_: None)
     monkeypatch.setattr(process_identity, "windows_argv", lambda _: [
         "chrome.exe", "--user-data-dir=" + user_data_dir, "--remote-debugging-port=9333",
     ])
@@ -578,7 +588,7 @@ def test_native_brands_override_payload_brands():
 
 
 def test_launcher_measures_native_brands_before_overrides():
-    src = open(os.path.join(BASE_DIR, "antidetect", "launcher.py"), encoding="utf-8").read()
+    src = _read_launcher_source()
     # Đo bằng Chrome phụ riêng (setUserAgentOverride đè cả JS userAgentData,
     # nên phiên đã override không đo được) — phải chạy trước khi CDP thread
     # build stealth payload/ua_metadata.
@@ -843,7 +853,7 @@ def test_facebook_pages_deep_endpoint(monkeypatch):
         "/auth/login",
         headers={"Authorization": "Bearer " + app_module.app.state.access_key},
     )
-    m = ProfileManager()
+    ProfileManager()
     r = client.post("/api/profiles", json={"name": "FB Deep Test", "os": "windows"})
     pid = r.json()["id"]
     try:
@@ -946,7 +956,7 @@ def test_facebook_deep_ui_present():
     js = open(
         os.path.join(BASE_DIR, "web", "static", "js", "dashboard.js"), encoding="utf-8"
     ).read()
-    assert "refreshFanpages(true)" in html
+    assert """data-on-click="refreshFanpages" data-on-click-args='[true]'""" in html
     assert "deep=1" in js
     assert "Đang đăng" in js and "Lâu chưa thấy bài mới" in js and "Sẵn sàng" in js
     assert "Dữ liệu cũ, cần đồng bộ" in js
@@ -2109,7 +2119,7 @@ def test_phase4_human_key_events_include_code_and_vk():
         vn["key"], vn["text"], vn["code"], vn["windowsVirtualKeyCode"]
     ) == ("ế", "ế", "", 0)
 
-    for down, up in zip(downs, ups):
+    for down, up in zip(downs, ups, strict=True):
         assert down["key"] == up["key"]
         assert down["code"] == up["code"]
         assert up["windowsVirtualKeyCode"] == down["windowsVirtualKeyCode"]
@@ -2438,9 +2448,7 @@ def test_proxy_auth_uses_cdp_only():
     Extension MV3 cũ ghi mật khẩu plaintext vào thư mục profile và
     --load-extension đã bị Chrome 137+ bỏ — không được quay lại đường đó.
     """
-    launcher_src = open(
-        os.path.join(BASE_DIR, "antidetect", "launcher.py"), encoding="utf-8"
-    ).read()
+    launcher_src = _read_launcher_source()
     proxy_src = open(
         os.path.join(BASE_DIR, "antidetect", "proxy.py"), encoding="utf-8"
     ).read()

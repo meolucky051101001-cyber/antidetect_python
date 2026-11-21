@@ -2,7 +2,6 @@ import argparse
 import getpass
 import sys
 import os
-import json
 
 # Add root folder to sys.path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -235,7 +234,7 @@ def main():
                 print(f"Cổng fingerprint: {gate.message}")
         res = launcher.launch(args.id, open_url=clean_url)
         if res.get("success"):
-            print(f"Khởi chạy profile thành công!")
+            print("Khởi chạy profile thành công!")
             print(f"Remote Debugging Port: {res.get('port')}")
             print(f"CDP Endpoint: {res.get('ws_endpoint')}")
             if getattr(args, "detach", False):
@@ -248,17 +247,17 @@ def main():
                 launcher.unregister_cleanup()
                 print("Profile đang chạy ở chế độ nền (detached).")
             else:
-                print(f"Nhấn Ctrl+C để dừng profile và thoát.")
+                print("Nhấn Ctrl+C để dừng profile và thoát.")
                 # Giữ tiến trình chạy để CDP daemon thread không bị kill
                 try:
                     import time as _time
                     while launcher.is_running(args.id):
                         _time.sleep(1)
-                    print(f"Trình duyệt đã đóng.")
+                    print("Trình duyệt đã đóng.")
                 except KeyboardInterrupt:
-                    print(f"\nĐang dừng profile...")
+                    print("\nĐang dừng profile...")
                     launcher.stop(args.id)
-                    print(f"Đã dừng profile thành công.")
+                    print("Đã dừng profile thành công.")
         else:
             code = res.get("code")
             suffix = f" [{code}]" if code else ""

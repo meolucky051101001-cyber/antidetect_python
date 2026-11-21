@@ -954,7 +954,6 @@ async def fetch_pages_cdp(
     ``stability``, ``observed_count``, ...). Tab do collector mở luôn được
     đóng trong ``finally``; profile dừng giữa chừng → ``ScanAborted``.
     """
-    import websockets
 
     def _http_json(path, method="GET"):
         req = urllib.request.Request(
@@ -1361,7 +1360,6 @@ async def fetch_pages_deep_cdp(
     Trang timeout giữ entry/metrics đã đọc và tiếp tục trong budget tổng.
     Login/checkpoint dừng các trang còn lại. Cleanup tab có timeout riêng.
     """
-    import websockets
 
     scan_deadline = time.monotonic() + max(0.0, float(timeout))
 
@@ -1676,8 +1674,8 @@ def merge_page_details(
             if group in ("followers", "likes", "creation", "activity") and isinstance(info, dict)
         } if isinstance(existing_observations, dict) else {}
         def observed(group):
-            observations[group] = {"observed_at": to_utc_iso(page_obs), "source": "facebook_detail",
-                                   "scan_id": str(info.get("scan_id") or data.get("scan_id") or "")}
+            observations[group] = {"observed_at": to_utc_iso(page_obs), "source": "facebook_detail",  # noqa: B023 - called within the same iteration
+                                   "scan_id": str(info.get("scan_id") or data.get("scan_id") or "")}  # noqa: B023 - called within the same iteration
         candidates = []
         for item in info.get("times") or []:
             cand = _candidate_from_detail(item, page_obs, display_tz=tz)

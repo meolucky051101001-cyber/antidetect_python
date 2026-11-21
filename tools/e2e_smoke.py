@@ -116,7 +116,6 @@ def main():
         # --- Profiles CRUD ---
         status, body = _request("GET", "/api/profiles", token=token)
         check("GET /api/profiles", status == 200 and isinstance(body, list))
-        base_count = len(body)
 
         status, body = _request(
             "POST", "/api/profiles",

@@ -171,12 +171,14 @@ def test_start_all_api_defaults_to_eight_and_reports_queue():
 
     try:
         with patch.object(app_module.launcher, "launch_all", side_effect=fake_launch_all):
+            profile_count = len(app_module.profile_manager.list_profiles())
+            assert profile_count >= 10
             response = client.post("/api/profiles/start-all")
             assert response.status_code == 200
             data = response.json()
             assert data["success"] is True
-            assert data["total"] == 10
-            assert data["starting_count"] == 10
+            assert data["total"] == profile_count
+            assert data["starting_count"] == profile_count
             # Mặc định giờ là auto theo RAM máy (4/6/8), không cố định 8.
             expected = app_module._auto_max_concurrent()
             assert data["max_concurrent"] == expected
@@ -475,7 +477,7 @@ def test_facebook_pages_endpoint(monkeypatch):
         assert body["success"] and body["source"] == "live"
         assert body["login_status"] is True and body["logged_in"] is True
         # Endpoint enrich thêm status/ready/age_days cho từng page.
-        for orig, got in zip(fake_pages, body["pages"]):
+        for orig, got in zip(fake_pages, body["pages"], strict=True):
             assert all(got.get(k) == v for k, v in orig.items())
             assert {"status", "ready", "age_days"} <= set(got)
         assert body["synced_at"] > 0
@@ -488,7 +490,7 @@ def test_facebook_pages_endpoint(monkeypatch):
         body = r.json()
         assert body["source"] == "cache"
         assert body["login_status"] == "unknown" and body["logged_in"] is None
-        for orig, got in zip(fake_pages, body["pages"]):
+        for orig, got in zip(fake_pages, body["pages"], strict=True):
             assert all(got.get(k) == v for k, v in orig.items())
 
         # 5. Chưa đăng nhập FB → logged_in=false + hướng dẫn, không coi là lỗi server.
@@ -726,9 +728,11 @@ def test_docs_csp_allows_cdn_while_dashboard_stays_strict():
     dashboard_csp = client.get("/").headers["content-security-policy"]
     assert "cdn.jsdelivr.net" not in dashboard_csp
     assert "fonts.googleapis.com" not in dashboard_csp
-    # P1-8: script block nằm ở /static; inline handler vẫn được phép riêng.
     assert "script-src 'self';" in dashboard_csp
-    assert "script-src-attr 'unsafe-inline';" in dashboard_csp
+    assert "script-src-attr 'none';" in dashboard_csp
+    assert "unsafe-inline';" not in dashboard_csp.split("style-src")[0]
+    assert "connect-src 'self';" in dashboard_csp
+    assert "img-src 'self' data:;" in dashboard_csp
 
 
 def test_login_non_ascii_token_returns_401_not_500():
@@ -1098,7 +1102,7 @@ def test_import_profiles_strips_unsafe_fanpage_urls():
 def test_worker_pool_is_sized_for_parallel_launch():
     pool = app_module._worker_pool()
     try:
-        assert getattr(pool, "_max_workers") == 64
+        assert pool._max_workers == 64
     finally:
         pool.shutdown(wait=False)
 

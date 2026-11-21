@@ -597,7 +597,7 @@
                 // Fanpage đã đồng bộ — badge bấm được mở modal fanpages
                 const fbCount = (p.facebook_pages || []).length;
                 const fbBadge = fbCount
-                    ? `<button onclick="openFanpagesModal('${safeId}')" class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition" title="Đã đồng bộ ${fbCount} fanpage — bấm để xem">
+                    ? `<button ${actionAttrs('click', 'openFanpagesModal', safeId)} class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition" title="Đã đồng bộ ${fbCount} fanpage — bấm để xem">
                          <i data-lucide="flag" class="w-3 h-3 mr-1"></i>${fbCount} page
                        </button>`
                     : '';
@@ -668,7 +668,7 @@
 
                 tr.innerHTML = `
                     <td class="py-3 px-3">
-                        <input type="checkbox" ${selectedIds.has(p.id) ? 'checked' : ''} onchange="toggleSelect('${p.id}', this.checked)" class="accent-blue-500 cursor-pointer">
+                        <input type="checkbox" ${selectedIds.has(p.id) ? 'checked' : ''} ${actionAttrs('change', 'toggleSelect', p.id, '$checked')} class="accent-blue-500 cursor-pointer">
                     </td>
                     <td class="py-3 px-4">
                         <div class="font-semibold text-slate-100 flex items-center space-x-2">
@@ -758,42 +758,42 @@
                     <td class="py-3 px-4 text-right">
                         <div class="flex items-center justify-end space-x-1.5">
                             ${isRunning ? `
-                                <button onclick="stopProfile('${safeId}')" class="px-2.5 py-1 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white rounded-lg transition font-medium flex items-center space-x-1">
+                                <button ${actionAttrs('click', 'stopProfile', safeId)} class="px-2.5 py-1 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white rounded-lg transition font-medium flex items-center space-x-1">
                                     <i data-lucide="square" class="w-3.5 h-3.5"></i>
                                     <span>Dừng</span>
                                 </button>
                             ` : `
-                                <button onclick="startProfile('${safeId}')" class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition font-medium flex items-center space-x-1 shadow-sm shadow-emerald-600/30">
+                                <button ${actionAttrs('click', 'startProfile', safeId)} class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition font-medium flex items-center space-x-1 shadow-sm shadow-emerald-600/30">
                                     <i data-lucide="play" class="w-3.5 h-3.5"></i>
                                     <span>Bật</span>
                                 </button>
                             `}
 
-                            <button onclick="testFingerprint('${safeId}')" title="Kiểm tra BrowserLeaks Canvas" class="p-1 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition">
+                            <button ${actionAttrs('click', 'testFingerprint', safeId)} title="Kiểm tra BrowserLeaks Canvas" class="p-1 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition">
                                 <i data-lucide="fingerprint" class="w-4 h-4"></i>
                             </button>
 
-                            <button onclick="quickResetFingerprint('${safeId}')" title="Đổi ngay dấu vân tay mới (Reset Fingerprint)" class="p-1 text-slate-400 hover:text-amber-300 hover:bg-slate-800 rounded-lg transition">
+                            <button ${actionAttrs('click', 'quickResetFingerprint', safeId)} title="Đổi ngay dấu vân tay mới (Reset Fingerprint)" class="p-1 text-slate-400 hover:text-amber-300 hover:bg-slate-800 rounded-lg transition">
                                 <i data-lucide="dice-5" class="w-4 h-4"></i>
                             </button>
 
-                            <button onclick="openEditModal('${safeId}')" title="Tùy chỉnh cấu hình & Proxy" class="p-1 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition">
+                            <button ${actionAttrs('click', 'openEditModal', safeId)} title="Tùy chỉnh cấu hình & Proxy" class="p-1 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition">
                                 <i data-lucide="settings-2" class="w-4 h-4"></i>
                             </button>
 
-                            <button onclick="openCookieModal('${safeId}')" title="Quản lý Cookies (Nhập / Xuất FB/YT)" class="p-1 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition">
+                            <button ${actionAttrs('click', 'openCookieModal', safeId)} title="Quản lý Cookies (Nhập / Xuất FB/YT)" class="p-1 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition">
                                 <i data-lucide="cookie" class="w-4 h-4"></i>
                             </button>
 
-                            <button onclick="openFanpagesModal('${safeId}')" title="Fanpage Facebook profile này đang sở hữu" class="p-1 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition">
+                            <button ${actionAttrs('click', 'openFanpagesModal', safeId)} title="Fanpage Facebook profile này đang sở hữu" class="p-1 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition">
                                 <i data-lucide="flag" class="w-4 h-4"></i>
                             </button>
 
-                            <button onclick="duplicateProfile('${safeId}')" data-duplicate-id="${safeId}" title="Nhân bản" class="p-1 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition">
+                            <button ${actionAttrs('click', 'duplicateProfile', safeId)} data-duplicate-id="${safeId}" title="Nhân bản" class="p-1 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition">
                                 <i data-lucide="copy" class="w-4 h-4"></i>
                             </button>
 
-                            <button onclick="deleteProfile('${safeId}')" title="Xóa" class="p-1 text-slate-400 hover:text-red-400 hover:bg-slate-800 rounded-lg transition">
+                            <button ${actionAttrs('click', 'deleteProfile', safeId)} title="Xóa" class="p-1 text-slate-400 hover:text-red-400 hover:bg-slate-800 rounded-lg transition">
                                 <i data-lucide="trash-2" class="w-4 h-4"></i>
                             </button>
                         </div>
@@ -1556,9 +1556,9 @@
                             <div class="text-[11px] text-slate-500">${escapeHtml(actionLabel(r.action))} · ${r.profile_ids && r.profile_ids.length ? r.profile_ids.length + ' profile' : 'tất cả'}${r.last_run_date ? ' · chạy: ' + escapeHtml(r.last_run_date) : ''}</div>
                         </div>
                         <div class="flex items-center gap-2 shrink-0">
-                            <button onclick="editSchedule('${r.id}')" title="Sửa giờ / hành động / profile áp dụng" class="p-1 text-slate-400 hover:text-violet-400 transition"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
-                            <label class="cursor-pointer"><input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="toggleSchedule('${r.id}', this.checked)" class="accent-emerald-500"></label>
-                            <button onclick="deleteSchedule('${r.id}')" class="p-1 text-slate-400 hover:text-red-400 transition"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+                            <button ${actionAttrs('click', 'editSchedule', r.id)} title="Sửa giờ / hành động / profile áp dụng" class="p-1 text-slate-400 hover:text-violet-400 transition"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+                            <label class="cursor-pointer"><input type="checkbox" ${r.enabled ? 'checked' : ''} ${actionAttrs('change', 'toggleSchedule', r.id, '$checked')} class="accent-emerald-500"></label>
+                            <button ${actionAttrs('click', 'deleteSchedule', r.id)} class="p-1 text-slate-400 hover:text-red-400 transition"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
                         </div>
                     </div>
                 `).join('');
@@ -1638,9 +1638,15 @@
                     <div class="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
                         <div class="text-amber-400 text-xs font-semibold mb-1">⚠ Token chỉ hiển thị MỘT lần — copy ngay:</div>
                         <div class="font-mono text-xs text-slate-200 break-all select-all">${escapeHtml(data.token)}</div>
-                        <button onclick="navigator.clipboard.writeText('${escapeHtml(data.token)}'); showToast('Đã copy token.', 'success');" class="mt-2 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs transition">Copy</button>
+                        <button ${actionAttrs('click', 'copyApiToken', data.token)} class="mt-2 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs transition">Copy</button>
                     </div>`;
             } catch (e) { showToast('Lỗi: ' + e, 'error'); }
+        }
+        async function copyApiToken(token) {
+            try {
+                await navigator.clipboard.writeText(token);
+                showToast('Đã copy token.', 'success');
+            } catch (e) { showToast('Không copy được token: ' + e, 'error'); }
         }
         async function revokeToken() {
             if (!confirm('Thu hồi API token? Automation đang dùng sẽ mất quyền ngay.')) return;
@@ -1857,7 +1863,7 @@
                     </div>`;
             }).join('');
             const fixButton = item.can_fix
-                ? `<button onclick="fixAuditProfile('${escapeHtml(item.profile_id)}')" class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 rounded-lg text-[11px] font-semibold transition">Sửa an toàn (${item.fix_preview ? item.fix_preview.length : 0})</button>`
+                ? `<button ${actionAttrs('click', 'fixAuditProfile', item.profile_id)} class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 rounded-lg text-[11px] font-semibold transition">Sửa an toàn (${item.fix_preview ? item.fix_preview.length : 0})</button>`
                 : '';
             return `
                 <div class="border border-borderBg rounded-xl overflow-hidden bg-slate-900/30">

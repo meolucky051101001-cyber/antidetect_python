@@ -2,9 +2,11 @@
 setlocal
 title Tat Antidetect Python
 cd /d "%~dp0"
+set "PYEXE=python"
+if exist ".venv\Scripts\python.exe" set "PYEXE=.venv\Scripts\python.exe"
 
 echo Dang dung cac profile dang chay...
-python cli.py stop-all
+"%PYEXE%" cli.py stop-all
 if errorlevel 1 (
     echo.
     echo Khong the dung tat ca profile. Server duoc giu lai de tranh bo lai Chrome mo coi.
@@ -13,7 +15,7 @@ if errorlevel 1 (
 )
 
 echo Dang dung may chu an toan...
-python -m antidetect.server_control stop
+"%PYEXE%" -m antidetect.server_control stop
 if errorlevel 1 (
     echo.
     echo May chu chua tat duoc. Khong force-kill de tranh mat du lieu profile.

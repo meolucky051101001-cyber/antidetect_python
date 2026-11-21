@@ -896,7 +896,7 @@ def audit_profiles(
                     fixable=True,
                 )
 
-    for signature, group in group_by(_signature).items():
+    for _sig, group in group_by(_signature).items():
         if len(group) > 1:
             for profile in group:
                 others = [p for p in group if p.id != profile.id]

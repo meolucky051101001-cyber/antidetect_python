@@ -79,7 +79,7 @@ class BulkJobStore:
             try:
                 os.remove(tmp)
             except OSError:
-                pass
+                log.debug("Failed to remove temporary bulk-job file", exc_info=True)
 
     def _is_active(self, job: Optional[Dict[str, Any]], now: float) -> bool:
         if not job or job.get("status") not in ACTIVE_STATUSES:

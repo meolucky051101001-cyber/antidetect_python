@@ -15,7 +15,6 @@ from antidetect.facebook import (
     normalize_last_post_fields,
     parse_relative_label,
     relative_label_interval,
-    to_utc_iso,
 )
 from web.services import enrich_facebook_pages
 

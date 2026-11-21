@@ -59,7 +59,6 @@ async def _browser_ws_url(port: int) -> str:
 
 async def fetch_cookies_cdp(port: int) -> List[Dict[str, Any]]:
     """Lấy danh sách cookies thông qua CDP Storage.getCookies."""
-    import websockets
 
     ws_url = await _browser_ws_url(port)
     async with connect_loopback(ws_url, max_size=10 * 1024 * 1024) as ws:
@@ -74,7 +73,6 @@ async def fetch_cookies_cdp(port: int) -> List[Dict[str, Any]]:
 
 
 async def set_cookies_cdp(port: int, cookies: List[Dict[str, Any]]) -> bool:
-    import websockets
 
     ws_url = await _browser_ws_url(port)
     async with connect_loopback(ws_url, max_size=10 * 1024 * 1024) as ws:

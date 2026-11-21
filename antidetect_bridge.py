@@ -9,7 +9,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from antidetect.models import Profile, ProxyConfig, FingerprintConfig, REDACTED_SECRET
+from antidetect.models import ProxyConfig, REDACTED_SECRET
 from antidetect.storage import ProfileManager, ProfileRevisionConflict
 from antidetect.launcher import BrowserLauncher
 from antidetect.launch_gate import (

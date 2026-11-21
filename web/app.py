@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 import time
 import uuid
 import asyncio
@@ -8,10 +7,10 @@ import datetime
 import threading
 import secrets
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any, Set
-from fastapi import FastAPI, Request, HTTPException, Response
+from typing import Optional, List, Dict, Any, Set  # noqa: F401 - re-exported for web.app compatibility
+from fastapi import FastAPI, Request, HTTPException, Response  # noqa: F401 - re-exported for web.app compatibility
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse  # noqa: F401 - re-exported for web.app compatibility
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -20,34 +19,31 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from antidetect.models import Profile, FingerprintConfig, ProxyConfig, REDACTED_SECRET
+from antidetect.models import Profile, FingerprintConfig, ProxyConfig, REDACTED_SECRET  # noqa: F401 - re-exported for web.app compatibility
 from antidetect.storage import (
     ProfileManager,
-    ProfileBusyError,
-    ProfileDeletionError,
     ProfileRevisionConflict,
     DATA_DIR,
     PROFILES_DATA_DIR,
 )
 from antidetect.profile_copy import (
-    ProfileCopyError,
-    new_operation_id,
-    validate_idempotency_key,
+    ProfileCopyError,  # noqa: F401 - re-exported for web.app compatibility
+    new_operation_id,  # noqa: F401 - re-exported for web.app compatibility
+    validate_idempotency_key,  # noqa: F401 - re-exported for web.app compatibility
 )
-from antidetect.profile_import import prepare_import_profile
+from antidetect.profile_import import prepare_import_profile  # noqa: F401 - re-exported for web.app compatibility
 from antidetect.fingerprint import (
-    generate_fingerprint,
-    get_host_device_memory,
-    locale_for_country,
-    detect_browser_brand,
+    generate_fingerprint,  # noqa: F401 - re-exported for web.app compatibility
+    locale_for_country,  # noqa: F401 - re-exported for web.app compatibility
+    detect_browser_brand,  # noqa: F401 - re-exported for web.app compatibility
 )
-from antidetect.profile_audit import audit_profiles, build_fix_plan
+from antidetect.profile_audit import audit_profiles, build_fix_plan  # noqa: F401 - re-exported for web.app compatibility
 from antidetect.launch_gate import (
     evaluate_profile as _evaluate_launch_gate,
     evaluate_profiles as _evaluate_launch_gates,
     get_mode as _launch_gate_mode,
-    set_mode as _set_launch_gate_mode,
-    settings_snapshot as _launch_gate_settings,
+    set_mode as _set_launch_gate_mode,  # noqa: F401 - re-exported for web.app compatibility
+    settings_snapshot as _launch_gate_settings,  # noqa: F401 - re-exported for web.app compatibility
 )
 from antidetect.launcher import BrowserLauncher
 from antidetect.cdp_health import CdpUnavailable
@@ -58,13 +54,13 @@ from antidetect.fanpage_scan import (
     STATUS_PARTIAL,
     STATUS_UNKNOWN,
     ensure_scan_contract,
-    scan_defaults,
+    scan_defaults,  # noqa: F401 - re-exported for web.app compatibility
     scan_detail,
 )
-from antidetect.facebook import ScanAborted
-from antidetect.profile_locks import ProfileLockTimeout
+from antidetect.facebook import ScanAborted  # noqa: F401 - re-exported for web.app compatibility
+from antidetect.profile_locks import ProfileLockTimeout  # noqa: F401 - re-exported for web.app compatibility
 from antidetect.proxy import check_proxy
-from antidetect.scheduler import ScheduleStoreCorruption
+from antidetect.scheduler import ScheduleStoreCorruption  # noqa: F401 - re-exported for web.app compatibility
 from antidetect.bulk_jobs import (
     BulkJobHeartbeat,
     BulkJobStore,
@@ -72,43 +68,43 @@ from antidetect.bulk_jobs import (
 )
 from antidetect.applog import get_logger, setup_logging
 from antidetect import metrics
-from antidetect.fanpages import FanpageRevisionConflictError, FanpageService
+from antidetect.fanpages import FanpageRevisionConflictError, FanpageService  # noqa: F401 - re-exported for web.app compatibility
 
 from .schemas import (
-    AuditFixRequest,
-    BulkCreateRequest,
+    AuditFixRequest,  # noqa: F401 - re-exported for web.app compatibility
+    BulkCreateRequest,  # noqa: F401 - re-exported for web.app compatibility
     CdpHealth,
-    CheckProxyRequest,
-    CreateProfileRequest,
-    FanpageAlertUpdateRequest,
-    FanpageBulkUpdateRequest,
-    FanpageMergeRequest,
-    FanpageOpenRequest,
-    FanpagePruneRequest,
-    FanpageSyncJobCreateRequest,
-    FanpageSyncJobRetryRequest,
-    FanpageUpdateRequest,
-    ImportCookiesRequest,
-    ImportProfilesRequest,
-    LaunchGateSettingsRequest,
+    CheckProxyRequest,  # noqa: F401 - re-exported for web.app compatibility
+    CreateProfileRequest,  # noqa: F401 - re-exported for web.app compatibility
+    FanpageAlertUpdateRequest,  # noqa: F401 - re-exported for web.app compatibility
+    FanpageBulkUpdateRequest,  # noqa: F401 - re-exported for web.app compatibility
+    FanpageMergeRequest,  # noqa: F401 - re-exported for web.app compatibility
+    FanpageOpenRequest,  # noqa: F401 - re-exported for web.app compatibility
+    FanpagePruneRequest,  # noqa: F401 - re-exported for web.app compatibility
+    FanpageSyncJobCreateRequest,  # noqa: F401 - re-exported for web.app compatibility
+    FanpageSyncJobRetryRequest,  # noqa: F401 - re-exported for web.app compatibility
+    FanpageUpdateRequest,  # noqa: F401 - re-exported for web.app compatibility
+    ImportCookiesRequest,  # noqa: F401 - re-exported for web.app compatibility
+    ImportProfilesRequest,  # noqa: F401 - re-exported for web.app compatibility
+    LaunchGateSettingsRequest,  # noqa: F401 - re-exported for web.app compatibility
     ProfileRuntime,
-    ScheduleCreateRequest,
-    ScheduleUpdateRequest,
-    StartAllBody,
-    StopAllBody,
-    SwitchLocationRequest,
-    UpdateProfileRequest,
+    ScheduleCreateRequest,  # noqa: F401 - re-exported for web.app compatibility
+    ScheduleUpdateRequest,  # noqa: F401 - re-exported for web.app compatibility
+    StartAllBody,  # noqa: F401 - re-exported for web.app compatibility
+    StopAllBody,  # noqa: F401 - re-exported for web.app compatibility
+    SwitchLocationRequest,  # noqa: F401 - re-exported for web.app compatibility
+    UpdateProfileRequest,  # noqa: F401 - re-exported for web.app compatibility
 )
 from .services import (
     apply_geo_to_profile as _apply_geo_to_profile,
-    auto_max_concurrent as _auto_max_concurrent,
+    auto_max_concurrent as _auto_max_concurrent,  # noqa: F401 - re-exported for web.app compatibility
     enrich_facebook_pages as _enrich_facebook_pages,
-    fanpage_stale_after_hours as _fanpage_stale_after_hours,
-    host_gpu_strings as _host_gpu_strings,
+    fanpage_stale_after_hours as _fanpage_stale_after_hours,  # noqa: F401 - re-exported for web.app compatibility
+    host_gpu_strings as _host_gpu_strings,  # noqa: F401 - re-exported for web.app compatibility
     profile_display_timezone as _profile_display_timezone,
     ram_by_profile_dir as _ram_by_profile_dir,
-    sanitize_facebook_pages as _sanitize_facebook_pages,
-    validate_iana_timezone,
+    sanitize_facebook_pages as _sanitize_facebook_pages,  # noqa: F401 - re-exported for web.app compatibility
+    validate_iana_timezone,  # noqa: F401 - re-exported for web.app compatibility
     worker_pool as _worker_pool,
 )
 
@@ -363,9 +359,9 @@ async def local_origin_check_middleware(request: Request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     # P2-04: Content Security Policy chống XSS và script injection.
-    # Inline <script> đã chuyển ra /static (P1-8); chỉ còn inline handler
-    # (onclick=) nên script-src-attr vẫn cần 'unsafe-inline'. Các directive
-    # dưới đây chặn plugin, base tag và form gửi ra ngoài.
+    # Không còn inline <script> hay inline handler (onclick=): sự kiện đi qua
+    # /static/js/actions.js, nên script-src-attr là 'none'. connect-src/img-src
+    # chỉ 'self' để script lạ (nếu có) không gửi dữ liệu ra host ngoài.
     # Swagger UI/ReDoc mặc định tải bundle từ jsdelivr và font từ Google
     # Fonts; chỉ nới CSP trên đúng trang docs (đã yêu cầu phiên), dashboard
     # vẫn giữ CSP siết.
@@ -387,11 +383,11 @@ async def local_origin_check_middleware(request: Request, call_next):
         response.headers['Content-Security-Policy'] = (
             "default-src 'self'; "
             "script-src 'self'; "
-            "script-src-attr 'unsafe-inline'; "
+            "script-src-attr 'none'; "
             "style-src 'self' 'unsafe-inline'; "
             "font-src 'self' data:; "
-            "img-src 'self' data: https:; "
-            "connect-src 'self' https:; "
+            "img-src 'self' data:; "
+            "connect-src 'self'; "
             "object-src 'none'; "
             "base-uri 'self'; "
             "form-action 'self'; "
@@ -474,759 +470,9 @@ def _finish_bulk_job(
         log.warning("Không ghi được trạng thái bulk job: %s", exc)
 
 
-# --- Web Page Route ---
-@app.get('/health')
-async def health():
-    return {'application': 'antidetect-python', 'instance_id': app.state.instance_id}
-
-
-@app.get('/api/system/metrics')
-async def system_metrics():
-    """Counters/timings của tiến trình hiện tại + lịch sử lịch gần nhất."""
-    data = metrics.snapshot()
-    data["scheduler"] = {
-        "last_tick": (
-            _scheduler.last_run_info.get("last_tick") if _scheduler else None
-        ),
-        "recent_runs": await asyncio.to_thread(_schedule_history_with_jobs, 10),
-    }
-    return data
-
-
-@app.get('/unlock', response_class=HTMLResponse)
-async def unlock(request: Request):
-    return templates.TemplateResponse(request=request, name='unlock.html', context={})
-
-
-@app.post('/auth/login')
-async def login(request: Request):
-    auth_header = request.headers.get('authorization', '')
-    token = auth_header[7:].strip() if auth_header.startswith('Bearer ') else auth_header.strip()
-
-    is_valid = False
-    if token:
-        if token.startswith("otc_"):
-            # P0-06: Xác thực mã dùng một lần và tiêu hủy ngay
-            is_valid = consume_unlock_code(token)
-        elif secrets.compare_digest(
-            token.encode('utf-8', 'replace'),
-            app.state.access_key.encode('utf-8', 'replace'),
-        ):
-            # Cho phép access_key cố định qua API trực tiếp hoặc test suite.
-            # So sánh trên bytes để input non-ASCII trả 401 thay vì TypeError 500.
-            is_valid = True
-
-    if not is_valid:
-        raise HTTPException(status_code=401, detail='Khóa mở ứng dụng không hợp lệ hoặc đã hết hạn')
-
-    response = JSONResponse({'success': True})
-    response.set_cookie('antidetect_session', app.state.session_key, httponly=True, samesite='strict', path='/')
-    return response
-
-
-@app.post('/auth/create-unlock-code')
-async def create_unlock_code_endpoint(request: Request):
-    if not authorized(request):
-        raise HTTPException(status_code=401, detail='Chưa xác thực')
-    code = create_unlock_code(ttl_seconds=60)
-    return {"unlock_code": code, "expires_in": 60}
-
-
-@app.get("/", response_class=HTMLResponse)
-async def home_page(request: Request):
-    if not authorized(request):
-        return templates.TemplateResponse(
-            request=request, name="unlock.html", context={}
-        )
-    profiles = await asyncio.to_thread(_profiles_with_status)
-    return templates.TemplateResponse(
-        request=request, name="index.html", context={"profiles": profiles}
-    )
-
-
-# --- REST API Endpoints ---
-@app.get("/api/profiles", response_model=List[ProfileRuntime])
-async def list_profiles():
-    return await asyncio.to_thread(_profiles_with_status)
-
-
-@app.post("/api/profiles", response_model=Profile)
-async def create_profile(req: CreateProfileRequest):
-    # Nếu chưa truyền fingerprint, tự sinh theo OS, vị trí và proxy
-    fp = req.fingerprint
-    proxy = req.proxy or ProxyConfig()
-
-    if fp is None:
-        from antidetect.fingerprint import get_location_coordinates
-        auto_lat, auto_lon, auto_tz = get_location_coordinates(req.city or "hanoi", randomize=True)
-        timezone = auto_tz
-        locale = "vi-VN"
-        lat, lon = auto_lat, auto_lon
-
-        # Nếu có proxy và bật, thử lấy geoip để đồng bộ múi giờ, locale & tọa độ theo proxy
-        if proxy.enabled and proxy.host and proxy.port:
-            geo = await asyncio.to_thread(check_proxy, proxy, 5)
-            if geo.get("success"):
-                timezone = geo.get("timezone", timezone)
-                locale = locale_for_country(geo.get("country_code"), default=locale)
-                lat = geo.get("lat", lat)
-                lon = geo.get("lon", lon)
-
-        fp = generate_fingerprint(
-            target_os=req.os,
-            timezone=timezone,
-            locale=locale,
-            latitude=lat,
-            longitude=lon,
-            city=req.city or "hanoi",
-            browser_brand=detect_browser_brand(getattr(launcher, "browser_path", None)),
-        )
-
-    profile = profile_manager.create_profile(
-        name=req.name,
-        target_os=req.os,
-        proxy=proxy,
-        fingerprint=fp,
-        notes=req.notes or "",
-        tags=req.tags or []
-    )
-    return profile
-
-
-@app.post("/api/profiles/start-all")
-async def start_all_profiles(
-    url: Optional[str] = None,
-    max_concurrent: Optional[int] = None,
-    body: Optional[StartAllBody] = None,
-):
-    if url:
-        url = url.strip()
-        if not url.startswith(("http://", "https://")):
-            raise HTTPException(status_code=400, detail="URL không hợp lệ: chỉ chấp nhận http:// hoặc https://")
-    if max_concurrent is None:
-        # Chọn theo RAM máy (16GB → 6 Chrome đồng thời) — an toàn cho quy mô
-        # ~20 profile; client vẫn override được bằng query param.
-        max_concurrent = _auto_max_concurrent()
-    max_concurrent = max(0, int(max_concurrent or 0))
-
-    global _active_start_all_job, _start_all_cancel_event
-    body_ids = body.profile_ids if body is not None else None
-    if body_ids is not None and not body_ids:
-        raise HTTPException(
-            status_code=400,
-            detail="Danh sách profile được chọn trống. Bỏ profile_ids để chạy toàn bộ.",
-        )
-    profiles = await asyncio.to_thread(_profiles_with_status)
-    selected_ids = set(body_ids) if body_ids is not None else None
-    if selected_ids is not None:
-        profiles = [p for p in profiles if p.id in selected_ids]
-        if not profiles:
-            raise HTTPException(status_code=404, detail="Không profile nào trong danh sách chọn tồn tại.")
-
-    to_start = [p for p in profiles if p.status != "running"]
-    gate_mode = _launch_gate_mode()
-    blocked = []
-    allowed_to_start = to_start
-    launch_ids: Optional[List[str]] = (
-        list(selected_ids) if selected_ids is not None else None
-    )
-    if gate_mode != "off":
-        browser_paths = await asyncio.to_thread(_resolve_browser_paths, profiles)
-        gate_by_id = await asyncio.to_thread(
-            _evaluate_launch_gates, profiles, browser_paths, gate_mode
-        )
-        blocked = [
-            gate_by_id[p.id]
-            for p in to_start
-            if p.id in gate_by_id and not gate_by_id[p.id].allowed
-        ]
-        blocked_ids = {item.profile_id for item in blocked}
-        allowed_to_start = [p for p in to_start if p.id not in blocked_ids]
-        if to_start and not allowed_to_start:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "success": False,
-                    "detail": (
-                        f"Cổng fingerprint chặn toàn bộ {len(blocked)} profile "
-                        "trong danh sách. Sửa trong Health Center hoặc đổi chế độ cổng."
-                    ),
-                    "blocked": [item.as_dict() for item in blocked],
-                    "gate_mode": gate_mode,
-                },
-            )
-        if blocked_ids:
-            base_ids = (
-                list(selected_ids)
-                if selected_ids is not None
-                else [p.id for p in profiles]
-            )
-            launch_ids = [pid for pid in base_ids if pid not in blocked_ids]
-
-    # Lock order: _bulk_launch_lock -> _start_all_lock -> bulk job IPC lock.
-    # The bulk thread holds the process lock for its whole lifetime, so a
-    # failure to acquire it means another local bulk launch is alive. A second
-    # server instance is rejected by the file-backed job store instead.
-    if not _bulk_launch_lock.acquire(blocking=False):
-        raise HTTPException(
-            status_code=409,
-            detail="Một tác vụ Start-All khác đang chạy. Hãy đợi hoặc hủy tác vụ hiện tại."
-        )
-    try:
-        with _start_all_lock:
-            if _active_start_all_job is not None and _active_start_all_job.get("status") in ("running", "cancelling"):
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Đang có tác vụ Start-All ({_active_start_all_job.get('job_id')}) đang xử lý. Hãy đợi hoặc hủy tác vụ hiện tại."
-                )
-            job_id = str(uuid.uuid4())
-            cancel_event = threading.Event()
-        try:
-            claimed, existing = _bulk_job_store.try_claim(
-                job_id=job_id,
-                owner_instance=app.state.instance_id,
-                kind="start_all",
-                total=len(profiles),
-                starting_count=len(allowed_to_start),
-                max_concurrent=max_concurrent,
-            )
-        except BulkJobStoreCorruption as exc:
-            log.error("Bulk job state hỏng: %s", exc)
-            raise HTTPException(
-                status_code=503,
-                detail="Trạng thái Start-All dùng chung bị hỏng. Kiểm tra data/bulk_jobs.json trước khi chạy lại.",
-            ) from exc
-        except TimeoutError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="Không lấy được khóa trạng thái Start-All; thử lại sau.",
-            ) from exc
-        if not claimed:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Đang có tác vụ {existing.get('kind') or 'Start-All'} "
-                    f"({existing.get('job_id')}) do instance "
-                    f"{str(existing.get('owner_instance') or 'khác')[:8]} xử lý. "
-                    "Hãy đợi hoặc hủy tác vụ hiện tại."
-                ),
-            )
-        with _start_all_lock:
-            _start_all_cancel_event = cancel_event
-            _active_start_all_job = {
-                "job_id": job_id,
-                "kind": "start_all",
-                "status": "running",
-                "owner_instance": app.state.instance_id,
-                "total": len(profiles),
-                "starting_count": len(allowed_to_start),
-                "blocked_count": len(blocked),
-                "gate_mode": gate_mode,
-                "completed_count": 0,
-                "failed_count": 0,
-                "max_concurrent": max_concurrent,
-                "results": [],
-                "start_time": time.time(),
-                "heartbeat_at": time.time(),
-                "cancel_requested": False,
-            }
-    except BaseException:
-        _bulk_launch_lock.release()
-        raise
-
-    def run_bulk():
-        heartbeat = BulkJobHeartbeat(
-            _bulk_job_store, job_id, app.state.instance_id, cancel_event
-        )
-        status = "completed"
-        error = None
-        try:
-            heartbeat.start()
-            launcher.launch_all(
-                delay=0.8,
-                open_url=url,
-                max_concurrent=max_concurrent,
-                cancel_event=cancel_event,
-                progress_callback=on_progress,
-                profile_ids=launch_ids,
-            )
-            if cancel_event.is_set():
-                status = "cancelled"
-        except Exception as exc:
-            status = "failed"
-            error = str(exc)[:500]
-        finally:
-            heartbeat.stop()
-            _finish_bulk_job(job_id, status, error)
-            _bulk_launch_lock.release()
-
-    def on_progress(p_id, res):
-        _record_bulk_progress(job_id, p_id, res)
-
-    try:
-        threading.Thread(target=run_bulk, daemon=True).start()
-    except Exception as exc:
-        _finish_bulk_job(job_id, "failed", str(exc)[:500])
-        _bulk_launch_lock.release()
-        raise HTTPException(status_code=500, detail="Không khởi động được luồng Start-All.") from exc
-
-    limit_label = (
-        "không giới hạn" if max_concurrent <= 0 else f"tối đa {max_concurrent}"
-    )
-    start_count = len(allowed_to_start) if gate_mode != "off" else len(to_start)
-    message = f"Đang khởi chạy {start_count} profile ({limit_label} cùng lúc)..."
-    if blocked:
-        message += f" Bỏ qua {len(blocked)} profile bị cổng fingerprint chặn."
-    return {
-        "success": True,
-        "message": message,
-        "job_id": job_id,
-        "total": len(profiles),
-        "starting_count": start_count,
-        "max_concurrent": max_concurrent,
-        "blocked": [item.as_dict() for item in blocked],
-        "gate_mode": gate_mode,
-    }
-
-
-@app.get("/api/profiles/start-all/status")
-async def get_start_all_status():
-    """P1-06/P2-12: tiến độ Start-All, kể cả job do instance khác sở hữu."""
-    with _start_all_lock:
-        local_job = dict(_active_start_all_job) if _active_start_all_job else None
-    try:
-        remote_job = _bulk_job_store.read()
-    except BulkJobStoreCorruption as exc:
-        log.error("Bulk job state hỏng: %s", exc)
-        return {
-            "active": False,
-            "job": None,
-            "error": "Trạng thái Start-All dùng chung bị hỏng; kiểm tra data/bulk_jobs.json.",
-        }
-    job = local_job
-    if remote_job and (
-        not local_job or remote_job.get("job_id") != local_job.get("job_id")
-    ):
-        job = remote_job
-    if not job:
-        return {"active": False, "job": None}
-    job["remote"] = job.get("owner_instance") != app.state.instance_id
-    if job is local_job:
-        active = job.get("status") in ("running", "cancelling")
-    else:
-        active = _bulk_job_store.is_active(job)
-    if not active and job.get("status") in ("running", "cancelling"):
-        job["stale"] = True
-    return {"active": active, "job": job}
-
-
-@app.post("/api/profiles/start-all/cancel")
-async def cancel_start_all():
-    """P1-06/P2-12: hủy job cục bộ hoặc gửi yêu cầu tới instance đang sở hữu."""
-    with _start_all_lock:
-        local_job = _active_start_all_job
-        local_active = bool(
-            local_job and local_job.get("status") in ("running", "cancelling")
-        )
-        if local_active:
-            job_id = local_job.get("job_id")
-            if _start_all_cancel_event:
-                _start_all_cancel_event.set()
-            local_job["status"] = "cancelling"
-    if local_active:
-        try:
-            _bulk_job_store.request_cancel(job_id)
-        except Exception as exc:  # noqa: BLE001 - local cancel vẫn có hiệu lực
-            log.warning("Không ghi được yêu cầu hủy bulk job: %s", exc)
-        return {
-            "success": True,
-            "job_id": job_id,
-            "remote": False,
-            "message": "Đã gửi yêu cầu dừng hàng đợi Start-All.",
-        }
-    try:
-        remote_job = _bulk_job_store.request_cancel()
-    except BulkJobStoreCorruption as exc:
-        log.error("Bulk job state hỏng: %s", exc)
-        raise HTTPException(
-            status_code=503,
-            detail="Trạng thái Start-All dùng chung bị hỏng; kiểm tra data/bulk_jobs.json.",
-        ) from exc
-    if remote_job:
-        metrics.inc("bulk_job_remote_cancel")
-        return {
-            "success": True,
-            "job_id": remote_job.get("job_id"),
-            "remote": True,
-            "message": "Đã gửi yêu cầu hủy tới instance đang chạy Start-All.",
-        }
-    return {"success": False, "message": "Không có tiến trình Start-All nào đang chạy."}
-
-
-@app.post("/api/profiles/stop-all")
-async def stop_all_profiles(body: Optional[StopAllBody] = None):
-    ids = body.profile_ids if body else None
-    if ids is not None and not ids:
-        raise HTTPException(
-            status_code=400,
-            detail="Danh sách profile được chọn trống. Bỏ profile_ids để dừng toàn bộ.",
-        )
-    return await asyncio.to_thread(launcher.stop_all, ids)
-
-
-@app.get("/api/profiles/export")
-async def export_profiles(request: Request):
-    """Xuất metadata toàn bộ profile ra JSON (KHÔNG kèm secret).
-
-    Mật khẩu proxy không bao giờ xuất (DPAPI gắn máy — import sang máy khác
-    cũng không dùng được). Yêu cầu header x-confirm-export: yes như cookies.
-    """
-    if request.headers.get("x-confirm-export") != "yes":
-        raise HTTPException(status_code=403, detail="Cần xác nhận x-confirm-export: yes trước khi export.")
-    profiles = profile_manager.list_profiles()
-    items = []
-    for p in profiles:
-        d = p.model_dump()
-        d.pop("id", None)
-        d.pop("status", None)
-        d.pop("port", None)
-        d.pop("pid", None)
-        d.pop("revision", None)
-        if d.get("proxy"):
-            d["proxy"]["password"] = None
-        items.append(d)
-    from datetime import datetime
-
-    payload = {
-        "version": 1,
-        "exported_at": datetime.now().isoformat(timespec="seconds"),
-        "count": len(items),
-        "profiles": items,
-    }
-    filename = f"antidetect-profiles-{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    return JSONResponse(
-        content=payload,
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store",
-        },
-    )
-
-
 def _resolve_browser_paths(profiles: List[Profile]) -> Dict[str, Optional[str]]:
     """Resolve the exact browser binary per profile without launching it."""
     return {p.id: launcher._resolve_browser_path(p) for p in profiles}
-
-
-@app.get("/api/profiles/audit")
-async def audit_profiles_endpoint():
-    """Fingerprint Health Center: static audit, no browser launched."""
-    profiles = await asyncio.to_thread(profile_manager.list_profiles)
-    browser_paths = await asyncio.to_thread(_resolve_browser_paths, profiles)
-    return await asyncio.to_thread(audit_profiles, profiles, browser_paths)
-
-
-@app.post("/api/profiles/audit/fix")
-async def fix_profiles_endpoint(req: AuditFixRequest):
-    """Apply safe fingerprint repairs (dry_run by default)."""
-    profiles = await asyncio.to_thread(profile_manager.list_profiles)
-    selected_ids: Optional[Set[str]] = None
-    if req.profile_ids is not None:
-        if not req.profile_ids:
-            raise HTTPException(
-                status_code=400,
-                detail="Danh sách profile được chọn trống. Bỏ profile_ids để kiểm tra toàn bộ.",
-            )
-        wanted = set(req.profile_ids)
-        existing = {p.id for p in profiles}
-        missing = sorted(wanted - existing)
-        if missing:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Không tìm thấy profile: {', '.join(missing[:5])}",
-            )
-        selected_ids = wanted
-
-    browser_paths = await asyncio.to_thread(_resolve_browser_paths, profiles)
-    # Cross-profile rules need the full set; the selection only scopes the
-    # updates and decides whose seeds are reassigned.
-    plan = await asyncio.to_thread(
-        build_fix_plan, profiles, browser_paths, selected_ids
-    )
-    scoped = (
-        [p for p in profiles if p.id in selected_ids]
-        if selected_ids is not None
-        else profiles
-    )
-    if selected_ids is not None:
-        plan = [item for item in plan if item["profile_id"] in selected_ids]
-    summary = {
-        "profiles": len(scoped),
-        "fixable_profiles": len(plan),
-        "field_changes": sum(len(item["changes"]) for item in plan),
-    }
-    if req.dry_run:
-        return {
-            "dry_run": True,
-            "changed": [],
-            "changes": plan,
-            "summary": summary,
-            "message": (
-                f"{len(plan)} profile có thể sửa an toàn; chưa ghi thay đổi nào."
-                if plan
-                else "Không có thay đổi an toàn nào cần áp dụng."
-            ),
-        }
-
-    updates = {
-        item["profile_id"]: FingerprintConfig.model_validate(item["fingerprint"])
-        for item in plan
-    }
-    if not updates:
-        report = await asyncio.to_thread(audit_profiles, profiles, browser_paths)
-        return {
-            "dry_run": False,
-            "changed": [],
-            "changes": [],
-            "summary": summary,
-            "report": report,
-            "message": "Không có thay đổi an toàn nào cần áp dụng.",
-        }
-
-    expected = req.expected_revisions or {
-        p.id: int(p.revision or 1) for p in profiles
-    }
-    try:
-        changed = await asyncio.to_thread(
-            profile_manager.update_fingerprints_batch, updates, expected
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    fresh_profiles = await asyncio.to_thread(profile_manager.list_profiles)
-    fresh_browser_paths = await asyncio.to_thread(
-        _resolve_browser_paths, fresh_profiles
-    )
-    report = await asyncio.to_thread(
-        audit_profiles, fresh_profiles, fresh_browser_paths
-    )
-    return {
-        "dry_run": False,
-        "changed": changed,
-        "changes": plan,
-        "summary": summary,
-        "report": report,
-        "message": f"Đã sửa an toàn fingerprint cho {len(changed)} profile.",
-    }
-
-
-@app.get("/api/settings/launch-gate")
-async def get_launch_gate_settings():
-    """Static pre-launch gate configuration (no profile is launched)."""
-    return _launch_gate_settings()
-
-
-@app.put("/api/settings/launch-gate")
-async def update_launch_gate_settings(req: LaunchGateSettingsRequest):
-    try:
-        await asyncio.to_thread(_set_launch_gate_mode, req.mode)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    snapshot = _launch_gate_settings()
-    snapshot["message"] = (
-        f"Đã đặt cổng fingerprint: {snapshot['labels'].get(snapshot['mode'], snapshot['mode'])}."
-    )
-    if snapshot.get("env_override"):
-        snapshot["message"] += (
-            " Biến môi trường ANTIDETECT_LAUNCH_GATE đang ghi đè cấu hình này."
-        )
-    return snapshot
-
-
-@app.get("/api/profiles/{profile_id}", response_model=Profile)
-async def get_profile(profile_id: str):
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    if launcher.is_running(p.id):
-        p.status = "running"
-        p.port = launcher.active_ports.get(p.id)
-    else:
-        p.status = "stopped"
-    return p
-
-
-@app.put("/api/profiles/{profile_id}", response_model=Profile)
-async def update_profile_endpoint(profile_id: str, req: UpdateProfileRequest):
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-
-    if req.name is not None:
-        p.name = req.name
-    if req.notes is not None:
-        p.notes = req.notes
-    if req.tags is not None:
-        p.tags = req.tags
-    if req.proxy is not None:
-        same_endpoint = bool(
-            p.proxy
-            and req.proxy.identity_key() == p.proxy.identity_key()
-        )
-        if (
-            same_endpoint
-            and p.proxy
-            and p.proxy.password
-            and req.proxy.password in (None, "", REDACTED_SECRET)
-        ):
-            req.proxy.password = p.proxy.password
-        p.proxy = req.proxy
-    if req.fingerprint is not None:
-        p.fingerprint = req.fingerprint
-    if req.browser_path is not None:
-        # "" = reset về browser mặc định của tool.
-        p.browser_path = req.browser_path.strip() or None
-
-    try:
-        updated = profile_manager.update_profile(
-            p, expected_revision=req.expected_revision if req.expected_revision is not None else p.revision
-        )
-    except RuntimeError as e:
-        # expected_revision không khớp: profile đã bị client khác sửa.
-        raise HTTPException(status_code=409, detail=str(e)) from e
-    if not updated:
-        # Profile biến mất giữa get và update (bị xóa bởi phiên khác).
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    return updated
-
-
-@app.post("/api/profiles/{profile_id}/reset-fingerprint", response_model=Profile)
-async def reset_fingerprint_endpoint(profile_id: str, target_os: Optional[str] = None):
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-
-    os_to_use = target_os or p.fingerprint.os
-    timezone = p.fingerprint.timezone
-    locale = p.fingerprint.locale
-    lat = p.fingerprint.latitude
-    lon = p.fingerprint.longitude
-
-    # Nếu profile có proxy, kiểm tra xem có cần update geo/locale không
-    if p.proxy and p.proxy.enabled and p.proxy.host and p.proxy.port:
-        geo = await asyncio.to_thread(check_proxy, p.proxy, 4)
-        if geo.get("success"):
-            timezone = geo.get("timezone", timezone)
-            locale = locale_for_country(geo.get("country_code"), default=locale)
-            lat = geo.get("lat", lat)
-            lon = geo.get("lon", lon)
-
-    from antidetect.fingerprint import get_location_coordinates
-    auto_lat, auto_lon, _ = get_location_coordinates("hanoi", randomize=True)
-    new_fp = generate_fingerprint(
-        target_os=os_to_use,
-        timezone=timezone,
-        locale=locale,
-        latitude=lat if lat is not None else auto_lat,
-        longitude=lon if lon is not None else auto_lon,
-        browser_brand=detect_browser_brand(getattr(launcher, "browser_path", None)),
-    )
-    # Reset rotates identity values, not the user's algorithm/security policy.
-    # Migration is an explicit edit and still uses the existing revision CAS.
-    new_fp.fingerprint_algorithm_version = p.fingerprint.fingerprint_algorithm_version
-    new_fp.verification_mode = p.fingerprint.verification_mode
-    new_fp.stealth_disable = list(p.fingerprint.stealth_disable)
-    new_fp.webrtc_mode = p.fingerprint.webrtc_mode
-    p.fingerprint = new_fp
-    try:
-        updated = profile_manager.update_fingerprint_only(p.id, p.fingerprint, p.revision)
-    except ProfileRevisionConflict as exc:
-        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc)}) from exc
-    if not updated:
-        # Profile bị xóa bởi phiên khác giữa get và update.
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    return updated
-
-
-@app.get("/api/fingerprint/options")
-async def get_fingerprint_options():
-    from antidetect.fingerprint import (
-        GPU_PROFILES,
-        SCREEN_RESOLUTIONS,
-        HARDWARE_PRESETS,
-        POPULAR_LOCATIONS,
-        get_host_device_memory,
-        get_host_screen_info,
-        get_installed_chrome_version,
-        host_os,
-    )
-    ver_info = get_installed_chrome_version()
-    browser_ver = ver_info[1] if ver_info else "155.0.8059.85"
-    host_width, host_height, host_scale = get_host_screen_info()
-    common_timezones = [
-        "Asia/Ho_Chi_Minh",
-        "America/New_York",
-        "America/Los_Angeles",
-        "America/Chicago",
-        "Europe/London",
-        "Europe/Paris",
-        "Europe/Berlin",
-        "Asia/Tokyo",
-        "Asia/Seoul",
-        "Asia/Singapore",
-        "Asia/Bangkok",
-        "Australia/Sydney"
-    ]
-    return {
-        "gpu_profiles": GPU_PROFILES,
-        "screen_resolutions": SCREEN_RESOLUTIONS,
-        "hardware_presets": HARDWARE_PRESETS,
-        "timezones": common_timezones,
-        "locations": POPULAR_LOCATIONS,
-        "browser_version": browser_ver,
-        "host": {
-            "os": host_os(),
-            "screen_width": host_width,
-            "screen_height": host_height,
-            "device_pixel_ratio": round(max(0.5, host_scale), 2),
-            "device_memory": get_host_device_memory(),
-        },
-    }
-
-
-@app.post("/api/profiles/{profile_id}/set-location", response_model=Profile)
-async def set_profile_location(profile_id: str, req: SwitchLocationRequest):
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    from antidetect.fingerprint import get_location_coordinates
-    if req.latitude is not None and req.longitude is not None:
-        if not (-90.0 <= req.latitude <= 90.0 and -180.0 <= req.longitude <= 180.0):
-            raise HTTPException(status_code=400, detail="Tọa độ không hợp lệ: -90 <= lat <= 90, -180 <= lon <= 180")
-        lat = req.latitude
-        lon = req.longitude
-        tz = req.timezone or p.fingerprint.timezone
-    else:
-        lat, lon, tz = get_location_coordinates(req.city, randomize=True)
-        if req.timezone:
-            tz = req.timezone
-
-    if not validate_iana_timezone(tz):
-        raise HTTPException(status_code=400, detail=f"Múi giờ IANA '{tz}' không hợp lệ")
-
-    p.fingerprint.latitude = lat
-    p.fingerprint.longitude = lon
-    p.fingerprint.timezone = tz
-    try:
-        updated = profile_manager.patch_fingerprint(
-            p.id, {"latitude": lat, "longitude": lon, "timezone": tz},
-            expected_revision=p.revision,
-        )
-    except ProfileRevisionConflict as exc:
-        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc)}) from exc
-    if not updated:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    return updated
 
 
 def _scheduler_start_all(profile_ids=None):
@@ -1476,145 +722,6 @@ def _scheduler_sync_fanpages_deep(profile_ids=None):
     return {"job_id": job.get("id"), "deduplicated": deduplicated}
 
 
-@app.post("/api/profiles/{profile_id}/sync-location-proxy")
-async def sync_location_from_proxy(profile_id: str):
-    """Giai đoạn 1 anti-detection: đồng bộ timezone/geo/locale theo IP proxy.
-
-    Đổi proxy sau khi tạo profile là lỗi nhất quán phổ biến nhất (IP Mỹ +
-    timezone Hà Nội → detector flag ngay). Endpoint này hỏi GeoIP QUA proxy
-    của profile và cập nhật fingerprint cho khớp; trả về từng thay đổi để
-    UI/automation hiển thị.
-    """
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    if not (p.proxy and p.proxy.enabled and p.proxy.host):
-        raise HTTPException(status_code=400, detail="Profile chưa bật proxy — không có IP để đồng bộ.")
-
-    geo = await asyncio.to_thread(check_proxy, p.proxy, 12)
-    if not geo.get("success"):
-        raise HTTPException(status_code=502, detail=f"Không truy vấn được GeoIP qua proxy: {geo.get('error') or 'lỗi không xác định'}")
-
-    try:
-        changes = await asyncio.to_thread(_commit_geo_result, p, geo)
-    except ProfileRevisionConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": exc.code, "message": str(exc), "current_revision": exc.current_revision,
-        }) from exc
-    if not profile_manager.get_profile(profile_id):
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    return {
-        "success": True,
-        "geo": {"ip": geo.get("ip"), "country": geo.get("country"),
-                "city": geo.get("city"), "isp": geo.get("isp")},
-        "changes": changes,
-        "message": "Fingerprint đã khớp IP proxy." if changes
-                   else "Fingerprint đã khớp sẵn với IP proxy — không cần thay đổi.",
-    }
-
-
-@app.post("/api/profiles/switch-location-all")
-async def switch_all_profiles_location(req: SwitchLocationRequest):
-    """P1-03: Chuyển đổi vị trí toàn bộ profiles, kiểm tra 0 profiles, validate ZoneInfo."""
-    from antidetect.fingerprint import get_location_coordinates
-
-    custom_coords = req.latitude is not None and req.longitude is not None
-    if custom_coords:
-        if not (-90.0 <= req.latitude <= 90.0 and -180.0 <= req.longitude <= 180.0):
-            raise HTTPException(status_code=400, detail="Tọa độ không hợp lệ: -90 <= lat <= 90, -180 <= lon <= 180")
-
-    if req.timezone and not validate_iana_timezone(req.timezone):
-        raise HTTPException(status_code=400, detail=f"Múi giờ IANA '{req.timezone}' không hợp lệ")
-
-    def run_switch():
-        # Chạy trong thread: list + update từng profile + is_running đều là
-        # I/O/PowerShell đồng bộ. Batch ghi profiles.json đúng MỘT lần thay vì
-        # N lần read+backup+write như từng update_profile riêng lẻ.
-        profiles = profile_manager.list_profiles()
-        if not profiles:
-            return None, []
-        updates = []
-        for p in profiles:
-            if custom_coords:
-                lat = req.latitude
-                lon = req.longitude
-                tz = req.timezone or p.fingerprint.timezone
-            else:
-                lat, lon, tz = get_location_coordinates(req.city, randomize=True)
-                if req.timezone:
-                    tz = req.timezone
-            if not validate_iana_timezone(tz):
-                raise ValueError(f"Múi giờ IANA '{tz}' không hợp lệ")
-            p.fingerprint.latitude = lat
-            p.fingerprint.longitude = lon
-            p.fingerprint.timezone = tz
-            updates.append((p, lat, lon, tz))
-
-        updated_ids = set(
-            profile_manager.patch_fingerprints_batch(
-                {p.id: {"latitude": lat, "longitude": lon, "timezone": tz}
-                 for p, lat, lon, tz in updates},
-                {p.id: p.revision for p, _, _, _ in updates},
-            )
-        )
-        results = []
-        for p, lat, lon, tz in updates:
-            results.append({
-                "id": p.id,
-                "name": p.name,
-                "city": req.city,
-                "latitude": lat,
-                "longitude": lon,
-                "timezone": tz,
-                "running": launcher.is_running(p.id),
-                "updated": p.id in updated_ids,
-            })
-        return results, [p.id for p, _, _, _ in updates if p.id not in updated_ids]
-
-    try:
-        results, failed_ids = await asyncio.to_thread(run_switch)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if results is None:
-        raise HTTPException(status_code=404, detail="Không có profile nào để chuyển đổi vị trí")
-
-    ok_count = len([r for r in results if r["updated"]])
-    message = (
-        f"Đã chuyển vị trí {ok_count} profile sang {req.city.upper()} thành công!"
-        if not failed_ids
-        else f"Đã chuyển {ok_count}/{len(results)} profile; {len(failed_ids)} profile không ghi được (đã bị thay đổi bởi phiên khác)."
-    )
-    return {
-        "success": not failed_ids,
-        "message": message,
-        "count": ok_count,
-        "failed_profile_ids": failed_ids,
-        "profiles": results
-    }
-
-
-@app.get("/api/system/logs")
-async def get_system_logs(lines: int = 200):
-    """Đuôi app.log để xem nhật ký hệ thống ngay trên dashboard (read-only)."""
-    lines = max(10, min(1000, int(lines or 200)))
-
-    def read_tail():
-        log_file = os.path.join(DATA_DIR, "app.log")
-        if not os.path.exists(log_file):
-            return []
-        size = os.path.getsize(log_file)
-        with open(log_file, "rb") as f:
-            f.seek(max(0, size - 256 * 1024))  # đọc tối đa 256KB cuối
-            data = f.read().decode("utf-8", "replace")
-        return data.splitlines()[-lines:]
-
-    try:
-        tail = await asyncio.to_thread(read_tail)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Không đọc được app.log: {e}")
-    return {"success": True, "lines": tail, "count": len(tail)}
-
-
 _token_rotate_lock = threading.Lock()
 _token_rotate_times: list = []
 
@@ -1665,22 +772,6 @@ def _mutate_api_token(request: Request, *, revoke: bool):
         ) from None
 
 
-@app.post("/api/auth/token/rotate")
-async def rotate_api_token(request: Request):
-    """Create a persistent API token, returning plaintext only after persistence."""
-    if not authorized(request):
-        raise HTTPException(status_code=401, detail="Chưa xác thực")
-    return await asyncio.to_thread(_mutate_api_token, request, revoke=False)
-
-
-@app.delete("/api/auth/token")
-async def revoke_api_token(request: Request):
-    """Revoke the persistent API token; report storage failures accurately."""
-    if not authorized(request):
-        raise HTTPException(status_code=401, detail="Chưa xác thực")
-    return await asyncio.to_thread(_mutate_api_token, request, revoke=True)
-
-
 # --- Đợt C: Lịch tự động ---
 
 SCHEDULES_CORRUPT_DETAIL = (
@@ -1714,250 +805,6 @@ def _schedule_history_with_jobs(limit=20):
         for event in pending:
             event["job_status"] = "unavailable"
     return events
-
-
-@app.get("/api/schedules")
-async def list_schedules():
-    if _schedule_store is None:
-        raise HTTPException(status_code=503, detail="Scheduler chưa khởi động")
-    try:
-        rules = _schedule_store.list()
-    except ScheduleStoreCorruption as e:
-        raise HTTPException(status_code=503, detail=SCHEDULES_CORRUPT_DETAIL) from e
-    recent_runs = await asyncio.to_thread(_schedule_history_with_jobs, 20)
-    return {"success": True, "rules": rules,
-            "last_tick": (_scheduler.last_run_info.get("last_tick") if _scheduler else None),
-            "recent_runs": recent_runs}
-
-
-@app.post("/api/schedules")
-async def create_schedule(req: ScheduleCreateRequest):
-    if _schedule_store is None:
-        raise HTTPException(status_code=503, detail="Scheduler chưa khởi động")
-    try:
-        rule = _schedule_store.add(req.name, req.time, req.action,
-                                   req.profile_ids, req.enabled)
-    except ScheduleStoreCorruption as e:
-        raise HTTPException(status_code=503, detail=SCHEDULES_CORRUPT_DETAIL) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    return {"success": True, "rule": rule}
-
-
-@app.put("/api/schedules/{rule_id}")
-async def update_schedule(rule_id: str, req: ScheduleUpdateRequest):
-    if _schedule_store is None:
-        raise HTTPException(status_code=503, detail="Scheduler chưa khởi động")
-    try:
-        rule = _schedule_store.update(rule_id, **req.model_dump(exclude_unset=True))
-    except ScheduleStoreCorruption as e:
-        raise HTTPException(status_code=503, detail=SCHEDULES_CORRUPT_DETAIL) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if rule is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy lịch")
-    return {"success": True, "rule": rule}
-
-
-@app.delete("/api/schedules/{rule_id}")
-async def delete_schedule(rule_id: str):
-    if _schedule_store is None:
-        raise HTTPException(status_code=503, detail="Scheduler chưa khởi động")
-    try:
-        deleted = _schedule_store.delete(rule_id)
-    except ScheduleStoreCorruption as e:
-        raise HTTPException(status_code=503, detail=SCHEDULES_CORRUPT_DETAIL) from e
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Không tìm thấy lịch")
-    return {"success": True}
-
-
-@app.get("/api/system/current-ip")
-async def get_current_network_ip():
-    """Return the host's public IP/ISP using HTTPS-only GeoIP services."""
-    from antidetect.proxy import get_public_ip_info
-
-    try:
-        data = await asyncio.to_thread(get_public_ip_info, None, 6)
-        if data.get("success"):
-            return data
-        return {"success": False, "error": data.get("error", "GeoIP lookup failed")}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-@app.post("/api/system/shutdown")
-async def shutdown_system():
-    server = getattr(app.state, 'server', None)
-    if server is None:
-        raise HTTPException(status_code=409, detail='Hãy dừng máy chủ qua terminal đã khởi chạy nó.')
-    launcher.begin_shutdown()
-    if _scheduler is not None:
-        _scheduler.stop()
-    with _start_all_lock:
-        if _start_all_cancel_event is not None:
-            _start_all_cancel_event.set()
-    with _fanpage_service_lock:
-        services = list(_fanpage_service_cache.values())
-    for service in services:
-        try:
-            await asyncio.to_thread(service.jobs.shutdown, 30.0)
-        except Exception as exc:
-            log.warning("Fanpage cleanup failed: %s", type(exc).__name__)
-    result = await asyncio.to_thread(launcher.stop_owned)
-    if not result['success']:
-        raise HTTPException(status_code=409, detail='Còn profile chưa đóng. Máy chủ được giữ lại để bạn thử lại.')
-    asyncio.get_running_loop().call_later(0.5, setattr, server, 'should_exit', True)
-    return {"success": True, "message": "Hệ thống đang tắt. Bạn có thể đóng tab này an toàn."}
-
-
-@app.delete("/api/profiles/{profile_id}")
-async def delete_profile(profile_id: str):
-    from antidetect.profile_lifecycle import stop_and_delete
-
-    try:
-        result = await asyncio.to_thread(stop_and_delete, profile_manager, launcher, profile_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if not result.get("success"):
-        raise HTTPException(
-            status_code=404 if result.get("code") == "PROFILE_NOT_FOUND" else 409,
-            detail=result.get("error") or result.get("message"),
-        )
-    return {"success": True, "message": "Đã xóa profile thành công"}
-
-
-@app.post("/api/profiles/{profile_id}/duplicate", response_model=Profile)
-async def duplicate_profile(
-    profile_id: str,
-    request: Request,
-    response: Response,
-    copy_data: bool = False,
-):
-    header_key = request.headers.get("idempotency-key")
-    operation_id = header_key or new_operation_id()
-    if header_key:
-        try:
-            validate_idempotency_key(header_key)
-        except ProfileCopyError as e:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "code": e.code,
-                    "detail": str(e),
-                },
-            )
-    response.headers["X-Operation-Id"] = operation_id
-
-    def _duplicate():
-        return profile_manager.duplicate_profile(
-            profile_id,
-            copy_data=copy_data,
-            operation_id=operation_id,
-            source_running=launcher.profile_data_in_use,
-        )
-
-    try:
-        result = await asyncio.to_thread(_duplicate)
-    except ProfileCopyError as e:
-        if e.code in ("SOURCE_RUNNING", "PROFILE_BUSY", "COPY_OPERATION_CONFLICT"):
-            status_code = 409
-        elif e.code == "COPY_NO_SPACE":
-            status_code = 507
-        elif e.code == "INVALID_IDEMPOTENCY_KEY":
-            status_code = 400
-        else:
-            status_code = 500
-        return JSONResponse(
-            status_code=status_code,
-            content={
-                "success": False,
-                "code": e.code,
-                "detail": str(e),
-            },
-            headers={"X-Operation-Id": operation_id},
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except RuntimeError as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "code": "COPY_FAILED",
-                "detail": str(e),
-            },
-            headers={"X-Operation-Id": operation_id},
-        )
-    if not result:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "success": False,
-                "code": "NOT_FOUND",
-                "detail": "Profile không tồn tại",
-            },
-            headers={"X-Operation-Id": operation_id},
-        )
-    return result
-
-
-@app.get("/api/profiles/{profile_id}/cookies/export")
-async def export_profile_cookies(profile_id: str, request: Request):
-    """Đọc cookies của profile đang chạy mà không ghi bản sao vào đĩa/cache."""
-    if request.headers.get('x-confirm-cookie-access') != 'yes':
-        raise HTTPException(status_code=403, detail='Cần xác nhận trước khi đọc cookie phiên đăng nhập.')
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    if not launcher.is_running(profile_id):
-        raise HTTPException(status_code=409, detail="Hãy mở profile trước khi đọc cookies.")
-    try:
-        cookies = await asyncio.to_thread(launcher.export_cookies, profile_id)
-    except CdpUnavailable as e:
-        return _cdp_conflict_response(e)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
-    return JSONResponse(
-        content={"success": True, "profile_id": profile_id, "cookies": cookies, "count": len(cookies)},
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
-    )
-
-
-@app.post("/api/profiles/{profile_id}/cookies/import")
-async def import_profile_cookies(profile_id: str, req: ImportCookiesRequest):
-    """Nạp cookies vào profile đang chạy, không lưu bản sao JSON trên đĩa."""
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    if not isinstance(req.cookies, list):
-        raise HTTPException(status_code=400, detail="Định dạng cookies không hợp lệ, yêu cầu một mảng JSON các cookie.")
-    if not launcher.is_running(profile_id):
-        raise HTTPException(status_code=409, detail="Hãy mở profile trước khi nạp cookies.")
-
-    def _import():
-        # Đổi danh tính Facebook không được chạy chồng với lượt quét fanpage.
-        with profile_manager.scan_lock(profile_id, timeout=0.0):
-            return launcher.import_cookies(profile_id, req.cookies)
-
-    try:
-        success = await asyncio.to_thread(_import)
-    except ProfileLockTimeout:
-        raise HTTPException(
-            status_code=409,
-            detail="Đang có lượt quét fanpage cho profile này. Hãy chờ lượt đó xong.",
-        )
-    except CdpUnavailable as e:
-        return _cdp_conflict_response(e)
-    if not success:
-        raise HTTPException(status_code=503, detail="Không thể nạp cookies vào profile đang chạy.")
-    return {
-        "success": True,
-        "profile_id": profile_id,
-        "count": len(req.cookies),
-        "message": f"Đã nạp {len(req.cookies)} cookies thành công!"
-    }
 
 
 def _scan_fields(scan: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2080,346 +927,6 @@ def _run_facebook_scan(
         }
 
 
-@app.get("/api/profiles/{profile_id}/facebook/pages")
-async def get_facebook_pages(
-    profile_id: str, refresh: bool = False, deep: bool = False, force: bool = False
-):
-    """Liệt kê fanpage Facebook profile này sở hữu/quản lý.
-
-    ``refresh=1`` (hoặc khi profile đang chạy mà chưa có cache) đọc trực tiếp
-    từ phiên Chrome đang chạy. Discovery trả hợp đồng F4: ``discovery_status``
-    (complete/partial/failed), ``completion_reason``, ``observed_count``,
-    ``retained_count`` — tổng cache không bị báo nhầm là tổng vừa đọc.
-
-    ``deep=1`` (kèm refresh) quét thêm TỪNG page: ngày tạo (trang about),
-    khoảng thời gian bài gần nhất (feed) → trạng thái active/long_absent/
-    uncertain/unknown và "sẵn sàng" (tuổi ≥ 30 ngày). Mỗi page tốn ~4-8s khi
-    deep — với 20 page mất ~2-3 phút.
-
-    Response cache trả ``login_status="unknown"`` (không khẳng định phiên còn
-    đăng nhập); ``logged_in`` chỉ true/false khi vừa kiểm tra live. ``stale``
-    phản ánh tuổi dữ liệu/độ đầy đủ của lần quét tương ứng, không luôn false.
-    Cache không bao giờ bị xóa bởi refresh thông thường; dùng DELETE để xóa.
-    """
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    running = await asyncio.to_thread(launcher.is_running, profile_id)
-    now = datetime.datetime.now(datetime.timezone.utc)
-    display_tz = _profile_display_timezone(p)
-    stale_after_hours = _fanpage_stale_after_hours()
-
-    if refresh or (running and not p.facebook_pages):
-        if not running:
-            raise HTTPException(
-                status_code=409,
-                detail="Hãy mở profile trước khi làm mới danh sách fanpage.",
-            )
-        try:
-            result = await asyncio.to_thread(
-                _run_facebook_scan,
-                profile_id,
-                bool(deep),
-                bool(force),
-                stale_after_hours,
-            )
-        except ProfileLockTimeout as e:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "detail": (
-                        "Đang có lượt quét fanpage khác cho profile này. "
-                        "Hãy chờ lượt đó xong rồi thử lại."
-                    )
-                },
-            )
-        except ScanAborted as e:
-            return JSONResponse(
-                status_code=409,
-                content={"detail": str(e), "code": "SCAN_ABORTED"},
-            )
-        except CdpUnavailable as e:
-            return _cdp_conflict_response(e)
-        except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=str(e)) from e
-        if result is None:
-            raise HTTPException(status_code=404, detail="Profile không tồn tại")
-        return result
-
-    # Cache: chưa kiểm tra phiên đăng nhập nên không khẳng định logged_in.
-    enriched = _enrich_facebook_pages(
-        p.facebook_pages,
-        now=now,
-        timezone=display_tz,
-        stale_after_hours=stale_after_hours,
-    )
-    meta = profile_manager.get_facebook_scan_meta(profile_id)
-    last_scan = meta.get("last_scan") if isinstance(meta.get("last_scan"), dict) else {}
-    scan: Dict[str, Any] = dict(scan_defaults(len(enriched)))
-    scan.update({k: v for k, v in last_scan.items() if v is not None})
-    # Cache không xác nhận phiên đăng nhập hiện tại.
-    scan["login_status"] = "unknown"
-    scan["identity_status"] = (
-        meta.get("identity_status") or scan.get("identity_status") or "unknown"
-    )
-    stale = _fanpage_stale(
-        scan, enriched, p.facebook_pages_synced_at, now, stale_after_hours
-    )
-    return {
-        "success": True,
-        "logged_in": None,
-        "login_status": "unknown",
-        "pages": enriched,
-        "source": "cache",
-        "stale": stale,
-        "synced_at": p.facebook_pages_synced_at,
-        **_scan_fields(scan),
-        "detail": scan_detail(scan, len(enriched)),
-    }
-
-
-@app.delete("/api/profiles/{profile_id}/facebook/pages")
-async def delete_facebook_pages(profile_id: str):
-    """Xóa cache fanpage theo hành động rõ ràng (không tự xóa khi refresh)."""
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-
-    def _clear():
-        with profile_manager.scan_lock(profile_id, timeout=0.0):
-            return profile_manager.clear_facebook_pages(profile_id)
-
-    try:
-        updated = await asyncio.to_thread(_clear)
-    except ProfileLockTimeout:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "detail": (
-                    "Đang có lượt quét fanpage cho profile này. "
-                    "Hãy chờ lượt đó xong rồi xóa cache."
-                )
-            },
-        )
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    return {
-        "success": True,
-        "pages": [],
-        "synced_at": updated.facebook_pages_synced_at,
-        "detail": "Đã xóa cache fanpage của profile.",
-    }
-
-
-@app.post("/api/profiles/import")
-async def import_profiles(req: ImportProfilesRequest):
-    """Import metadata only; executable selection and proxy secrets stay local."""
-    entries = req.profiles or []
-    if not entries:
-        raise HTTPException(status_code=400, detail="Không có profile nào trong payload (profiles: []).")
-    if len(entries) > 200:
-        raise HTTPException(status_code=400, detail="Tối đa 200 profile mỗi lần import.")
-
-    imported, failed = [], []
-    for i, entry in enumerate(entries):
-        raw_name = entry.get("name") if isinstance(entry, dict) else None
-        name = raw_name if isinstance(raw_name, str) else f"Imported {i + 1}"
-        try:
-            candidate = prepare_import_profile(entry, i, _sanitize_facebook_pages)
-            new_p = await asyncio.to_thread(
-                profile_manager.commit_staged_profile, candidate,
-            )
-            imported.append({"id": new_p.id, "name": new_p.name})
-        except ValueError as exc:
-            failed.append({"index": i, "name": name, "code": "INVALID_PROFILE_IMPORT", "reason": str(exc)})
-        except Exception as exc:  # noqa: BLE001 - per-item import
-            failed.append({"index": i, "name": name, "code": "PROFILE_IMPORT_FAILED",
-                           "reason": f"Không lưu được profile ({type(exc).__name__})."})
-    return {
-        "success": len(failed) == 0,
-        "imported_count": len(imported),
-        "failed_count": len(failed),
-        "imported": imported,
-        "failed": failed,
-    }
-
-
-@app.post("/api/profiles/bulk-create")
-async def bulk_create_profiles(req: BulkCreateRequest):
-    """Tạo hàng loạt profile cùng cấu hình, fingerprint RIÊNG từng profile.
-
-    Proxy: mỗi dòng 'protocol://user:pass@host:port' gán cho 1 profile theo
-    thứ tự; thiếu proxy cho profile nào thì profile đó direct + warning
-    (KHÔNG tuần hoàn cùng proxy cho nhiều profile — chống liên kết).
-    """
-    from antidetect.fingerprint import get_location_coordinates, host_os
-    from antidetect.proxy import parse_proxy_line
-
-    req.os = (req.os or "windows").lower()
-    if req.os not in ("windows", "macos", "linux"):
-        req.os = "windows"
-    req.stealth_mode = (req.stealth_mode or "unique").lower()
-    if req.stealth_mode not in ("unique", "authentic"):
-        req.stealth_mode = "unique"
-    if req.stealth_mode == "authentic" and req.os != host_os():
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Stealth authentic chỉ hỗ trợ profile cùng hệ điều hành với "
-                f"máy host ({host_os()}). Dùng unique cho profile {req.os}."
-            ),
-        )
-    prefix = (req.name_prefix or "Profile").strip() or "Profile"
-
-    created, warnings = [], []
-    for i in range(req.count):
-        name = f"{prefix} {i + 1:02d}"
-        try:
-            lat, lon, tz = get_location_coordinates(req.city, randomize=True)
-            fp = generate_fingerprint(
-                target_os=req.os, timezone=tz, locale="vi-VN",
-                latitude=lat, longitude=lon, city=req.city,
-                browser_brand=detect_browser_brand(getattr(launcher, "browser_path", None)),
-            )
-            if req.cpu:
-                fp.hardware_concurrency = max(1, min(128, int(req.cpu)))
-            if req.stealth_mode == "authentic":
-                fp.stealth_disable = ["canvas", "webgl", "audio", "media", "worker"]
-                if req.os == host_os():
-                    vendor, renderer = _host_gpu_strings()
-                    fp.webgl_vendor, fp.webgl_renderer = vendor, renderer
-            proxy = None
-            if i < len(req.proxies):
-                try:
-                    proxy = parse_proxy_line(req.proxies[i])
-                except ValueError as exc:
-                    warnings.append(f"{name}: proxy dòng {i + 1} không hợp lệ; không tạo profile")
-                    continue
-            else:
-                warnings.append(f"{name}: không có proxy (direct)")
-            p = profile_manager.create_profile(
-                name=name, target_os=req.os, proxy=proxy, fingerprint=fp,
-            )
-            created.append({"id": p.id, "name": p.name})
-        except Exception as exc:  # noqa: BLE001 - per-item create
-            warnings.append(f"{name}: tạo lỗi {type(exc).__name__}: {exc}")
-    return {
-        "success": len(created) > 0,
-        "created_count": len(created),
-        "created": created,
-        "warnings": warnings,
-    }
-
-
-@app.post("/api/profiles/{profile_id}/start")
-async def start_profile(profile_id: str, url: Optional[str] = None, force: bool = False):
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    # M13: Validate URL scheme — chỉ cho phép http:// và https://
-    if url:
-        url = url.strip()
-        if not url.startswith(("http://", "https://")):
-            raise HTTPException(status_code=400, detail="URL không hợp lệ: chỉ chấp nhận http:// hoặc https://")
-
-    gate = None
-    gate_mode = _launch_gate_mode()
-    if gate_mode != "off":
-        try:
-            already_running = await asyncio.to_thread(launcher.is_running, profile_id)
-        except Exception:
-            already_running = False
-        # Opening a tab in a browser that is already running cannot change the
-        # fingerprint presented at spawn, so the gate only applies to a launch.
-        if not already_running:
-            profiles = await asyncio.to_thread(profile_manager.list_profiles)
-            browser_paths = await asyncio.to_thread(_resolve_browser_paths, profiles)
-            gate = await asyncio.to_thread(
-                _evaluate_launch_gate, p, profiles, browser_paths, gate_mode, force
-            )
-            if not gate.allowed:
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "success": False,
-                        "detail": gate.message,
-                        "gate": gate.as_dict(),
-                    },
-                )
-
-    res = await asyncio.to_thread(launcher.launch, profile_id, open_url=url)
-    if not res.get("success"):
-        code = res.get("code")
-        if code in _CDP_CONFLICT_CODES or res.get("recovery_required"):
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "success": False,
-                    "code": code,
-                    "detail": res.get("error", "Lỗi khởi chạy"),
-                    "cdp_health": res.get("cdp_health"),
-                },
-            )
-        raise HTTPException(status_code=500, detail=res.get("error", "Lỗi khởi chạy"))
-    if gate and gate.status in ("warning", "overridden", "unverified"):
-        res["gate"] = gate.as_dict()
-    return res
-
-
-@app.post("/api/profiles/{profile_id}/stop")
-async def stop_profile(profile_id: str):
-    p = profile_manager.get_profile(profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-    res = await asyncio.to_thread(launcher.stop, profile_id)
-    if not res.get("success"):
-        raise HTTPException(status_code=409, detail=res.get("error", "Không thể dừng profile"))
-    return res
-
-
-@app.post("/api/profiles/{profile_id}/stop/owned")
-async def stop_owned_profile(profile_id: str, expected_launch_id: str):
-    if not expected_launch_id.strip():
-        raise HTTPException(status_code=400, detail="Thiếu định danh phiên profile.")
-    res = await asyncio.to_thread(launcher.stop, profile_id, expected_launch_id=expected_launch_id)
-    if not res.get("success"):
-        raise HTTPException(status_code=409, detail=res.get("error", "Không thể dừng phiên profile."))
-    return res
-
-
-@app.post("/api/proxy/check")
-async def check_proxy_endpoint(req: CheckProxyRequest):
-    if req.profile_id and not req.password:
-        saved = profile_manager.get_profile(req.profile_id)
-        if saved and saved.proxy and saved.proxy.password:
-            same_endpoint = bool(
-                saved.proxy.identity_key()
-                == ProxyConfig(
-                    enabled=True,
-                    protocol=req.protocol,
-                    host=req.host,
-                    port=req.port,
-                    username=req.username,
-                ).identity_key()
-            )
-            if same_endpoint:
-                req.password = saved.proxy.password
-    cfg = ProxyConfig(
-        enabled=True,
-        protocol=req.protocol,
-        host=req.host,
-        port=req.port,
-        username=req.username,
-        password=req.password
-    )
-    return await asyncio.to_thread(check_proxy, cfg)
-
-
-@app.get("/api/fingerprint/random")
-async def random_fingerprint_endpoint(target_os: str = "windows"):
-    return generate_fingerprint(target_os=target_os)
-
-
 # --- Fanpage Manager (Giai đoạn 1) ---
 
 _fanpage_service_cache: Dict[str, FanpageService] = {}
@@ -2471,479 +978,92 @@ def get_fanpage_service() -> FanpageService:
         return svc
 
 
-@app.get("/fanpages", response_class=HTMLResponse)
-async def fanpages_page(request: Request):
-    if not authorized(request):
-        return templates.TemplateResponse(
-            request=request, name="unlock.html", context={}
-        )
-    return templates.TemplateResponse(
-        request=request, name="fanpages.html", context={}
-    )
+from web.routers import system, profile_runtime, profiles, facebook, schedules, fanpages  # noqa: E402
+for _r in (system, profile_runtime, profiles, facebook, schedules, fanpages):
+    app.include_router(_r.router)
 
+# Re-export router endpoints for callers that import them from web.app.
+from web.routers.system import (  # noqa: E402,F401
+    health,
+    system_metrics,
+    unlock,
+    login,
+    create_unlock_code_endpoint,
+    home_page,
+    get_launch_gate_settings,
+    update_launch_gate_settings,
+    get_fingerprint_options,
+    get_system_logs,
+    rotate_api_token,
+    revoke_api_token,
+    get_current_network_ip,
+    shutdown_system,
+    check_proxy_endpoint,
+    random_fingerprint_endpoint,
+)
 
-@app.get("/api/fanpages/summary")
-async def get_fanpages_summary(
-    include_archived: bool = False,
-    profile_id: Optional[str] = None,
-    tag: Optional[str] = None,
-):
-    svc = get_fanpage_service()
-    summary = await asyncio.to_thread(
-        svc.get_summary,
-        include_archived=include_archived,
-        profile_id=profile_id,
-        tag=tag,
-    )
-    return {"success": True, **summary}
+from web.routers.profile_runtime import (  # noqa: E402,F401
+    start_all_profiles,
+    get_start_all_status,
+    cancel_start_all,
+    stop_all_profiles,
+    start_profile,
+    stop_profile,
+    stop_owned_profile,
+)
 
+from web.routers.profiles import (  # noqa: E402,F401
+    list_profiles,
+    create_profile,
+    export_profiles,
+    audit_profiles_endpoint,
+    fix_profiles_endpoint,
+    get_profile,
+    update_profile_endpoint,
+    reset_fingerprint_endpoint,
+    set_profile_location,
+    sync_location_from_proxy,
+    switch_all_profiles_location,
+    delete_profile,
+    duplicate_profile,
+    export_profile_cookies,
+    import_profile_cookies,
+    import_profiles,
+    bulk_create_profiles,
+)
 
-@app.get("/api/fanpages/export")
-async def export_fanpages_csv(
-    q: Optional[str] = None,
-    profile_id: Optional[str] = None,
-    tag: Optional[str] = None,
-    activity_status: Optional[str] = None,
-    connection_status: Optional[str] = None,
-    data_quality: Optional[str] = None,
-    age_ready: Optional[str] = None,
-    archived: str = "active",
-    sort_by: str = "page_name",
-    sort_dir: str = "asc",
-):
-    svc = get_fanpage_service()
-    csv_data = await asyncio.to_thread(
-        svc.export_csv,
-        q=q or "",
-        profile_id=profile_id or "",
-        tag=tag or "",
-        activity_status=activity_status or "",
-        connection_status=connection_status or "",
-        data_quality=data_quality or "",
-        age_ready=age_ready,
-        archived=archived,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
-    )
-    csv_bytes = (
-        csv_data.encode("utf-8") if isinstance(csv_data, str) else csv_data
-    )
-    return Response(
-        content=csv_bytes,
-        media_type="text/csv; charset=utf-8",
-        headers={
-            "Content-Disposition": 'attachment; filename="fanpages_export.csv"',
-            "Cache-Control": "no-store",
-        },
-    )
+from web.routers.facebook import (  # noqa: E402,F401
+    get_facebook_pages,
+    delete_facebook_pages,
+)
 
+from web.routers.schedules import (  # noqa: E402,F401
+    list_schedules,
+    create_schedule,
+    update_schedule,
+    delete_schedule,
+)
 
-@app.post("/api/fanpages/bulk")
-async def bulk_update_fanpages(req: FanpageBulkUpdateRequest):
-    if not req.page_ids:
-        raise HTTPException(
-            status_code=400, detail="Danh sách fanpage được chọn trống."
-        )
-    svc = get_fanpage_service()
-    result = await asyncio.to_thread(
-        svc.bulk_update,
-        page_ids=req.page_ids,
-        add_tags=req.add_tags,
-        remove_tags=req.remove_tags,
-        is_archived=req.is_archived,
-    )
-    return {"success": True, **result}
-
-
-@app.post("/api/fanpages/backup")
-async def create_fanpages_backup_endpoint(max_backups: int = 10):
-    svc = get_fanpage_service()
-    info = await asyncio.to_thread(svc.create_backup, max_backups=max_backups)
-    return {"success": True, "backup": info}
-
-
-@app.get("/api/fanpages/backups")
-async def list_fanpages_backups_endpoint():
-    svc = get_fanpage_service()
-    backups = await asyncio.to_thread(svc.list_backups)
-    return {"success": True, "backups": backups, "items": backups}
-
-
-@app.post("/api/fanpages/prune")
-async def prune_fanpages_data_endpoint(req: Optional[FanpagePruneRequest] = None):
-    req = req or FanpagePruneRequest()
-    svc = get_fanpage_service()
-    stats = await asyncio.to_thread(
-        svc.prune_old_data,
-        metric_retention_days=req.metric_retention_days,
-        job_retention_days=req.job_retention_days,
-    )
-    return {"success": True, **stats}
-
-
-@app.get("/api/fanpages")
-async def list_fanpages_endpoint(
-    q: Optional[str] = None,
-    profile_id: Optional[str] = None,
-    tag: Optional[str] = None,
-    activity_status: Optional[str] = None,
-    connection_status: Optional[str] = None,
-    data_quality: Optional[str] = None,
-    age_ready: Optional[str] = None,
-    archived: str = "active",
-    sort_by: str = "page_name",
-    sort_dir: str = "asc",
-    page: int = 1,
-    page_size: int = 50,
-):
-    svc = get_fanpage_service()
-    result = await asyncio.to_thread(
-        svc.list_pages,
-        q=q or "",
-        profile_id=profile_id or "",
-        tag=tag or "",
-        activity_status=activity_status or "",
-        connection_status=connection_status or "",
-        data_quality=data_quality or "",
-        age_ready=age_ready,
-        archived=archived,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
-        page=page,
-        page_size=page_size,
-    )
-    return {"success": True, **result}
-
-
-@app.get("/api/fanpages/{page_id}")
-async def get_fanpage_detail_endpoint(page_id: str):
-    svc = get_fanpage_service()
-    detail = await asyncio.to_thread(svc.get_page, page_id)
-    if detail is None:
-        raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
-    return {"success": True, "page": detail}
-
-
-@app.get("/api/fanpages/{page_id}/metrics")
-async def get_fanpage_metrics_endpoint(page_id: str, days: int = 28):
-    svc = get_fanpage_service()
-    series = await asyncio.to_thread(svc.get_page_metrics, page_id, days=days)
-    if series is None:
-        raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
-    return {"success": True, **series}
-
-
-@app.post("/api/fanpages/{page_id}/merge")
-async def merge_fanpage_endpoint(page_id: str, req: FanpageMergeRequest):
-    svc = get_fanpage_service()
-    try:
-        merged = await asyncio.to_thread(
-            svc.merge_pages, page_id, req.source_page_id
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if merged is None:
-        raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
-    return {"success": True, "page": merged}
-
-
-@app.patch("/api/fanpages/{page_id}")
-async def update_fanpage_endpoint(page_id: str, req: FanpageUpdateRequest):
-    svc = get_fanpage_service()
-    try:
-        updated = await asyncio.to_thread(
-            svc.update_page,
-            page_id,
-            tags=req.tags,
-            note=req.note,
-            preferred_profile_id=req.preferred_profile_id,
-            is_archived=req.is_archived,
-            expected_revision=req.expected_revision,
-        )
-    except FanpageRevisionConflictError as exc:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "success": False,
-                "code": "REVISION_CONFLICT",
-                "detail": str(exc),
-                "current_revision": exc.current_revision,
-            },
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
-    return {"success": True, "page": updated}
-
-
-@app.post("/api/fanpages/{page_id}/open")
-async def open_fanpage_in_profile(
-    page_id: str, req: Optional[FanpageOpenRequest] = None
-):
-    req = req or FanpageOpenRequest()
-    svc = get_fanpage_service()
-    detail = await asyncio.to_thread(svc.get_page, page_id)
-    if detail is None:
-        raise HTTPException(status_code=404, detail="Fanpage không tồn tại")
-
-    linked_profiles = [
-        lk
-        for lk in (detail.get("linked_profiles") or [])
-        if lk.get("link_status") != "profile_deleted"
-        and not lk.get("profile_missing")
-    ]
-    linked_ids = {lk["profile_id"] for lk in linked_profiles}
-
-    target_profile_id = (req.profile_id or "").strip() or None
-    if target_profile_id:
-        if target_profile_id not in linked_ids:
-            raise HTTPException(
-                status_code=400,
-                detail="Profile được chọn không liên kết với fanpage này.",
-            )
-    else:
-        preferred = detail.get("preferred_profile_id")
-        if preferred and preferred in linked_ids:
-            target_profile_id = preferred
-        elif linked_profiles:
-            active_links = [
-                lk
-                for lk in linked_profiles
-                if lk.get("link_status") == "active"
-            ]
-            target_profile_id = (
-                active_links[0]["profile_id"]
-                if active_links
-                else linked_profiles[0]["profile_id"]
-            )
-
-    if not target_profile_id:
-        raise HTTPException(
-            status_code=409,
-            detail="Fanpage không còn profile khả dụng để mở.",
-        )
-
-    p = profile_manager.get_profile(target_profile_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="Profile không tồn tại")
-
-    base_url = str(detail.get("canonical_url") or "").strip()
-    if not base_url.startswith(("http://", "https://")):
-        raise HTTPException(
-            status_code=400,
-            detail="Fanpage chưa có URL hợp lệ (http/https) để mở.",
-        )
-
-    target_kind = (req.target or "page").strip().lower()
-    if target_kind == "transparency":
-        if "profile.php?id=" in base_url:
-            open_url = f"{base_url}&sk=about_profile_transparency"
-        else:
-            open_url = f"{base_url.rstrip('/')}/about_profile_transparency"
-    else:
-        open_url = base_url
-
-    gate = None
-    gate_mode = _launch_gate_mode()
-    if gate_mode != "off":
-        try:
-            already_running = await asyncio.to_thread(
-                launcher.is_running, target_profile_id
-            )
-        except Exception:
-            already_running = False
-        if not already_running:
-            profiles = await asyncio.to_thread(profile_manager.list_profiles)
-            browser_paths = await asyncio.to_thread(
-                _resolve_browser_paths, profiles
-            )
-            gate = await asyncio.to_thread(
-                _evaluate_launch_gate,
-                p,
-                profiles,
-                browser_paths,
-                gate_mode,
-                bool(req.force),
-            )
-            if not gate.allowed:
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "success": False,
-                        "detail": gate.message,
-                        "gate": gate.as_dict(),
-                    },
-                )
-
-    res = await asyncio.to_thread(
-        launcher.launch, target_profile_id, open_url=open_url
-    )
-    if not res.get("success"):
-        code = res.get("code")
-        if code in _CDP_CONFLICT_CODES or res.get("recovery_required"):
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "success": False,
-                    "code": code,
-                    "detail": res.get("error", "Lỗi khởi chạy"),
-                    "cdp_health": res.get("cdp_health"),
-                },
-            )
-        raise HTTPException(
-            status_code=500, detail=res.get("error", "Lỗi khởi chạy")
-        )
-    if gate and gate.status in ("warning", "overridden", "unverified"):
-        res["gate"] = gate.as_dict()
-    return {
-        **res,
-        "page_id": page_id,
-        "profile_id": target_profile_id,
-        "profile_name": p.name,
-        "opened_url": open_url,
-    }
-
-
-# --- Fanpage Sync Jobs (Giai đoạn 2) ---
-
-
-@app.post("/api/fanpage-sync/jobs", status_code=202)
-async def create_fanpage_sync_job_endpoint(req: FanpageSyncJobCreateRequest):
-    svc = get_fanpage_service()
-    try:
-        job, deduplicated = await asyncio.to_thread(
-            svc.enqueue_sync_job,
-            mode=req.mode,
-            profile_ids=req.profile_ids,
-            page_ids=req.page_ids,
-            auto_start=req.auto_start,
-            only_running=req.only_running,
-            force_new=req.force_new,
-            triggered_by="user",
-            run_async=True,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        if "FANPAGE_JOB_BUSY" in str(exc) or "đang dừng" in str(exc):
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        raise
-    return JSONResponse(
-        status_code=202,
-        content={
-            "success": True,
-            "deduplicated": deduplicated,
-            "job": job,
-        },
-    )
-
-
-@app.get("/api/fanpage-sync/jobs")
-async def list_fanpage_sync_jobs_endpoint(limit: int = 20):
-    svc = get_fanpage_service()
-    jobs = await asyncio.to_thread(svc.list_sync_jobs, limit=limit)
-    active = await asyncio.to_thread(svc.repo.find_active_sync_job)
-    return {
-        "success": True,
-        "active_job": active,
-        "jobs": jobs,
-    }
-
-
-@app.get("/api/fanpage-sync/jobs/{job_id}")
-async def get_fanpage_sync_job_endpoint(job_id: str):
-    svc = get_fanpage_service()
-    job = await asyncio.to_thread(svc.get_sync_job, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job đồng bộ không tồn tại.")
-    return {"success": True, "job": job}
-
-
-@app.post("/api/fanpage-sync/jobs/{job_id}/cancel")
-async def cancel_fanpage_sync_job_endpoint(job_id: str):
-    svc = get_fanpage_service()
-    job = await asyncio.to_thread(svc.cancel_sync_job, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job đồng bộ không tồn tại.")
-    return {"success": True, "job": job}
-
-
-@app.post("/api/fanpage-sync/jobs/{job_id}/retry", status_code=202)
-async def retry_fanpage_sync_job_endpoint(
-    job_id: str, req: Optional[FanpageSyncJobRetryRequest] = None
-):
-    req = req or FanpageSyncJobRetryRequest()
-    svc = get_fanpage_service()
-    try:
-        job, deduplicated = await asyncio.to_thread(
-            svc.retry_sync_job,
-            job_id,
-            auto_start=req.auto_start,
-            run_async=True,
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Job đồng bộ không tồn tại.") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return JSONResponse(
-        status_code=202,
-        content={
-            "success": True,
-            "deduplicated": deduplicated,
-            "job": job,
-        },
-    )
-
-
-# --- Fanpage Alerts & Operational Health (Giai đoạn 3) ---
-
-
-@app.get("/api/fanpage-alerts")
-async def list_fanpage_alerts_endpoint(
-    status: str = "active",
-    severity: str = "",
-    alert_type: str = "",
-    limit: int = 100,
-):
-    svc = get_fanpage_service()
-    data = await asyncio.to_thread(
-        svc.list_alerts,
-        status=status,
-        severity=severity,
-        alert_type=alert_type,
-        limit=limit,
-    )
-    return {"success": True, **data}
-
-
-@app.post("/api/fanpage-alerts/acknowledge-all")
-async def acknowledge_all_fanpage_alerts_endpoint():
-    svc = get_fanpage_service()
-    count = await asyncio.to_thread(svc.acknowledge_all_alerts)
-    return {"success": True, "acknowledged_count": count}
-
-
-@app.patch("/api/fanpage-alerts/{alert_id}")
-async def update_fanpage_alert_endpoint(
-    alert_id: int, req: FanpageAlertUpdateRequest
-):
-    svc = get_fanpage_service()
-    try:
-        alert = await asyncio.to_thread(
-            svc.update_alert,
-            alert_id,
-            action=req.action,
-            snooze_hours=req.snooze_hours,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if alert is None:
-        raise HTTPException(status_code=404, detail="Cảnh báo không tồn tại.")
-    return {"success": True, "alert": alert}
-
-
-
+from web.routers.fanpages import (  # noqa: E402,F401
+    fanpages_page,
+    get_fanpages_summary,
+    export_fanpages_csv,
+    bulk_update_fanpages,
+    create_fanpages_backup_endpoint,
+    list_fanpages_backups_endpoint,
+    prune_fanpages_data_endpoint,
+    list_fanpages_endpoint,
+    get_fanpage_detail_endpoint,
+    get_fanpage_metrics_endpoint,
+    merge_fanpage_endpoint,
+    update_fanpage_endpoint,
+    open_fanpage_in_profile,
+    create_fanpage_sync_job_endpoint,
+    list_fanpage_sync_jobs_endpoint,
+    get_fanpage_sync_job_endpoint,
+    cancel_fanpage_sync_job_endpoint,
+    retry_fanpage_sync_job_endpoint,
+    list_fanpage_alerts_endpoint,
+    acknowledge_all_fanpage_alerts_endpoint,
+    update_fanpage_alert_endpoint,
+)
